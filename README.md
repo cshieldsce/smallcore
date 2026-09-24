@@ -1,6 +1,6 @@
 # core
 
-A mini PIO-style CPU simulator: a 16-bit ISA with `SET` / `SHIFT_OUT` / `PULL` / `JMP` and per-instruction delays, driving one output pin from either the instruction or an 8-bit shift register. The shift register is filled by `PULL` from a TX FIFO fed from outside the core, so one program can transmit any data. `PULL` blocks while the FIFO is empty, and `JMP` (absolute 8-bit address, labels resolved by the assembler) lets a program loop back to its `PULL` and stream bytes for as long as the FIFO is fed.
+A mini PIO-style CPU simulator: a 16-bit ISA with `SET` / `SHIFT_OUT` / `PULL` / `JMP` and per-instruction delays, driving four output pins `gpio[3:0]`. `SET pin, value` drives one pin and leaves the others alone; `SHIFT_OUT` always drives `gpio[0]` from an 8-bit shift register. The shift register is filled by `PULL` from a TX FIFO fed from outside the core, so one program can transmit any data. `PULL` blocks while the FIFO is empty, and `JMP` (absolute 8-bit address, labels resolved by the assembler) lets a program loop back to its `PULL` and stream bytes for as long as the FIFO is fed.
 
 ```
 isa.yaml      instruction set: encoding, opcodes, operand ranges
@@ -17,7 +17,7 @@ build/        generated: test waveforms, caches (safe to delete)
 ```
 python -m pip install -r requirements.txt
 python -m pytest -v              # run tests, writes build/waves/<test bench>/<test>.svg
-python sim/cpu.py                # run programs/uart_tx_0x55.asm, print listing + trace
+python sim/cpu.py                # run programs/uart_tx_0x55.asm, print listing + one trace per gpio pin
 python sim/cpu.py programs/uart_tx_pull.asm 0xA3    # send a byte from the TX FIFO via PULL + SHIFT_OUT
 python sim/cpu.py programs/uart_tx_loop.asm 0x55 0xA3   # stream bytes: PULL / frame / JMP loop until the FIFO is empty
 python tools/render_docs.py      # re-render docs/*.svg (needs mermaid-cli)

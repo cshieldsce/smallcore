@@ -1,6 +1,6 @@
 # Mini ISA.
 #
-# One output pin, one 8-bit shift register fed from a TX FIFO,
+# Four output pins gpio[3:0], one 8-bit shift register fed from a TX FIFO,
 # 16-bit instructions:
 #
 #   15 14 13 | 12 11 10 9 8 | 7 6 5 4 3 2 1 0
@@ -8,10 +8,14 @@
 #
 # Every instruction can take an optional delay, written `[n]` after its
 # operands, which holds for n extra cycles before the next instruction runs.
-# E.g. `SET 1 [7]` takes 8 cycles. The
+# E.g. `SET 0, 1 [7]` takes 8 cycles.
+#
+# An instruction's operands each live in their own bits of the operand field
+# (`lsb` counts from operand bit 0). Operand bits no operand uses must be 0.
 #
 
 word_bits: 16
+gpio_out: 4
 
 fields:
   opcode:  {lsb: 13, bits: 3}
@@ -21,17 +25,18 @@ fields:
 instructions:
   SET:
     opcode: 0b000
-    description: Drive the output pin to `value`.
+    description: Drive gpio[pin] to `value`. The other pins are unchanged.
     cycles: 1 + delay
     operands:
-      - {name: value, min: 0, max: 1}
+      - {name: pin,   lsb: 4, bits: 2}
+      - {name: value, lsb: 0, bits: 1}
 
   SHIFT_OUT:
     opcode: 0b001
     description: >
-      On the first cycle, drive the pin to shift_reg[0] and then shift the
-      register right by one (zero fill). Hold the pin for `delay` extra cycles.
-      Eight SHIFT_OUTs after a PULL send the byte LSB first.
+      On the first cycle, drive gpio[0] to shift_reg[0] and then shift the
+      register right by one (zero fill). Hold for `delay` extra cycles. Other
+      pins are unchanged. Eight SHIFT_OUTs after a PULL send the byte LSB first.
     cycles: 1 + delay
     operands: []
 
@@ -39,7 +44,7 @@ instructions:
     opcode: 0b010
     description: >
       Move the next byte out of the TX FIFO into the 8-bit shift register.
-      The pin is unchanged. If the FIFO is empty, block (see above): the
+      The pins are unchanged. If the FIFO is empty, block (see above): the
       delay starts counting only once the byte has been pulled.
     cycles: 1 + delay
     operands: []
@@ -48,8 +53,8 @@ instructions:
     opcode: 0b011
     description: >
       Continue at program address `target` instead of the next instruction.
-      The pin and shift register are unchanged. The jump takes effect after
+      The pins and shift register are unchanged. The jump takes effect after
       the delay, like PC + 1 does for every other instruction.
     cycles: 1 + delay
     operands:
-      - {name: target, min: 0, max: 255}
+      - {name: target, lsb: 0, bits: 8}
