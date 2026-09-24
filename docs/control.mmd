@@ -10,6 +10,7 @@ flowchart LR
   DLY(["delay"]):::sig
   PCV(["pc"]):::sig
   EMP(["fifo_empty"]):::sig
+  SIDE(["side = operand[7]"]):::sig
 
   CU["<b>control</b><br/><br/>cycles = 1 + delay<br/>halted = pc == N<br/>issue = !halted & counter == 0<br/>stall = issue & PULL & fifo_empty<br/>last = issue ? delay == 0 : counter == 1<br/><br/><b>counter</b> reg, 5 bits, rst → 0<br/>issue & !stall → delay<br/>counter > 0 → counter − 1"]:::comb
 
@@ -17,16 +18,15 @@ flowchart LR
   PCJ(["pc_jmp = JMP"]):::sig
   PLE(["pull_en = issue & PULL & !fifo_empty"]):::sig
   SHE(["shift_en = issue & SHIFT_OUT"]):::sig
-  PNE(["gpio_en = issue & (SET | SHIFT_OUT)"]):::sig
-  PNS(["gpio_sel = SHIFT_OUT"]):::sig
+  PNE(["gpio_en = issue & (SET | SHIFT_OUT & side)"]):::sig
 
   OPC --> CU
   DLY --> CU
   PCV --> CU
   EMP --> CU
+  SIDE --> CU
   CU --> PCI
   CU --> PCJ
   CU --> PLE
   CU --> SHE
   CU --> PNE
-  CU --> PNS

@@ -16,7 +16,7 @@ flowchart LR
     SR["Shift register (8-bit)"]:::core
     PIN["gpio[3:0]<br/>four output pins"]:::core
     IMEM --> EXEC
-    EXEC -->|"SET pin, value:<br/>one pin at a time"| PIN
+    EXEC -->|"SET pin, value,<br/>or a SHIFT_OUT side effect:<br/>one pin at a time"| PIN
     FIFO -->|"PULL: next byte"| SR
     SR -->|"SHIFT_OUT: bit 0 to gpio 0,<br/>then shift right"| PIN
   end
