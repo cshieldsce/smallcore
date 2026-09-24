@@ -20,6 +20,7 @@ python -m pytest -v              # run tests, writes build/waves/<test bench>/<t
 python sim/cpu.py                # run programs/uart_tx_0x55.asm, print listing + one trace per gpio pin
 python sim/cpu.py programs/uart_tx_pull.asm 0xA3    # send a byte from the TX FIFO via PULL + SHIFT_OUT
 python sim/cpu.py programs/uart_tx_loop.asm 0x55 0xA3   # stream bytes: PULL / frame / JMP loop until the FIFO is empty
+python sim/cpu.py programs/spi_tx.asm 0xA3          # SPI mode 0 TX experiment: MOSI on gpio 0, SCLK on gpio 1, CS on gpio 2
 python tools/render_docs.py      # re-render docs/*.svg (needs mermaid-cli)
 ```
 
