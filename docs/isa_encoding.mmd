@@ -3,9 +3,9 @@ block-beta
   b15["15"] b14["14"] b13["13"] b12["12"] b11["11"] b10["10"] b9["9"] b8["8"]
   b7["7"] b6["6"] b5["5"] b4["4"] b3["3"] b2["2"] b1["1"] b0["0"]
   opcode["opcode (3)"]:3 delay["delay (5)<br/>0–31 extra cycles"]:5 operand["operand (8)"]:8
-  set["000 = SET"]:3 setd["d"]:5 setop["0000 000v<br/>v = pin level"]:8
-  shift["001 = SHIFT_OUT"]:3 shiftd["d"]:5 shiftop["ignored"]:8
-  pull["010 = PULL"]:3 pulld["d"]:5 pullop["ignored"]:8
+  set["000 = SET"]:3 setd["d"]:5 setop["00pp 000v<br/>p = pin 0–3, v = level"]:8
+  shift["001 = SHIFT_OUT"]:3 shiftd["d"]:5 shiftop["0"]:8
+  pull["010 = PULL"]:3 pulld["d"]:5 pullop["0"]:8
   jmp["011 = JMP"]:3 jmpd["d"]:5 jmpop["target<br/>program address 0–255"]:8
 
   classDef hdr fill:#eee,stroke:#999,color:#555

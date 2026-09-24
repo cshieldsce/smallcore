@@ -1,4 +1,4 @@
-%% High-level view: what goes in, what comes out, and how a byte reaches the pin.
+%% High-level view: what goes in, what comes out, and how a byte reaches the pins.
 flowchart LR
   classDef ext fill:#f0f0f0,stroke:#888
   classDef core fill:#dbe8ff,stroke:#4a6fa5
@@ -14,12 +14,12 @@ flowchart LR
     EXEC["Execute<br/>one instruction at a time,<br/>each holds for 1 + delay cycles<br/>(JMP loops the program)"]:::core
     FIFO["TX FIFO<br/>(PULL waits here<br/>while it is empty)"]:::core
     SR["Shift register (8-bit)"]:::core
-    PIN["pin"]:::core
+    PIN["gpio[3:0]<br/>four output pins"]:::core
     IMEM --> EXEC
-    EXEC -->|"SET: 0 / 1"| PIN
+    EXEC -->|"SET pin, value:<br/>one pin at a time"| PIN
     FIFO -->|"PULL: next byte"| SR
-    SR -->|"SHIFT_OUT: bit 0,<br/>then shift right"| PIN
+    SR -->|"SHIFT_OUT: bit 0 to gpio 0,<br/>then shift right"| PIN
   end
 
-  PIN --> LINE(["TX line<br/>(UART frame at 8 cycles per bit)"]):::out
+  PIN --> LINE(["output lines<br/>UART: TX on gpio 0<br/>SPI: MOSI, SCLK, CS on gpio 0, 1, 2"]):::out
   style core fill:#f6f8fb,stroke:#9aa7b8

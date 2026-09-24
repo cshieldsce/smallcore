@@ -30,7 +30,7 @@ From the big picture down to what the Verilog will look like:
 
 | diagram | shows |
 |---|---|
-| `docs/overview.svg` | the big picture: program and bytes go in, a UART frame comes out, and how a byte reaches the pin |
+| `docs/overview.svg` | the big picture: program and bytes go in, UART or SPI comes out on the gpio pins, and how a byte reaches them |
 | `docs/isa_encoding.svg` | the 16-bit instruction word: opcode / delay / operand fields for each instruction |
 | `docs/isa_execute.svg` | what each instruction does and how many cycles it takes, including the PULL stall |
 | `docs/core.svg` | datapath at register level: every register with its reset value and enables, named as in the Verilog |

@@ -1,11 +1,11 @@
 flowchart LR
   W["16-bit word<br/>at PC"] --> OP{"opcode<br/>[15:13]"}
-  OP -->|000| SET["<b>SET v [d]</b><br/>pin ← v<br/>takes 1 + d cycles"]
-  OP -->|001| SHIFT["<b>SHIFT_OUT [d]</b><br/>pin ← shift_reg[0]<br/>shift_reg ← shift_reg >> 1<br/>(same edge, then hold)<br/>takes 1 + d cycles"]
+  OP -->|000| SET["<b>SET p, v [d]</b><br/>gpio[p] ← v<br/>other pins unchanged<br/>takes 1 + d cycles"]
+  OP -->|001| SHIFT["<b>SHIFT_OUT [d]</b><br/>gpio[0] ← shift_reg[0]<br/>shift_reg ← shift_reg >> 1<br/>(same edge, then hold)<br/>takes 1 + d cycles"]
   OP -->|010| EMPTY{"TX FIFO<br/>empty?"}
-  EMPTY -->|"yes: stall<br/>pin unchanged"| EMPTY
-  EMPTY -->|no| PULL["<b>PULL [d]</b><br/>shift_reg ← FIFO head<br/>pin unchanged<br/>takes 1 + d cycles<br/>after the stall"]
-  OP -->|011| JMP["<b>JMP target [d]</b><br/>pin, shift_reg unchanged<br/>takes 1 + d cycles"]
+  EMPTY -->|"yes: stall<br/>pins unchanged"| EMPTY
+  EMPTY -->|no| PULL["<b>PULL [d]</b><br/>shift_reg ← FIFO head<br/>pins unchanged<br/>takes 1 + d cycles<br/>after the stall"]
+  OP -->|011| JMP["<b>JMP target [d]</b><br/>pins, shift_reg unchanged<br/>takes 1 + d cycles"]
   SET --> NEXT["PC ← PC + 1"]
   SHIFT --> NEXT
   PULL --> NEXT
@@ -13,4 +13,4 @@ flowchart LR
   NEXT --> END{"PC past last<br/>instruction?"}
   JNEXT --> END
   END -->|no| W
-  END -->|yes| HALT(["halt<br/>pin keeps its level"])
+  END -->|yes| HALT(["halt<br/>pins keep their levels"])

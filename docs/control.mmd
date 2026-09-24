@@ -17,8 +17,8 @@ flowchart LR
   PCJ(["pc_jmp = JMP"]):::sig
   PLE(["pull_en = issue & PULL & !fifo_empty"]):::sig
   SHE(["shift_en = issue & SHIFT_OUT"]):::sig
-  PNE(["pin_en = issue & (SET | SHIFT_OUT)"]):::sig
-  PNS(["pin_sel = SHIFT_OUT"]):::sig
+  PNE(["gpio_en = issue & (SET | SHIFT_OUT)"]):::sig
+  PNS(["gpio_sel = SHIFT_OUT"]):::sig
 
   OPC --> CU
   DLY --> CU
