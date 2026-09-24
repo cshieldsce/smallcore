@@ -11,7 +11,7 @@ flowchart LR
   subgraph core["core"]
     direction LR
     IMEM["Program memory"]:::core
-    EXEC["Execute<br/>one instruction at a time,<br/>each holds for 1 + delay cycles"]:::core
+    EXEC["Execute<br/>one instruction at a time,<br/>each holds for 1 + delay cycles<br/>(JMP loops the program)"]:::core
     FIFO["TX FIFO<br/>(PULL waits here<br/>while it is empty)"]:::core
     SR["Shift register (8-bit)"]:::core
     PIN["pin"]:::core

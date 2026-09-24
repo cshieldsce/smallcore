@@ -13,7 +13,8 @@ flowchart LR
 
   CU["<b>control</b><br/><br/>cycles = 1 + delay<br/>halted = pc == N<br/>issue = !halted & counter == 0<br/>stall = issue & PULL & fifo_empty<br/>last = issue ? delay == 0 : counter == 1<br/><br/><b>counter</b> reg, 5 bits, rst → 0<br/>issue & !stall → delay<br/>counter > 0 → counter − 1"]:::comb
 
-  PCI(["pc_inc = last & !stall"]):::sig
+  PCI(["pc_en = last & !stall"]):::sig
+  PCJ(["pc_jmp = JMP"]):::sig
   PLE(["pull_en = issue & PULL & !fifo_empty"]):::sig
   SHE(["shift_en = issue & SHIFT_OUT"]):::sig
   PNE(["pin_en = issue & (SET | SHIFT_OUT)"]):::sig
@@ -24,6 +25,7 @@ flowchart LR
   PCV --> CU
   EMP --> CU
   CU --> PCI
+  CU --> PCJ
   CU --> PLE
   CU --> SHE
   CU --> PNE

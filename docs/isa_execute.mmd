@@ -5,9 +5,12 @@ flowchart LR
   OP -->|010| EMPTY{"TX FIFO<br/>empty?"}
   EMPTY -->|"yes: stall<br/>pin unchanged"| EMPTY
   EMPTY -->|no| PULL["<b>PULL [d]</b><br/>shift_reg ← FIFO head<br/>pin unchanged<br/>takes 1 + d cycles<br/>after the stall"]
+  OP -->|011| JMP["<b>JMP target [d]</b><br/>pin, shift_reg unchanged<br/>takes 1 + d cycles"]
   SET --> NEXT["PC ← PC + 1"]
   SHIFT --> NEXT
   PULL --> NEXT
+  JMP --> JNEXT["PC ← target"]
   NEXT --> END{"PC past last<br/>instruction?"}
+  JNEXT --> END
   END -->|no| W
   END -->|yes| HALT(["halt<br/>pin keeps its level"])

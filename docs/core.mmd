@@ -1,7 +1,7 @@
 %%{init: {"flowchart": {"wrappingWidth": 320}}}%%
 %% Datapath at Verilog level. Blue = register (one always @(posedge clk)), yellow = combinational.
 %% Only data wires are drawn. The enables named inside each register (pull_en, shift_en,
-%% pin_en, pin_sel, pc_inc) come from the control block, see control.svg.
+%% pin_en, pin_sel, pc_en, pc_jmp) come from the control block, see control.svg.
 flowchart LR
   classDef reg fill:#dbe8ff,stroke:#4a6fa5
   classDef comb fill:#fff4d6,stroke:#c49a2a
@@ -11,7 +11,7 @@ flowchart LR
 
   subgraph core["core"]
     direction LR
-    PC["<b>pc</b> reg<br/>rst → 0<br/>pc_inc → pc + 1"]:::reg
+    PC["<b>pc</b> reg, 8 bits<br/>rst → 0<br/>pc_en → pc_jmp ? operand : pc + 1"]:::reg
     IMEM["<b>imem</b> ROM<br/>N × 16 bits<br/>word = imem[pc]"]:::comb
     DEC["<b>decode</b><br/>opcode = word[15:13]<br/>delay = word[12:8]<br/>operand = word[7:0]"]:::comb
     FIFO["<b>tx_fifo</b><br/>8 bits × depth<br/>tx_push → append<br/>pull_en → drop head"]:::reg
@@ -21,6 +21,7 @@ flowchart LR
     PC -->|"pc"| IMEM
     IMEM -->|"word[15:0]"| DEC
     DEC -->|"operand[0]"| PIN
+    DEC -->|"operand[7:0]"| PC
     FIFO -->|"fifo_head[7:0]"| SR
     SR -->|"shift_reg[0]"| PIN
   end

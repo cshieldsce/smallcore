@@ -6,6 +6,7 @@ stateDiagram-v2
 
   Issue : Issue (counter == 0)
   Issue : run imem[pc], counter ← delay
+  Issue : last cycle: pc ← JMP ? target : pc + 1
 
   Hold : Hold (counter > 0)
   Hold : counter ← counter − 1
