@@ -1,0 +1,25 @@
+%% High-level view: what goes in, what comes out, and how a byte reaches the pin.
+flowchart LR
+  classDef ext fill:#f0f0f0,stroke:#888
+  classDef core fill:#dbe8ff,stroke:#4a6fa5
+  classDef out fill:#dff5e1,stroke:#3a8f4a
+
+  HOST["Host / test bench"]:::ext
+  HOST -->|"program (16-bit words)"| IMEM
+  HOST -->|"bytes to send"| FIFO
+
+  subgraph core["core"]
+    direction LR
+    IMEM["Program memory"]:::core
+    EXEC["Execute<br/>one instruction at a time,<br/>each holds for 1 + delay cycles"]:::core
+    FIFO["TX FIFO<br/>(PULL waits here<br/>while it is empty)"]:::core
+    SR["Shift register (8-bit)"]:::core
+    PIN["pin"]:::core
+    IMEM --> EXEC
+    EXEC -->|"SET: 0 / 1"| PIN
+    FIFO -->|"PULL: next byte"| SR
+    SR -->|"SHIFT_OUT: bit 0,<br/>then shift right"| PIN
+  end
+
+  PIN --> LINE(["TX line<br/>(UART frame at 8 cycles per bit)"]):::out
+  style core fill:#f6f8fb,stroke:#9aa7b8

@@ -1,0 +1,30 @@
+%%{init: {"flowchart": {"wrappingWidth": 420}}}%%
+%% The control block: what it reads, what it computes, what it drives. All combinational
+%% except the counter register. Signal names match core.svg.
+flowchart LR
+  classDef sig fill:#f0f0f0,stroke:#888
+  classDef reg fill:#dbe8ff,stroke:#4a6fa5
+  classDef comb fill:#fff4d6,stroke:#c49a2a
+
+  OPC(["opcode"]):::sig
+  DLY(["delay"]):::sig
+  PCV(["pc"]):::sig
+  EMP(["fifo_empty"]):::sig
+
+  CU["<b>control</b><br/><br/>cycles = 1 + delay<br/>halted = pc == N<br/>issue = !halted & counter == 0<br/>stall = issue & PULL & fifo_empty<br/>last = issue ? delay == 0 : counter == 1<br/><br/><b>counter</b> reg, 5 bits, rst → 0<br/>issue & !stall → delay<br/>counter > 0 → counter − 1"]:::comb
+
+  PCI(["pc_inc = last & !stall"]):::sig
+  PLE(["pull_en = issue & PULL & !fifo_empty"]):::sig
+  SHE(["shift_en = issue & SHIFT_OUT"]):::sig
+  PNE(["pin_en = issue & (SET | SHIFT_OUT)"]):::sig
+  PNS(["pin_sel = SHIFT_OUT"]):::sig
+
+  OPC --> CU
+  DLY --> CU
+  PCV --> CU
+  EMP --> CU
+  CU --> PCI
+  CU --> PLE
+  CU --> SHE
+  CU --> PNE
+  CU --> PNS

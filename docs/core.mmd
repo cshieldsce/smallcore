@@ -1,24 +1,31 @@
+%%{init: {"flowchart": {"wrappingWidth": 320}}}%%
+%% Datapath at Verilog level. Blue = register (one always @(posedge clk)), yellow = combinational.
+%% Only data wires are drawn. The enables named inside each register (pull_en, shift_en,
+%% pin_en, pin_sel, pc_inc) come from the control block, see control.svg.
 flowchart LR
-  CLK(["clk"])
+  classDef reg fill:#dbe8ff,stroke:#4a6fa5
+  classDef comb fill:#fff4d6,stroke:#c49a2a
+  classDef ext fill:#f0f0f0,stroke:#888
+
+  TXIN(["tx_data[7:0], tx_push"]):::ext
 
   subgraph core["core"]
     direction LR
-    PC["PC"] -->|addr| IMEM["Program memory<br/>N × 16-bit"]
-    IMEM -->|"word[15:0]"| DEC["Decoder"]
-    DEC -->|"operand[7:0]"| SR["Shift register<br/>8-bit<br/>LOAD: ← operand<br/>SHIFT_OUT: >>= 1 (zero fill)"]
-    DEC -->|"operand[0]"| MUX{"pin src"}
-    SR -->|"shift_reg[0]"| MUX
-    MUX --> PIN["Pin register<br/>1-bit"]
-    DEC -->|"opcode[15:14]"| CU["Control unit"]
-    DEC -->|"delay[13:9]<br/>operand[8:0]"| CNT["Cycle counter<br/>10-bit down counter<br/>loads WAIT: n + delay<br/>loads others: 1 + delay"]
-    CNT -->|"last cycle"| CU
-    CU -->|"pin_en, pin_sel"| MUX
-    CU -->|"load_en, shift_en"| SR
-    CU -->|"pc_inc"| PC
-    PC -->|"PC = length → halt"| CU
+    PC["<b>pc</b> reg<br/>rst → 0<br/>pc_inc → pc + 1"]:::reg
+    IMEM["<b>imem</b> ROM<br/>N × 16 bits<br/>word = imem[pc]"]:::comb
+    DEC["<b>decode</b><br/>opcode = word[15:13]<br/>delay = word[12:8]<br/>operand = word[7:0]"]:::comb
+    FIFO["<b>tx_fifo</b><br/>8 bits × depth<br/>tx_push → append<br/>pull_en → drop head"]:::reg
+    SR["<b>shift_reg</b> reg, 8 bits<br/>rst → 0<br/>pull_en → fifo_head<br/>shift_en → {1'b0, shift_reg[7:1]}"]:::reg
+    PIN["<b>pin</b> reg, 1 bit<br/>rst → 1<br/>pin_en → pin_sel ? shift_reg[0] : operand[0]"]:::reg
+
+    PC -->|"pc"| IMEM
+    IMEM -->|"word[15:0]"| DEC
+    DEC -->|"operand[0]"| PIN
+    FIFO -->|"fifo_head[7:0]"| SR
+    SR -->|"shift_reg[0]"| PIN
   end
 
-  CLK --> core
-  PIN --> OUT(["pin out"])
+  TXIN --> FIFO
+  PIN -->|"pin"| OUT(["pin out"]):::ext
 
   style core fill:#f6f8fb,stroke:#9aa7b8

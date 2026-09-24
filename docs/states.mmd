@@ -1,0 +1,24 @@
+%% What the control block does each cycle. Not a separate state register:
+%% each state is read off counter, pc and fifo_empty.
+stateDiagram-v2
+  direction LR
+  [*] --> Issue
+
+  Issue : Issue (counter == 0)
+  Issue : run imem[pc], counter ← delay
+
+  Hold : Hold (counter > 0)
+  Hold : counter ← counter − 1
+
+  Stall : Stall (PULL, FIFO empty)
+  Stall : everything holds
+
+  Halt : Halt (pc == N)
+  Halt : pin keeps its level
+
+  Issue --> Hold : delay > 0
+  Hold --> Issue : counter == 1
+  Issue --> Stall : FIFO empty
+  Stall --> Issue : byte arrived
+  Issue --> Halt : last instruction<br/>finished
+  Hold --> Halt : last instruction<br/>finished
