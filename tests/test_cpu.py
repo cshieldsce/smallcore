@@ -89,10 +89,58 @@ def test_run_reports_a_stalled_pull():
         CPU(assemble("PULL")).run(max_cycles=10)
 
 
+def test_jmp_loads_pc_and_touches_nothing_else():
+    cpu = CPU(assemble("PULL\nJMP 3\nSET 0\nSET 1"), pin=0, tx_data=[0xA5])
+    cpu.step()
+    cpu.step()  # JMP: one cycle, PC <- 3, pin and shift_reg unchanged
+    assert (cpu.pc, cpu.pin, cpu.shift_reg, cpu.cycle) == (3, 0, 0xA5, 2)
+    assert cpu.run() == [0, 0, 1]  # SET 0 at address 2 was skipped
+
+
+def test_jmp_delay_holds_before_the_jump():
+    cpu = CPU(assemble("SET 0\nJMP 3 [2]\nSET 1\nSET 1"))
+    cpu.step()
+    for _ in range(3):  # 1 + 2 cycles on the JMP, PC moves on the last one
+        assert cpu.pc == 1
+        cpu.step()
+    assert cpu.pc == 3
+    assert cpu.run() == [0, 0, 0, 0, 1]
+
+
+def test_jmp_past_the_end_halts():
+    cpu = CPU(assemble("SET 0\nJMP 7"))
+    assert cpu.run() == [0, 0]
+    assert cpu.halted
+
+
+def test_jmp_backwards_loops_forever():
+    cpu = CPU(assemble("loop: SET 0\nSET 1\nJMP loop"))
+    assert cpu.run_cycles(9) == [0, 1, 1, 0, 1, 1, 0, 1, 1]
+    assert not cpu.halted
+    with pytest.raises(RuntimeError, match="did not halt"):
+        cpu.run(max_cycles=100)
+
+
+def test_run_cycles_stops_early_at_halt():
+    cpu = CPU(assemble("SET 0\nSET 1"))
+    assert cpu.run_cycles(50) == [0, 1]
+    assert cpu.halted
+
+
+def test_loop_over_pull_drains_the_fifo_then_stalls():
+    cpu = CPU(assemble("loop: PULL\nJMP loop"), tx_data=[1, 2, 3])
+    seen = []
+    while not cpu.stalled:
+        cpu.step()
+        seen.append(cpu.shift_reg)
+    assert seen == [1, 1, 2, 2, 3, 3, 3]  # each byte is held across its JMP; the stall changes nothing
+    assert (cpu.pc, cpu.tx_fifo, cpu.halted) == (0, [], False)
+
+
 def test_decode_rejects_bad_words(isa):
     with pytest.raises(ValueError):
         decode(0x0002, isa)  # SET 2
     with pytest.raises(ValueError):
-        decode(0x6000, isa)  # opcode 0b011 unassigned
+        decode(0x8000, isa)  # opcode 0b100 unassigned
     with pytest.raises(ValueError):
         decode(0xE000, isa)  # opcode 0b111 unassigned

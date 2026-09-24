@@ -1,22 +1,26 @@
 """UART 8N1 protocol checks. These only look at the TX pin: the `tx` fixture
 is the single place that knows what drives it, and every check runs against
-every program (bit-banged SETs, and PULL + SHIFT_OUT with the byte supplied
-from outside the program)."""
+every program (bit-banged SETs, PULL + SHIFT_OUT with the byte supplied from
+outside the program, and the same looped with JMP to stream any number of
+bytes)."""
 
 from pathlib import Path
 
 import pytest
 
-from cpu import CPU, load_program
+from cpu import CPU, decode, load_program
 
 CYCLES_PER_BIT = 8
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
 BITBANG = PROGRAMS / "uart_tx_0x55.asm"
 PULL = PROGRAMS / "uart_tx_pull.asm"
+LOOP = PROGRAMS / "uart_tx_loop.asm"
 
 # (program, byte it must send, bytes put in the TX FIFO). The bit-banged
-# program has 0x55 baked in; the PULL program sends whatever it is given.
-CASES = [(BITBANG, 0x55, [])] + [(PULL, b, [b]) for b in (0x00, 0x55, 0xA3, 0xFF)]
+# program has 0x55 baked in; the PULL and LOOP programs send whatever they
+# are given.
+CASES = ([(BITBANG, 0x55, [])] + [(PULL, b, [b]) for b in (0x00, 0x55, 0xA3, 0xFF)]
+         + [(LOOP, b, [b]) for b in (0x00, 0xA3)])
 
 
 def expected_frame(byte):
@@ -25,13 +29,21 @@ def expected_frame(byte):
 
 
 def run(program, tx_data=()):
-    """Run a program: (pin trace, shift_reg after each cycle)."""
+    """Run a program until it halts, or stalls on PULL with nothing left to
+    send: (pin trace, shift_reg after each cycle)."""
     cpu = CPU(load_program(program), tx_data=tx_data)
     shift = []
-    while not cpu.halted:
+    while not cpu.halted and not cpu.stalled:
         cpu.step()
         shift.append(cpu.shift_reg)
     return cpu.trace, shift
+
+
+def decode_frame(trace, start):
+    """Sample mid-bit like a receiver would: (byte, cycle after the stop bit)."""
+    samples = [trace[start + i * CYCLES_PER_BIT + CYCLES_PER_BIT // 2] for i in range(10)]
+    assert samples[0] == 0 and samples[9] == 1, "framing"
+    return sum(bit << i for i, bit in enumerate(samples[1:9])), start + 10 * CYCLES_PER_BIT
 
 
 @pytest.fixture(params=CASES, ids=lambda c: f"{c[0].stem}-{c[1]:#04x}")
@@ -79,11 +91,8 @@ def test_line_idles_high_after_stop_bit(tx):
 
 
 def test_decodes_as_the_supplied_byte(tx):
-    """Sample mid-bit like a receiver would and reassemble the byte."""
     trace, start, byte = tx
-    samples = [trace[start + i * CYCLES_PER_BIT + CYCLES_PER_BIT // 2] for i in range(10)]
-    assert samples[0] == 0 and samples[9] == 1
-    assert sum(bit << i for i, bit in enumerate(samples[1:9])) == byte
+    assert decode_frame(trace, start)[0] == byte
 
 
 def test_shift_register_program_matches_bitbang_from_start_bit(wave):
@@ -98,6 +107,53 @@ def test_shift_register_program_matches_bitbang_from_start_bit(wave):
     frame = bitbang[bitbang.index(0):]
     assert shift_trace[shift_trace.index(0):] == frame
     assert shift_reg[-1] == 0, "all eight bits were shifted out"
+
+
+def test_loop_program_streams_every_fifo_byte_then_stalls_high(wave):
+    """The milestone: one program, two bytes in the FIFO, two frames on the
+    line that decode as those bytes, then the CPU stalls on PULL with TX high."""
+    tx_data = [0x55, 0xA3]
+    cpu = CPU(load_program(LOOP), tx_data=tx_data)
+    pcs = []
+    while not cpu.stalled:
+        cpu.step()
+        pcs.append(cpu.pc)
+    trace = cpu.trace
+    wave.add("pin", trace, group="out")
+    wave.add("pc", pcs)
+
+    # Walk the line like a receiver: each frame starts at the next falling edge.
+    decoded, end = [], 0
+    for _ in tx_data:
+        start = trace.index(0, end)
+        assert trace[end:start] == [1] * (start - end), "idle high between frames"
+        byte, end = decode_frame(trace, start)
+        decoded.append(byte)
+    assert decoded == tx_data
+
+    # Afterwards: stalled on the PULL, FIFO empty, line high and staying high.
+    assert cpu.stalled and not cpu.halted
+    assert decode(cpu.program[cpu.pc], cpu.isa).op == "PULL"
+    assert cpu.tx_fifo == []
+    assert cpu.pin == 1 and trace[end:] == [1] * (len(trace) - end)
+    cpu.run_cycles(50)
+    assert cpu.stalled and cpu.trace[end:] == [1] * (len(cpu.trace) - end)
+
+
+def test_loop_program_resumes_when_a_byte_arrives_later():
+    cpu = CPU(load_program(LOOP), tx_data=[0x0F])
+    while not cpu.stalled:
+        cpu.step()
+    cpu.run_cycles(20)  # idle high, still stalled
+    assert cpu.stalled and set(cpu.trace[-20:]) == {1}
+    cpu.tx_fifo.append(0xF0)  # the outside world feeds the FIFO
+    before = len(cpu.trace)
+    cpu.step()  # the PULL completes on this cycle
+    assert not cpu.stalled and cpu.shift_reg == 0xF0
+    while not cpu.stalled:
+        cpu.step()
+    frame = cpu.trace[before:]
+    assert decode_frame(frame, frame.index(0))[0] == 0xF0
 
 
 def test_pull_program_is_independent_of_its_data():

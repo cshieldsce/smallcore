@@ -8,20 +8,8 @@
 #
 # Every instruction can take an optional delay, written `[n]` after its
 # operands, which holds for n extra cycles before the next instruction runs.
-# E.g. `SET 1 [7]` takes 8 cycles. The delay is the only timing mechanism:
-# there is no WAIT, and every instruction takes exactly 1 + delay cycles.
+# E.g. `SET 1 [7]` takes 8 cycles. The
 #
-# Only SET uses the operand field today (one bit). The field stays 8 bits
-# wide so SET can grow to several pins for SPI / I2C.
-#
-# There is no HALT: running past the last instruction halts the CPU, and the
-# pin keeps its last level.
-#
-# The TX FIFO is filled from outside the core (in the simulator: CPU(program,
-# tx_data=[...])). PULL moves its next byte into the shift register, so the
-# program and the data it transmits are independent. PULL on an empty FIFO
-# blocks: the CPU stays on the PULL with the pin unchanged until a byte
-# arrives, then completes it on that cycle.
 
 word_bits: 16
 
@@ -55,3 +43,13 @@ instructions:
       delay starts counting only once the byte has been pulled.
     cycles: 1 + delay
     operands: []
+
+  JMP:
+    opcode: 0b011
+    description: >
+      Continue at program address `target` instead of the next instruction.
+      The pin and shift register are unchanged. The jump takes effect after
+      the delay, like PC + 1 does for every other instruction.
+    cycles: 1 + delay
+    operands:
+      - {name: target, min: 0, max: 255}

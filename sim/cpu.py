@@ -1,4 +1,4 @@
-"""Mini PIO-style CPU that runs 16-bit SET / SHIFT_OUT / PULL instructions one clock cycle at a time."""
+"""Mini PIO-style CPU that runs 16-bit SET / SHIFT_OUT / PULL / JMP instructions one clock cycle at a time."""
 
 import re
 import sys
@@ -10,8 +10,11 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 ISA_PATH = ROOT / "isa.yaml"
 
-# e.g. "SET 1 [7]", "SHIFT_OUT [7]", "set 0"
-LINE_RE = re.compile(r"^(?P<op>\w+)(?P<args>[^\[]*?)\s*(?:\[\s*(?P<delay>\w+)\s*\])?$")
+# e.g. "SET 1 [7]", "SHIFT_OUT [7]", "set 0", "loop:", "loop: PULL", "JMP loop"
+LINE_RE = re.compile(
+    r"^(?:(?P<label>[A-Za-z_]\w*):)?\s*"
+    r"(?:(?P<op>\w+)(?P<args>[^\[]*?)\s*(?:\[\s*(?P<delay>\w+)\s*\])?)?$"
+)
 
 
 class Instruction(NamedTuple):
@@ -83,9 +86,15 @@ def decode(word, isa):
 
 
 def assemble(source, isa=None):
-    """Turn assembly text into a list of instruction words."""
+    """Turn assembly text into a list of instruction words.
+
+    Labels (`loop:`, alone or before an instruction) name the address of the
+    next instruction and can stand in for any operand, e.g. `JMP loop`. They
+    are purely an assembler feature: the words only contain addresses.
+    """
     isa = isa or load_isa()
-    words = []
+    labels = {}
+    lines = []  # (lineno, op, args as written, delay) in address order
     for lineno, line in enumerate(source.splitlines(), start=1):
         line = line.split("#", 1)[0].strip()
         if not line:
@@ -93,12 +102,29 @@ def assemble(source, isa=None):
         m = LINE_RE.match(line)
         if not m:
             raise SyntaxError(f"line {lineno}: can't parse {line!r}")
-        op = m["op"].upper()
-        if op not in isa["instructions"]:
-            raise SyntaxError(f"line {lineno}: unknown instruction {op!r}")
+        if m["label"]:
+            if m["label"] in labels:
+                raise SyntaxError(f"line {lineno}: label {m['label']!r} defined twice")
+            labels[m["label"]] = len(lines)
+        if m["op"]:
+            op = m["op"].upper()
+            if op not in isa["instructions"]:
+                raise SyntaxError(f"line {lineno}: unknown instruction {op!r}")
+            lines.append((lineno, op, m["args"].replace(",", " ").split(), m["delay"]))
+
+    def operand(lineno, text):
+        if text in labels:
+            return labels[text]
         try:
-            args = tuple(int(a, 0) for a in m["args"].replace(",", " ").split())
-            delay = int(m["delay"], 0) if m["delay"] else 0
+            return int(text, 0)
+        except ValueError:
+            raise SyntaxError(f"line {lineno}: unknown label {text!r}") from None
+
+    words = []
+    for lineno, op, args, delay in lines:
+        try:
+            args = tuple(operand(lineno, a) for a in args)
+            delay = int(delay, 0) if delay else 0
             words.append(encode(Instruction(op, args, delay), isa))
         except ValueError as e:
             raise SyntaxError(f"line {lineno}: {e}") from None
@@ -132,8 +158,8 @@ class CPU:
         if self.halted:
             raise RuntimeError("CPU is halted")
 
+        instr = decode(self.program[self.pc], self.isa)  # imem[pc], visible every cycle
         if self.counter == 0:
-            instr = decode(self.program[self.pc], self.isa)
             if instr.op == "PULL" and not self.tx_fifo:
                 # Block: stay on this PULL, pin unchanged, until a byte arrives.
                 self.stalled = True
@@ -154,11 +180,20 @@ class CPU:
 
         self.counter -= 1
         if self.counter == 0:
-            self.pc += 1
+            # Last cycle of the instruction: JMP loads its target, everything else PC + 1.
+            self.pc = instr.args[0] if instr.op == "JMP" else self.pc + 1
             self.halted = self.pc >= len(self.program)
 
         self.trace.append(self.pin)
         self.cycle += 1
+
+    def run_cycles(self, n):
+        """Step n cycles (fewer if the CPU halts first). Returns the trace so far."""
+        for _ in range(n):
+            if self.halted:
+                break
+            self.step()
+        return self.trace
 
     def run(self, max_cycles=100_000):
         while not self.halted:
@@ -170,7 +205,7 @@ class CPU:
 
 
 if __name__ == "__main__":
-    # usage: cpu.py [program.asm [tx byte ...]]   e.g. cpu.py programs/uart_tx_pull.asm 0xA3
+    # usage: cpu.py [program.asm [tx byte ...]]   e.g. cpu.py programs/uart_tx_loop.asm 0x55 0xA3
     path = sys.argv[1] if len(sys.argv) > 1 else ROOT / "programs" / "uart_tx_0x55.asm"
     tx_data = [int(b, 0) for b in sys.argv[2:]]
     isa = load_isa()
@@ -179,6 +214,8 @@ if __name__ == "__main__":
         instr = decode(word, isa)
         args = " ".join(str(a) for a in instr.args)
         print(f"{addr:3}  {word:04x}  {instr.op} {args} [{instr.delay}]")
-    trace = CPU(program, tx_data=tx_data, isa=isa).run()
-    print(f"{len(trace)} cycles")
-    print("".join(str(level) for level in trace))
+    cpu = CPU(program, tx_data=tx_data, isa=isa)
+    while not cpu.halted and not cpu.stalled and cpu.cycle < 100_000:
+        cpu.step()
+    print(f"{cpu.cycle} cycles, {'stalled on PULL' if cpu.stalled else 'halted' if cpu.halted else 'still running'}")
+    print("".join(str(level) for level in cpu.trace))
