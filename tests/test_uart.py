@@ -1,7 +1,7 @@
 """UART 8N1 protocol checks. These only look at the TX pin: the `tx` fixture
 is the single place that knows what drives it, and every check runs against
-every program (bit-banged SETs, LOAD + SHIFT_OUT, and PULL + SHIFT_OUT with
-the byte supplied from outside the program)."""
+every program (bit-banged SETs, and PULL + SHIFT_OUT with the byte supplied
+from outside the program)."""
 
 from pathlib import Path
 
@@ -12,12 +12,11 @@ from cpu import CPU, load_program
 CYCLES_PER_BIT = 8
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
 BITBANG = PROGRAMS / "uart_tx_0x55.asm"
-SHIFT = PROGRAMS / "uart_tx_shift_0x55.asm"
 PULL = PROGRAMS / "uart_tx_pull.asm"
 
-# (program, byte it must send, bytes put in the TX FIFO). The first two
-# programs have 0x55 baked in; the PULL program sends whatever it is given.
-CASES = [(BITBANG, 0x55, []), (SHIFT, 0x55, [])] + [(PULL, b, [b]) for b in (0x00, 0x55, 0xA3, 0xFF)]
+# (program, byte it must send, bytes put in the TX FIFO). The bit-banged
+# program has 0x55 baked in; the PULL program sends whatever it is given.
+CASES = [(BITBANG, 0x55, [])] + [(PULL, b, [b]) for b in (0x00, 0x55, 0xA3, 0xFF)]
 
 
 def expected_frame(byte):
@@ -87,12 +86,11 @@ def test_decodes_as_the_supplied_byte(tx):
     assert sum(bit << i for i, bit in enumerate(samples[1:9])) == byte
 
 
-@pytest.mark.parametrize("program", [SHIFT, PULL], ids=lambda p: p.stem)
-def test_shift_register_programs_match_bitbang_from_start_bit(program, wave):
-    """8 SHIFT_OUTs after a LOAD or a PULL must put exactly the same levels on
-    the pin as the eight hand-written SETs, cycle for cycle from the start bit."""
+def test_shift_register_program_matches_bitbang_from_start_bit(wave):
+    """8 SHIFT_OUTs after a PULL must put exactly the same levels on the pin
+    as the eight hand-written SETs, cycle for cycle from the start bit."""
     bitbang, _ = run(BITBANG)
-    shift_trace, shift_reg = run(program, tx_data=[0x55])
+    shift_trace, shift_reg = run(PULL, tx_data=[0x55])
     wave.add("pin (shift)", shift_trace)
     wave.add("shift_reg", [f"{v:02x}" for v in shift_reg])
     wave.add("pin (bitbang)", bitbang)

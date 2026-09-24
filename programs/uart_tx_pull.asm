@@ -1,6 +1,6 @@
 # UART 8N1 transmit of one byte from the TX FIFO at 8 CPU cycles per bit.
 #
-# Same frame as uart_tx_shift_0x55.asm, but the data comes from outside the
+# Same frame as uart_tx_0x55.asm, but the data comes from outside the
 # program: PULL moves the next FIFO byte into the shift register, so this one
 # program sends whatever byte the FIFO holds (CPU(program, tx_data=[0xA3])).
 

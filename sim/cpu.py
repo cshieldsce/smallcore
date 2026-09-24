@@ -1,4 +1,4 @@
-"""Mini PIO-style CPU that runs 16-bit SET / WAIT / LOAD / SHIFT_OUT / PULL instructions one clock cycle at a time."""
+"""Mini PIO-style CPU that runs 16-bit SET / SHIFT_OUT / PULL instructions one clock cycle at a time."""
 
 import re
 import sys
@@ -10,7 +10,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 ISA_PATH = ROOT / "isa.yaml"
 
-# e.g. "SET 1 [7]", "WAIT 100", "set 0"
+# e.g. "SET 1 [7]", "SHIFT_OUT [7]", "set 0"
 LINE_RE = re.compile(r"^(?P<op>\w+)(?P<args>[^\[]*?)\s*(?:\[\s*(?P<delay>\w+)\s*\])?$")
 
 
@@ -110,8 +110,7 @@ def load_program(path, isa=None):
 
 
 def cycles(instr):
-    base = instr.args[0] if instr.op == "WAIT" else 1
-    return base + instr.delay
+    return 1 + instr.delay
 
 
 class CPU:
@@ -144,8 +143,6 @@ class CPU:
             self.stalled = False
             if instr.op == "SET":
                 self.pin = instr.args[0]
-            elif instr.op == "LOAD":
-                self.shift_reg = instr.args[0]
             elif instr.op == "SHIFT_OUT":
                 # Both happen on this one clock edge: the pin takes the old
                 # bit 0 and the register shifts. RTL must keep this order.

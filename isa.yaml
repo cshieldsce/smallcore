@@ -1,6 +1,6 @@
 # Mini ISA.
 #
-# One output pin, one 8-bit shift register fed by LOAD or by a TX FIFO,
+# One output pin, one 8-bit shift register fed from a TX FIFO,
 # 16-bit instructions:
 #
 #   15 14 13 | 12 11 10 9 8 | 7 6 5 4 3 2 1 0
@@ -8,7 +8,11 @@
 #
 # Every instruction can take an optional delay, written `[n]` after its
 # operands, which holds for n extra cycles before the next instruction runs.
-# E.g. `SET 1 [7]` takes 8 cycles.
+# E.g. `SET 1 [7]` takes 8 cycles. The delay is the only timing mechanism:
+# there is no WAIT, and every instruction takes exactly 1 + delay cycles.
+#
+# Only SET uses the operand field today (one bit). The field stays 8 bits
+# wide so SET can grow to several pins for SPI / I2C.
 #
 # There is no HALT: running past the last instruction halts the CPU, and the
 # pin keeps its last level.
@@ -34,31 +38,17 @@ instructions:
     operands:
       - {name: value, min: 0, max: 1}
 
-  WAIT:
-    opcode: 0b001
-    description: Hold the pin at its current level for `cycles` cycles.
-    cycles: operand + delay
-    operands:
-      - {name: cycles, min: 1, max: 255}
-
-  LOAD:
-    opcode: 0b010
-    description: Load `value` into the 8-bit shift register. The pin is unchanged.
-    cycles: 1 + delay
-    operands:
-      - {name: value, min: 0, max: 255}
-
   SHIFT_OUT:
-    opcode: 0b011
+    opcode: 0b001
     description: >
       On the first cycle, drive the pin to shift_reg[0] and then shift the
       register right by one (zero fill). Hold the pin for `delay` extra cycles.
-      Eight SHIFT_OUTs after a LOAD send the byte LSB first.
+      Eight SHIFT_OUTs after a PULL send the byte LSB first.
     cycles: 1 + delay
     operands: []
 
   PULL:
-    opcode: 0b100
+    opcode: 0b010
     description: >
       Move the next byte out of the TX FIFO into the 8-bit shift register.
       The pin is unchanged. If the FIFO is empty, block (see above): the
