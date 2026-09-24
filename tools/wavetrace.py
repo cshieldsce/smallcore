@@ -11,7 +11,7 @@ Record signals cycle by cycle, or add whole traces at once, then save an SVG:
     w.save("waves/uart.svg")          # also writes uart.json
 
 In pytest, use the `wave` fixture from tests/conftest.py instead; it saves to
-build/waves/<test name>.svg automatically, even when the test fails.
+build/waves/<test bench>/<test name>.svg automatically, even when the test fails.
 
 Values: 0/1 draw as a single wire, other ints and strings draw as a bus with
 the value written in each segment, None draws as unknown (x).

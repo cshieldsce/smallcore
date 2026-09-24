@@ -16,7 +16,7 @@ build/        generated: test waveforms, caches (safe to delete)
 
 ```
 python -m pip install -r requirements.txt
-python -m pytest -v              # run tests, writes build/waves/*.svg
+python -m pytest -v              # run tests, writes build/waves/<test bench>/<test>.svg
 python sim/cpu.py                # run programs/uart_tx_0x55.asm, print listing + trace
 python sim/cpu.py programs/uart_tx_pull.asm 0xA3    # send a byte from the TX FIFO via PULL + SHIFT_OUT
 python sim/cpu.py programs/uart_tx_loop.asm 0x55 0xA3   # stream bytes: PULL / frame / JMP loop until the FIFO is empty
