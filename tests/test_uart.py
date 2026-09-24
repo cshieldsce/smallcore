@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from cpu import CPU, decode, load_program
+from cpu import CPU, decode, load_isa, load_program
 
 CYCLES_PER_BIT = 8
 TX = 0  # gpio pin the programs transmit on
@@ -156,6 +156,19 @@ def test_loop_program_resumes_when_a_byte_arrives_later():
         cpu.step()
     frame = cpu.pin_trace(TX)[before:]
     assert decode_frame(frame, frame.index(0))[0] == 0xF0
+
+
+def test_uart_programs_rely_on_the_lsb_first_reset_direction():
+    """UART is LSB first and no UART program has to say so: shift_dir resets
+    to 0 and only CONFIG_SHIFT changes it."""
+    isa = load_isa()
+    for program in (BITBANG, PULL, LOOP):
+        assert all(decode(w, isa).op != "CONFIG_SHIFT" for w in load_program(program))
+    cpu = CPU(load_program(LOOP), tx_data=[0xA3])
+    assert cpu.shift_dir == 0
+    while not cpu.stalled:
+        cpu.step()
+    assert cpu.shift_dir == 0
 
 
 def test_pull_program_is_independent_of_its_data():

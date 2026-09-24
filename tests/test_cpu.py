@@ -80,6 +80,63 @@ def test_shift_out_delay_holds_the_bit():
     assert run0("PULL\nSHIFT_OUT [2]\nSHIFT_OUT", tx_data=[0b01]) == [1, 1, 1, 1, 0]
 
 
+def test_shift_dir_resets_to_lsb_first():
+    assert CPU(assemble("PULL"), tx_data=[0]).shift_dir == 0
+
+
+def test_config_shift_sets_shift_dir_and_touches_nothing_else():
+    cpu = CPU(assemble("PULL\nCONFIG_SHIFT 1 [1]\nCONFIG_SHIFT 0"), tx_data=[0xA5])
+    cpu.step()
+    assert cpu.shift_dir == 0
+    cpu.step()  # first cycle: shift_dir <- 1, pins and shift_reg untouched
+    assert (cpu.shift_dir, cpu.gpio, cpu.shift_reg, cpu.pc) == (1, [1, 1, 1, 1], 0xA5, 1)
+    cpu.step()  # delay cycle
+    assert (cpu.shift_dir, cpu.pc) == (1, 2)
+    cpu.step()
+    assert (cpu.shift_dir, cpu.gpio, cpu.shift_reg) == (0, [1, 1, 1, 1], 0xA5)
+    assert cpu.halted
+
+
+def test_shift_out_sends_msb_first_after_config_shift_1():
+    # 0b1000_0110 -> 1 0 0 0 0 1 1 0; extra SHIFT_OUTs read the zero fill
+    trace = run0("CONFIG_SHIFT 1\nPULL\n" + "SHIFT_OUT\n" * 10, tx_data=[0b1000_0110])
+    assert trace[2:] == [1, 0, 0, 0, 0, 1, 1, 0, 0, 0]
+
+
+def test_msb_first_shift_out_order_pin_then_shift_left_on_first_cycle():
+    """The RTL contract mirrored: with shift_dir 1, gpio[0] takes shift_reg[7]
+    and shift_reg <<= 1 (zero fill) on the same edge; delay cycles hold."""
+    cpu = CPU(assemble("CONFIG_SHIFT 1\nPULL\nSHIFT_OUT [1]\nSHIFT_OUT"), gpio=0, tx_data=[0b1100_0000])
+    cpu.step()
+    cpu.step()
+    assert (cpu.gpio[0], cpu.shift_reg) == (0, 0xC0)  # configured and filled, pin untouched
+    cpu.step()
+    assert (cpu.gpio[0], cpu.shift_reg) == (1, 0x80)  # first cycle: gpio[0] = old bit 7, then shift left
+    cpu.step()
+    assert (cpu.gpio[0], cpu.shift_reg) == (1, 0x80)  # delay cycle: hold
+    cpu.step()
+    assert (cpu.gpio[0], cpu.shift_reg) == (1, 0x00)
+    assert cpu.halted
+
+
+def test_shift_dir_is_configuration_and_persists_across_pull_and_jmp():
+    cpu = CPU(assemble("CONFIG_SHIFT 1\nloop: PULL\nSHIFT_OUT\nJMP loop"), tx_data=[0x80, 0x01])
+    while not cpu.stalled:
+        cpu.step()
+    # config, PULL, bit 7 of 0x80 = 1, JMP, PULL, bit 7 of 0x01 = 0, JMP, stall
+    assert cpu.pin_trace(0) == [1, 1, 1, 1, 1, 0, 0, 0]
+    assert cpu.shift_dir == 1
+
+
+def test_config_shift_mid_byte_switches_the_end_that_shifts():
+    # 0b1000_0001: the LSB goes out first; the right shift leaves the other 1 in
+    # bit 6, so after switching to MSB first the next bit out is bit 7 = 0.
+    cpu = CPU(assemble("PULL\nSHIFT_OUT\nCONFIG_SHIFT 1\nSHIFT_OUT"), tx_data=[0b1000_0001])
+    cpu.run()
+    assert cpu.pin_trace(0) == [1, 1, 1, 0]
+    assert cpu.shift_reg == 0x80
+
+
 def test_shift_out_order_pin_then_shift_on_first_cycle():
     """The RTL contract: on SHIFT_OUT's first cycle gpio[0] takes shift_reg[0]
     and shift_reg >>= 1 on the same edge; the delay cycles change nothing."""
@@ -197,6 +254,8 @@ def test_decode_rejects_bad_words(isa):
     with pytest.raises(ValueError):
         decode(0x2001, isa)  # SHIFT_OUT takes no operand
     with pytest.raises(ValueError):
-        decode(0x8000, isa)  # opcode 0b100 unassigned
+        decode(0x8002, isa)  # CONFIG_SHIFT with operand bit 1 set: only bit 0 is dir
+    with pytest.raises(ValueError):
+        decode(0xA000, isa)  # opcode 0b101 unassigned
     with pytest.raises(ValueError):
         decode(0xE000, isa)  # opcode 0b111 unassigned

@@ -18,6 +18,12 @@
 # marked present by a flag bit in the operand field. Experiment: only
 # SHIFT_OUT has one so far.
 #
+# One bit of persistent configuration, shift_dir, picks which end of the
+# shift register SHIFT_OUT sends: 0 = right / LSB first (reset value),
+# 1 = left / MSB first. CONFIG_SHIFT sets it and it holds until the next
+# CONFIG_SHIFT, so a program states its bit order once per protocol, not once
+# per bit. Experiment: the first piece of protocol configuration.
+#
 
 word_bits: 16
 gpio_out: 4
@@ -39,9 +45,12 @@ instructions:
   SHIFT_OUT:
     opcode: 0b001
     description: >
-      On the first cycle, drive gpio[0] to shift_reg[0] and then shift the
-      register right by one (zero fill). Hold for `delay` extra cycles. Other
-      pins are unchanged. Eight SHIFT_OUTs after a PULL send the byte LSB first.
+      On the first cycle, drive gpio[0] to the next bit of the shift register
+      and shift that bit out (zero fill): with shift_dir 0 the next bit is
+      shift_reg[0] and the register shifts right, with shift_dir 1 it is
+      shift_reg[7] and the register shifts left. Hold for `delay` extra
+      cycles. Other pins are unchanged. Eight SHIFT_OUTs after a PULL send
+      the byte LSB first (shift_dir 0) or MSB first (shift_dir 1).
     cycles: 1 + delay
     operands: []
     side_effect:
@@ -72,3 +81,14 @@ instructions:
     cycles: 1 + delay
     operands:
       - {name: target, lsb: 0, bits: 8}
+
+  CONFIG_SHIFT:
+    opcode: 0b100
+    description: >
+      Set shift_dir to `dir`: 0 = LSB first (SHIFT_OUT sends shift_reg[0] and
+      shifts right), 1 = MSB first (sends shift_reg[7] and shifts left). It
+      resets to 0 and holds until the next CONFIG_SHIFT. The pins and shift
+      register are unchanged. Experiment: opcode and shape not final.
+    cycles: 1 + delay
+    operands:
+      - {name: dir, lsb: 0, bits: 1}

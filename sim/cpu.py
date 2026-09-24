@@ -1,5 +1,6 @@
-"""Mini PIO-style CPU that runs 16-bit SET / SHIFT_OUT / PULL / JMP instructions one clock cycle at a time,
-driving gpio[3:0]: SET picks a pin, SHIFT_OUT always drives gpio[0] and can drive one more pin as a side effect."""
+"""Mini PIO-style CPU that runs 16-bit SET / SHIFT_OUT / PULL / JMP / CONFIG_SHIFT instructions one clock cycle
+at a time, driving gpio[3:0]: SET picks a pin, SHIFT_OUT always drives gpio[0] and can drive one more pin as a side
+effect. CONFIG_SHIFT sets shift_dir, the one bit of persistent configuration: which end of the shift register goes out."""
 
 import re
 import sys
@@ -196,7 +197,8 @@ class CPU:
         self.program = list(program)  # instruction words
         self.pc = 0
         self.gpio = [gpio] * self.isa["gpio_out"]  # output pins, all reset to `gpio`
-        self.shift_reg = 0  # 8-bit, shifted out LSB first
+        self.shift_reg = 0  # 8-bit, emptied one bit at a time by SHIFT_OUT from the end shift_dir picks
+        self.shift_dir = 0  # configuration: 0 = SHIFT_OUT sends bit 0 and shifts right (LSB first), 1 = bit 7, left (MSB first)
         self.tx_fifo = list(tx_data)  # bytes waiting for PULL, oldest first
         self.stalled = False  # True while a PULL is waiting on an empty FIFO
         self.cycle = 0
@@ -227,11 +229,17 @@ class CPU:
                 self.gpio[pin] = value
             elif instr.op == "SHIFT_OUT":
                 # Both happen on this one clock edge: gpio[0] takes the old
-                # bit 0 and the register shifts. RTL must keep this order.
-                self.gpio[0] = self.shift_reg & 1
-                self.shift_reg >>= 1
+                # end bit and the register shifts. RTL must keep this order.
+                if self.shift_dir == 0:  # LSB first
+                    self.gpio[0] = self.shift_reg & 1
+                    self.shift_reg >>= 1
+                else:  # MSB first
+                    self.gpio[0] = self.shift_reg >> 7
+                    self.shift_reg = (self.shift_reg << 1) & 0xFF
             elif instr.op == "PULL":
                 self.shift_reg = self.tx_fifo.pop(0)
+            elif instr.op == "CONFIG_SHIFT":
+                self.shift_dir = instr.args[0]
             if instr.side is not None:
                 # GPIO side effect: one more pin, same edge as the primary operation.
                 pin, value = instr.side
@@ -277,6 +285,7 @@ if __name__ == "__main__":
     cpu = CPU(program, tx_data=tx_data, isa=isa)
     while not cpu.halted and not cpu.stalled and cpu.cycle < 100_000:
         cpu.step()
-    print(f"{cpu.cycle} cycles, {'stalled on PULL' if cpu.stalled else 'halted' if cpu.halted else 'still running'}")
+    print(f"{cpu.cycle} cycles, {'stalled on PULL' if cpu.stalled else 'halted' if cpu.halted else 'still running'}, "
+          f"shift_dir {cpu.shift_dir} ({'MSB' if cpu.shift_dir else 'LSB'} first)")
     for pin in range(len(cpu.gpio)):
         print(f"gpio{pin} " + "".join(str(level) for level in cpu.pin_trace(pin)))

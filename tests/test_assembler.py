@@ -27,6 +27,9 @@ def isa():
     (Instruction("JMP", (0,), 0), 0x6000),  # 011 00000 00000000
     (Instruction("JMP", (1,), 0), 0x6001),
     (Instruction("JMP", (255,), 31), 0x7FFF),  # 011 11111 11111111
+    (Instruction("CONFIG_SHIFT", (0,), 0), 0x8000),  # 100 00000 00000000
+    (Instruction("CONFIG_SHIFT", (1,), 0), 0x8001),  # 100 00000 00000001
+    (Instruction("CONFIG_SHIFT", (1,), 7), 0x8701),  # 100 00111 00000001
 ])
 def test_encoding(isa, instr, word):
     assert encode(instr, isa) == word
@@ -38,6 +41,7 @@ def test_encoding(isa, instr, word):
                                   "SHIFT_OUT 1", "SHIFT_OUT 0, 1", "SHIFT_OUT 4, 0", "SHIFT_OUT 1, 2",
                                   "SHIFT_OUT 1, 0, 1", "SET 1, 0, 1", "PULL 1, 0", "JMP 0, 1, 0",
                                   "PULL 0x55", "JMP", "JMP 256", "JMP nowhere",
+                                  "CONFIG_SHIFT", "CONFIG_SHIFT 2", "CONFIG_SHIFT 0, 1", "CONFIG_SHIFT 1, 0",
                                   "1: SET 0, 0", "loop:: SET 0, 0"])
 def test_assembler_rejects_bad_lines(line):
     with pytest.raises(SyntaxError):
@@ -54,6 +58,11 @@ def test_shift_out_side_effect_is_optional():
     assert assemble("SHIFT_OUT 1, 0 [3]") == assemble("shift_out 1,0 [3]") == [0x2390]
     assert decode(0x2390, load_isa()) == Instruction("SHIFT_OUT", (), 3, side=(1, 0))
     assert decode(0x2700, load_isa()).side is None
+
+
+def test_config_shift_takes_the_direction_bit():
+    assert assemble("CONFIG_SHIFT 0") == [0x8000]
+    assert assemble("CONFIG_SHIFT 1 [3]") == assemble("config_shift 1 [3]") == [0x8301]
 
 
 def test_jmp_takes_an_absolute_address():
