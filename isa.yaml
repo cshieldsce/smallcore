@@ -1,9 +1,10 @@
 # Mini ISA.
 #
-# One output pin, one 8-bit shift register, 16-bit instructions:
+# One output pin, one 8-bit shift register fed by LOAD or by a TX FIFO,
+# 16-bit instructions:
 #
-#   15 14 | 13 12 11 10 9 | 8 7 6 5 4 3 2 1 0
-#   opcode|     delay     |      operand
+#   15 14 13 | 12 11 10 9 8 | 7 6 5 4 3 2 1 0
+#    opcode  |     delay    |     operand
 #
 # Every instruction can take an optional delay, written `[n]` after its
 # operands, which holds for n extra cycles before the next instruction runs.
@@ -11,41 +12,56 @@
 #
 # There is no HALT: running past the last instruction halts the CPU, and the
 # pin keeps its last level.
+#
+# The TX FIFO is filled from outside the core (in the simulator: CPU(program,
+# tx_data=[...])). PULL moves its next byte into the shift register, so the
+# program and the data it transmits are independent. PULL on an empty FIFO
+# blocks: the CPU stays on the PULL with the pin unchanged until a byte
+# arrives, then completes it on that cycle.
 
 word_bits: 16
 
 fields:
-  opcode:  {lsb: 14, bits: 2}
-  delay:   {lsb: 9,  bits: 5}   # 0..31, default 0
-  operand: {lsb: 0,  bits: 9}
+  opcode:  {lsb: 13, bits: 3}
+  delay:   {lsb: 8,  bits: 5}   # 0..31, default 0
+  operand: {lsb: 0,  bits: 8}
 
 instructions:
   SET:
-    opcode: 0b00
+    opcode: 0b000
     description: Drive the output pin to `value`.
     cycles: 1 + delay
     operands:
       - {name: value, min: 0, max: 1}
 
   WAIT:
-    opcode: 0b01
+    opcode: 0b001
     description: Hold the pin at its current level for `cycles` cycles.
     cycles: operand + delay
     operands:
-      - {name: cycles, min: 1, max: 511}
+      - {name: cycles, min: 1, max: 255}
 
   LOAD:
-    opcode: 0b10
+    opcode: 0b010
     description: Load `value` into the 8-bit shift register. The pin is unchanged.
     cycles: 1 + delay
     operands:
       - {name: value, min: 0, max: 255}
 
   SHIFT_OUT:
-    opcode: 0b11
+    opcode: 0b011
     description: >
       On the first cycle, drive the pin to shift_reg[0] and then shift the
       register right by one (zero fill). Hold the pin for `delay` extra cycles.
       Eight SHIFT_OUTs after a LOAD send the byte LSB first.
+    cycles: 1 + delay
+    operands: []
+
+  PULL:
+    opcode: 0b100
+    description: >
+      Move the next byte out of the TX FIFO into the 8-bit shift register.
+      The pin is unchanged. If the FIFO is empty, block (see above): the
+      delay starts counting only once the byte has been pulled.
     cycles: 1 + delay
     operands: []

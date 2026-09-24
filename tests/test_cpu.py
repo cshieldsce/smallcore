@@ -57,8 +57,53 @@ def test_shift_out_order_pin_then_shift_on_first_cycle():
     assert cpu.halted
 
 
-def test_decode_rejects_bad_operands(isa):
+def test_pull_moves_next_fifo_byte_into_shift_reg():
+    cpu = CPU(assemble("SET 0\nPULL"), tx_data=[0xA3, 0x37])
+    assert cpu.run() == [0, 0]  # pin untouched
+    assert cpu.shift_reg == 0xA3
+    assert cpu.tx_fifo == [0x37], "only one byte consumed"
+
+
+def test_pull_consumes_fifo_in_order():
+    cpu = CPU(assemble("PULL\nPULL\nPULL"), tx_data=[1, 2, 3])
+    seen = []
+    while not cpu.halted:
+        cpu.step()
+        seen.append(cpu.shift_reg)
+    assert seen == [1, 2, 3]
+    assert cpu.tx_fifo == []
+
+
+def test_pull_then_shift_out_sends_fifo_byte_lsb_first():
+    cpu = CPU(assemble("PULL\n" + "SHIFT_OUT\n" * 8), tx_data=[0b1000_0110])
+    assert cpu.run()[1:] == [0, 1, 1, 0, 0, 0, 0, 1]
+
+
+def test_pull_blocks_on_empty_fifo_until_a_byte_arrives():
+    cpu = CPU(assemble("SET 0\nPULL [1]\nSET 1"))
+    cpu.step()
+    for _ in range(3):  # stalled: PC and pin hold, cycles still tick
+        cpu.step()
+        assert (cpu.pc, cpu.pin, cpu.shift_reg, cpu.stalled) == (1, 0, 0, True)
+    assert cpu.cycle == 4
+    cpu.tx_fifo.append(0x37)  # the outside world feeds the FIFO
+    cpu.step()  # PULL completes on this cycle, then its delay
+    assert (cpu.pc, cpu.shift_reg, cpu.stalled) == (1, 0x37, False)
+    cpu.step()
+    cpu.step()
+    assert cpu.run() == [0, 0, 0, 0, 0, 0, 1]
+    assert cpu.halted
+
+
+def test_run_reports_a_stalled_pull():
+    with pytest.raises(RuntimeError, match="stalled on PULL"):
+        CPU(assemble("PULL")).run(max_cycles=10)
+
+
+def test_decode_rejects_bad_words(isa):
     with pytest.raises(ValueError):
-        decode(0x4000, isa)  # WAIT 0
+        decode(0x2000, isa)  # WAIT 0
     with pytest.raises(ValueError):
-        decode(0x8100, isa)  # LOAD 256
+        decode(0x0002, isa)  # SET 2
+    with pytest.raises(ValueError):
+        decode(0xE000, isa)  # opcode 0b111 unassigned

@@ -1,4 +1,4 @@
-"""Mini PIO-style CPU that runs 16-bit SET / WAIT / LOAD / SHIFT_OUT instructions one clock cycle at a time."""
+"""Mini PIO-style CPU that runs 16-bit SET / WAIT / LOAD / SHIFT_OUT / PULL instructions one clock cycle at a time."""
 
 import re
 import sys
@@ -115,12 +115,14 @@ def cycles(instr):
 
 
 class CPU:
-    def __init__(self, program, pin=1, isa=None):
+    def __init__(self, program, pin=1, tx_data=(), isa=None):
         self.isa = isa or load_isa()
         self.program = list(program)  # instruction words
         self.pc = 0
         self.pin = pin
         self.shift_reg = 0  # 8-bit, shifted out LSB first
+        self.tx_fifo = list(tx_data)  # bytes waiting for PULL, oldest first
+        self.stalled = False  # True while a PULL is waiting on an empty FIFO
         self.cycle = 0
         self.counter = 0  # cycles left in the current instruction
         self.halted = not self.program
@@ -133,6 +135,13 @@ class CPU:
 
         if self.counter == 0:
             instr = decode(self.program[self.pc], self.isa)
+            if instr.op == "PULL" and not self.tx_fifo:
+                # Block: stay on this PULL, pin unchanged, until a byte arrives.
+                self.stalled = True
+                self.trace.append(self.pin)
+                self.cycle += 1
+                return
+            self.stalled = False
             if instr.op == "SET":
                 self.pin = instr.args[0]
             elif instr.op == "LOAD":
@@ -142,6 +151,8 @@ class CPU:
                 # bit 0 and the register shifts. RTL must keep this order.
                 self.pin = self.shift_reg & 1
                 self.shift_reg >>= 1
+            elif instr.op == "PULL":
+                self.shift_reg = self.tx_fifo.pop(0)
             self.counter = cycles(instr)
 
         self.counter -= 1
@@ -155,19 +166,22 @@ class CPU:
     def run(self, max_cycles=100_000):
         while not self.halted:
             if self.cycle >= max_cycles:
-                raise RuntimeError(f"did not halt within {max_cycles} cycles")
+                why = "stalled on PULL with an empty TX FIFO" if self.stalled else "did not halt"
+                raise RuntimeError(f"{why} within {max_cycles} cycles")
             self.step()
         return self.trace
 
 
 if __name__ == "__main__":
+    # usage: cpu.py [program.asm [tx byte ...]]   e.g. cpu.py programs/uart_tx_pull.asm 0xA3
     path = sys.argv[1] if len(sys.argv) > 1 else ROOT / "programs" / "uart_tx_0x55.asm"
+    tx_data = [int(b, 0) for b in sys.argv[2:]]
     isa = load_isa()
     program = load_program(path, isa)
     for addr, word in enumerate(program):
         instr = decode(word, isa)
         args = " ".join(str(a) for a in instr.args)
         print(f"{addr:3}  {word:04x}  {instr.op} {args} [{instr.delay}]")
-    trace = CPU(program, isa=isa).run()
+    trace = CPU(program, tx_data=tx_data, isa=isa).run()
     print(f"{len(trace)} cycles")
     print("".join(str(level) for level in trace))
