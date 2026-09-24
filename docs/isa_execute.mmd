@@ -2,9 +2,12 @@ flowchart LR
   W["16-bit word<br/>at PC"] --> OP{"opcode<br/>[15:14]"}
   OP -->|00| SET["<b>SET v [d]</b><br/>pin ← v<br/>takes 1 + d cycles"]
   OP -->|01| WAIT["<b>WAIT n [d]</b><br/>pin unchanged<br/>takes n + d cycles"]
-  OP -->|"10, 11"| ERR["spare<br/>decode error"]
+  OP -->|10| LOAD["<b>LOAD v [d]</b><br/>shift_reg ← v<br/>pin unchanged<br/>takes 1 + d cycles"]
+  OP -->|11| SHIFT["<b>SHIFT_OUT [d]</b><br/>pin ← shift_reg[0]<br/>shift_reg ← shift_reg >> 1<br/>(same edge, then hold)<br/>takes 1 + d cycles"]
   SET --> NEXT["PC ← PC + 1"]
   WAIT --> NEXT
+  LOAD --> NEXT
+  SHIFT --> NEXT
   NEXT --> END{"PC past last<br/>instruction?"}
   END -->|no| W
   END -->|yes| HALT(["halt<br/>pin keeps its level"])

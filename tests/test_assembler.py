@@ -4,7 +4,7 @@ import pytest
 
 from cpu import Instruction, assemble, decode, encode, load_isa, load_program
 
-PROGRAM = Path(__file__).resolve().parent.parent / "programs" / "uart_tx_0x55.asm"
+PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
 
 
 @pytest.fixture(scope="module")
@@ -17,21 +17,29 @@ def isa():
     (Instruction("SET", (1,), 7), 0x0E01),   # 00 00111 000000001
     (Instruction("WAIT", (1,), 0), 0x4001),  # 01 00000 000000001
     (Instruction("WAIT", (511,), 31), 0x7FFF),
+    (Instruction("LOAD", (0x55,), 0), 0x8055),  # 10 00000 001010101
+    (Instruction("SHIFT_OUT", (), 7), 0xCE00),  # 11 00111 000000000
 ])
 def test_encoding(isa, instr, word):
     assert encode(instr, isa) == word
     assert decode(word, isa) == instr
 
 
-@pytest.mark.parametrize("line", ["SET 2", "WAIT 0", "WAIT 512", "SET 1 [32]", "HALT", "SET", "SET 1 [7"])
+@pytest.mark.parametrize("line", ["SET 2", "WAIT 0", "WAIT 512", "SET 1 [32]", "HALT", "SET", "SET 1 [7",
+                                  "LOAD 256", "LOAD", "SHIFT_OUT 1"])
 def test_assembler_rejects_bad_lines(line):
     with pytest.raises(SyntaxError):
         assemble(line)
 
 
-def test_every_word_fits_16_bits():
-    assert all(0 <= w < 1 << 16 for w in load_program(PROGRAM))
+@pytest.mark.parametrize("program", sorted(PROGRAMS.glob("*.asm")), ids=lambda p: p.stem)
+def test_every_word_fits_16_bits(program):
+    assert all(0 <= w < 1 << 16 for w in load_program(program))
 
 
 def test_uart_program_is_one_instruction_per_bit():
-    assert len(load_program(PROGRAM)) == 11
+    assert len(load_program(PROGRAMS / "uart_tx_0x55.asm")) == 11
+
+
+def test_shift_uart_program_is_load_plus_one_instruction_per_bit():
+    assert len(load_program(PROGRAMS / "uart_tx_shift_0x55.asm")) == 1 + 11

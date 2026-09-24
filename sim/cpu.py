@@ -1,4 +1,4 @@
-"""Mini PIO-style CPU that runs 16-bit SET / WAIT instructions one clock cycle at a time."""
+"""Mini PIO-style CPU that runs 16-bit SET / WAIT / LOAD / SHIFT_OUT instructions one clock cycle at a time."""
 
 import re
 import sys
@@ -110,7 +110,7 @@ def load_program(path, isa=None):
 
 
 def cycles(instr):
-    base = 1 if instr.op == "SET" else instr.args[0]
+    base = instr.args[0] if instr.op == "WAIT" else 1
     return base + instr.delay
 
 
@@ -120,6 +120,7 @@ class CPU:
         self.program = list(program)  # instruction words
         self.pc = 0
         self.pin = pin
+        self.shift_reg = 0  # 8-bit, shifted out LSB first
         self.cycle = 0
         self.counter = 0  # cycles left in the current instruction
         self.halted = not self.program
@@ -134,6 +135,13 @@ class CPU:
             instr = decode(self.program[self.pc], self.isa)
             if instr.op == "SET":
                 self.pin = instr.args[0]
+            elif instr.op == "LOAD":
+                self.shift_reg = instr.args[0]
+            elif instr.op == "SHIFT_OUT":
+                # Both happen on this one clock edge: the pin takes the old
+                # bit 0 and the register shifts. RTL must keep this order.
+                self.pin = self.shift_reg & 1
+                self.shift_reg >>= 1
             self.counter = cycles(instr)
 
         self.counter -= 1

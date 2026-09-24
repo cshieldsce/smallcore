@@ -1,6 +1,6 @@
 # Mini ISA.
 #
-# One output pin, 16-bit instructions:
+# One output pin, one 8-bit shift register, 16-bit instructions:
 #
 #   15 14 | 13 12 11 10 9 | 8 7 6 5 4 3 2 1 0
 #   opcode|     delay     |      operand
@@ -34,4 +34,18 @@ instructions:
     operands:
       - {name: cycles, min: 1, max: 511}
 
-# Opcodes 0b10 and 0b11 are spare.
+  LOAD:
+    opcode: 0b10
+    description: Load `value` into the 8-bit shift register. The pin is unchanged.
+    cycles: 1 + delay
+    operands:
+      - {name: value, min: 0, max: 255}
+
+  SHIFT_OUT:
+    opcode: 0b11
+    description: >
+      On the first cycle, drive the pin to shift_reg[0] and then shift the
+      register right by one (zero fill). Hold the pin for `delay` extra cycles.
+      Eight SHIFT_OUTs after a LOAD send the byte LSB first.
+    cycles: 1 + delay
+    operands: []

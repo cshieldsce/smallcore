@@ -5,7 +5,8 @@ block-beta
   opcode["opcode (2)"]:2 delay["delay (5)<br/>0–31 extra cycles"]:5 operand["operand (9)"]:9
   set["00 = SET"]:2 setd["d"]:5 setop["0000 0000 v<br/>v = pin level"]:9
   wait["01 = WAIT"]:2 waitd["d"]:5 waitop["n = 1–511 cycles"]:9
-  spare["10, 11 spare"]:2 space:14
+  load["10 = LOAD"]:2 loadd["d"]:5 loadop["0 vvvv vvvv<br/>v = shift_reg value"]:9
+  shift["11 = SHIFT_OUT"]:2 shiftd["d"]:5 shiftop["ignored"]:9
 
   classDef hdr fill:#eee,stroke:#999,color:#555
   classDef field fill:#dbe8ff,stroke:#4a6fa5

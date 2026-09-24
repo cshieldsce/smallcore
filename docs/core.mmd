@@ -5,11 +5,15 @@ flowchart LR
     direction LR
     PC["PC"] -->|addr| IMEM["Program memory<br/>N × 16-bit"]
     IMEM -->|"word[15:0]"| DEC["Decoder"]
-    DEC -->|"operand[0]"| PIN["Pin register<br/>1-bit"]
+    DEC -->|"operand[7:0]"| SR["Shift register<br/>8-bit<br/>LOAD: ← operand<br/>SHIFT_OUT: >>= 1 (zero fill)"]
+    DEC -->|"operand[0]"| MUX{"pin src"}
+    SR -->|"shift_reg[0]"| MUX
+    MUX --> PIN["Pin register<br/>1-bit"]
     DEC -->|"opcode[15:14]"| CU["Control unit"]
-    DEC -->|"delay[13:9]<br/>operand[8:0]"| CNT["Cycle counter<br/>10-bit down counter<br/>loads SET: 1 + delay<br/>loads WAIT: n + delay"]
+    DEC -->|"delay[13:9]<br/>operand[8:0]"| CNT["Cycle counter<br/>10-bit down counter<br/>loads WAIT: n + delay<br/>loads others: 1 + delay"]
     CNT -->|"last cycle"| CU
-    CU -->|"set_en"| PIN
+    CU -->|"pin_en, pin_sel"| MUX
+    CU -->|"load_en, shift_en"| SR
     CU -->|"pc_inc"| PC
     PC -->|"PC = length → halt"| CU
   end
