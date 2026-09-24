@@ -80,17 +80,34 @@ def test_slave_samples_the_supplied_byte_lsb_first(frame):
     assert sum(bit << i for i, bit in enumerate(bits)) == byte
 
 
-def test_program_is_three_instructions_per_bit():
+def test_program_is_two_instructions_per_bit():
     words = load_program(PROGRAM)
-    assert len(words) == 3 + 8 * 3 + 2  # setup, 8 x (clock low, shift, clock high), teardown
+    assert len(words) == 3 + 8 * 2 + 2  # setup, 8 x (shift + clock low, clock high), teardown
 
 
-def test_frame_length_and_bit_period():
-    """Every bit is 9 cycles: 1 (clock low) + 4 (SHIFT_OUT [3]) + 4 (SET 1, 1 [3])."""
+def test_bit_period_is_8_cycles_split_4_low_4_high():
+    """SHIFT_OUT 1, 0 [3] holds the clock low for 4 cycles with the new bit on
+    MOSI, SET 1, 1 [3] holds it high for 4."""
     _, sclk, cs = run([0xA5])
-    edges = rising_edges(sclk)
-    assert [b - a for a, b in zip(edges, edges[1:])] == [9] * 7
-    assert rising_edges(cs)[0] - falling_edges(cs)[0] == 4 + 8 * 9 + 4
+    (start,), (end,) = falling_edges(cs), rising_edges(cs)
+    ups = rising_edges(sclk)
+    downs = [d for d in falling_edges(sclk) if start < d < end]  # the setup drop is before CS
+    assert [b - a for a, b in zip(ups, ups[1:])] == [8] * 7
+    assert [d - u for u, d in zip(ups, downs)] == [4] * 8, "high half"
+    assert [u - d for d, u in zip(downs, ups[1:])] == [4] * 7, "low half"
+    assert end - start == 4 + 8 * 8 + 4
+
+
+def test_each_bit_lands_on_mosi_as_the_clock_drops(frame):
+    """Every bit is on MOSI 4 cycles before its rising edge and stays through
+    it. From bit 1 on, that landing cycle is the cycle the clock drops: one
+    edge does both. Bit 0 finds the clock already low from the setup."""
+    byte, mosi, sclk, _, _, _ = frame
+    for i, up in enumerate(rising_edges(sclk)):
+        land = up - 4
+        assert mosi[land:up + 1] == [(byte >> i) & 1] * 5, f"bit {i}"
+        if i:
+            assert (sclk[land - 1], sclk[land]) == (1, 0), f"bit {i}: clock did not drop on the landing cycle"
 
 
 def test_program_waits_for_a_byte_with_cs_high():

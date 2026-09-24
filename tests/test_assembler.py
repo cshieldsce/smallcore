@@ -20,6 +20,8 @@ def isa():
     (Instruction("SET", (3, 1), 0), 0x0031),   # 000 00000 00110001
     (Instruction("SET", (2, 1), 5), 0x0521),   # 000 00101 00100001
     (Instruction("SHIFT_OUT", (), 7), 0x2700),  # 001 00111 00000000
+    (Instruction("SHIFT_OUT", (), 3, side=(1, 0)), 0x2390),  # 001 00011 10010000  flag, side pin 1, value 0
+    (Instruction("SHIFT_OUT", (), 0, side=(3, 1)), 0x20B1),  # 001 00000 10110001
     (Instruction("PULL", (), 0), 0x4000),  # 010 00000 00000000
     (Instruction("PULL", (), 7), 0x4700),
     (Instruction("JMP", (0,), 0), 0x6000),  # 011 00000 00000000
@@ -33,7 +35,9 @@ def test_encoding(isa, instr, word):
 
 @pytest.mark.parametrize("line", ["SET 0, 2", "SET 0, 1 [32]", "HALT", "SET", "SET 1", "SET 4, 1", "SET 0, 1, 1",
                                   "SET 0, 1 [7", "WAIT 1", "LOAD 0x55",
-                                  "SHIFT_OUT 1", "PULL 0x55", "JMP", "JMP 256", "JMP nowhere",
+                                  "SHIFT_OUT 1", "SHIFT_OUT 0, 1", "SHIFT_OUT 4, 0", "SHIFT_OUT 1, 2",
+                                  "SHIFT_OUT 1, 0, 1", "SET 1, 0, 1", "PULL 1, 0", "JMP 0, 1, 0",
+                                  "PULL 0x55", "JMP", "JMP 256", "JMP nowhere",
                                   "1: SET 0, 0", "loop:: SET 0, 0"])
 def test_assembler_rejects_bad_lines(line):
     with pytest.raises(SyntaxError):
@@ -43,6 +47,13 @@ def test_assembler_rejects_bad_lines(line):
 def test_set_operands_are_pin_then_value():
     assert assemble("SET 1, 0") == assemble("SET 1,0") == assemble("set 1 0") == [0x0010]
     assert decode(0x0031, load_isa()) == Instruction("SET", (3, 1), 0)
+
+
+def test_shift_out_side_effect_is_optional():
+    assert assemble("SHIFT_OUT [7]") == [0x2700]
+    assert assemble("SHIFT_OUT 1, 0 [3]") == assemble("shift_out 1,0 [3]") == [0x2390]
+    assert decode(0x2390, load_isa()) == Instruction("SHIFT_OUT", (), 3, side=(1, 0))
+    assert decode(0x2700, load_isa()).side is None
 
 
 def test_jmp_takes_an_absolute_address():

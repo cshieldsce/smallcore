@@ -36,6 +36,26 @@ def test_shift_out_drives_gpio0_and_nothing_else():
     assert cpu.run()[1:] == [(1, 0, 1, 1), (1, 0, 1, 1), (0, 0, 1, 1)]
 
 
+def test_shift_out_side_effect_drives_a_second_pin_on_the_same_edge():
+    cpu = CPU(assemble("PULL\nSHIFT_OUT 1, 0 [1]\nSHIFT_OUT 2, 0\nSHIFT_OUT 1, 1"), tx_data=[0b011])
+    cpu.step()
+    assert cpu.gpio == [1, 1, 1, 1]  # PULL touches no pin
+    cpu.step()
+    assert (cpu.gpio, cpu.shift_reg) == ([1, 0, 1, 1], 0b01)  # bit 0 out and gpio[1] low, one edge
+    cpu.step()
+    assert (cpu.gpio, cpu.shift_reg) == ([1, 0, 1, 1], 0b01)  # delay cycle: everything holds
+    cpu.step()
+    assert (cpu.gpio, cpu.shift_reg) == ([1, 0, 0, 1], 0b00)
+    cpu.step()
+    assert (cpu.gpio, cpu.shift_reg) == ([0, 1, 0, 1], 0b00)
+    assert cpu.halted
+
+
+def test_shift_out_without_side_effect_touches_only_gpio0():
+    plain = CPU(assemble("PULL\nSHIFT_OUT [3]\nSHIFT_OUT"), tx_data=[0b10]).run()
+    assert plain == [(1, 1, 1, 1)] + [(0, 1, 1, 1)] * 4 + [(1, 1, 1, 1)]
+
+
 def test_set_and_shift_out_share_gpio0():
     # SET 0, v and SHIFT_OUT write the same register; the last writer wins.
     cpu = CPU(assemble("PULL\nSHIFT_OUT\nSET 0, 1\nSHIFT_OUT"), tx_data=[0b10])

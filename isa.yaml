@@ -13,6 +13,11 @@
 # An instruction's operands each live in their own bits of the operand field
 # (`lsb` counts from operand bit 0). Operand bits no operand uses must be 0.
 #
+# An instruction may also allow a GPIO side effect: extra `pin, value`
+# operands that drive one more pin on the same edge as the primary operation,
+# marked present by a flag bit in the operand field. Experiment: only
+# SHIFT_OUT has one so far.
+#
 
 word_bits: 16
 gpio_out: 4
@@ -39,6 +44,15 @@ instructions:
       pins are unchanged. Eight SHIFT_OUTs after a PULL send the byte LSB first.
     cycles: 1 + delay
     operands: []
+    side_effect:
+      description: >
+        `SHIFT_OUT pin, value [d]` also drives gpio[pin] to `value` on that
+        same first cycle, e.g. drop a clock while the next bit lands on gpio[0].
+        `pin` is 1..3: gpio[0] is the shift pin.
+      flag: {lsb: 7, bits: 1}
+      operands:
+        - {name: pin,   lsb: 4, bits: 2}
+        - {name: value, lsb: 0, bits: 1}
 
   PULL:
     opcode: 0b010
