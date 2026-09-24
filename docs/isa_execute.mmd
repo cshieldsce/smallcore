@@ -1,0 +1,10 @@
+flowchart LR
+  W["16-bit word<br/>at PC"] --> OP{"opcode<br/>[15:14]"}
+  OP -->|00| SET["<b>SET v [d]</b><br/>pin ← v<br/>takes 1 + d cycles"]
+  OP -->|01| WAIT["<b>WAIT n [d]</b><br/>pin unchanged<br/>takes n + d cycles"]
+  OP -->|"10, 11"| ERR["spare<br/>decode error"]
+  SET --> NEXT["PC ← PC + 1"]
+  WAIT --> NEXT
+  NEXT --> END{"PC past last<br/>instruction?"}
+  END -->|no| W
+  END -->|yes| HALT(["halt<br/>pin keeps its level"])

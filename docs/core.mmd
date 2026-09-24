@@ -1,0 +1,20 @@
+flowchart LR
+  CLK(["clk"])
+
+  subgraph core["core"]
+    direction LR
+    PC["PC"] -->|addr| IMEM["Program memory<br/>N × 16-bit"]
+    IMEM -->|"word[15:0]"| DEC["Decoder"]
+    DEC -->|"operand[0]"| PIN["Pin register<br/>1-bit"]
+    DEC -->|"opcode[15:14]"| CU["Control unit"]
+    DEC -->|"delay[13:9]<br/>operand[8:0]"| CNT["Cycle counter<br/>10-bit down counter<br/>loads SET: 1 + delay<br/>loads WAIT: n + delay"]
+    CNT -->|"last cycle"| CU
+    CU -->|"set_en"| PIN
+    CU -->|"pc_inc"| PC
+    PC -->|"PC = length → halt"| CU
+  end
+
+  CLK --> core
+  PIN --> OUT(["pin out"])
+
+  style core fill:#f6f8fb,stroke:#9aa7b8

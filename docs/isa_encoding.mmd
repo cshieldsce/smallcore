@@ -1,0 +1,13 @@
+block-beta
+  columns 16
+  b15["15"] b14["14"] b13["13"] b12["12"] b11["11"] b10["10"] b9["9"] b8["8"]
+  b7["7"] b6["6"] b5["5"] b4["4"] b3["3"] b2["2"] b1["1"] b0["0"]
+  opcode["opcode (2)"]:2 delay["delay (5)<br/>0–31 extra cycles"]:5 operand["operand (9)"]:9
+  set["00 = SET"]:2 setd["d"]:5 setop["0000 0000 v<br/>v = pin level"]:9
+  wait["01 = WAIT"]:2 waitd["d"]:5 waitop["n = 1–511 cycles"]:9
+  spare["10, 11 spare"]:2 space:14
+
+  classDef hdr fill:#eee,stroke:#999,color:#555
+  classDef field fill:#dbe8ff,stroke:#4a6fa5
+  class b15,b14,b13,b12,b11,b10,b9,b8,b7,b6,b5,b4,b3,b2,b1,b0 hdr
+  class opcode,delay,operand field
