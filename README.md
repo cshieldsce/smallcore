@@ -22,6 +22,8 @@ isa.yaml      instruction set: encoding, opcodes, operand ranges
 programs/     assembly programs (.asm)
 sim/          simulator and assembler (cpu.py)
 tests/        pytest test benches
+rtl/          the Verilog core (core.v), Verilog-2001
+rtl_tests/    cocotb benches for rtl/ under Verilator, checked against sim/cpu.py
 docs/         Mermaid diagrams (.mmd) and rendered .svg, see Docs below
 tools/        wavetrace.py (waveform helper), render_docs.py (docs/*.mmd -> .svg)
 build/        generated: test waveforms, caches (safe to delete)
@@ -30,7 +32,7 @@ build/        generated: test waveforms, caches (safe to delete)
 ## Commands
 
 ```
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt           # plus Verilator 5.036+ on the PATH for the RTL
 python -m pytest -v                                 # writes build/waves/<test bench>/<test>.svg
 python sim/cpu.py                                   # runs programs/uart_tx_0x55.asm: listing + one trace per pin
 python sim/cpu.py programs/uart_tx_pull.asm 0xA3    # one byte from the TX FIFO
@@ -41,6 +43,10 @@ python sim/cpu.py programs/spi_duplex_msb.asm 0xA3  # also samples MISO on gpio_
 python -m pytest tests/test_uart_rx.py -v           # UART RX: uart_rx.asm fed by uart_tx_loop.asm over a wire, waves in build/waves/uart_rx/
 python -m pytest tests/test_i2c.py -v               # I2C master write on a bus model with a slave: one byte, clock stretching, address + data
 python tools/render_docs.py                         # docs/*.mmd -> .svg (needs mermaid-cli)
+make lint                                           # verilator --lint-only -Wall -Wno-fatal rtl/core.v
+make test-rtl                                       # python -m pytest rtl_tests: Verilator builds core.v into build/rtl/, cocotb runs rtl_tests/core_tb.py
+WAVES=1 make test-rtl                               # same, plus build/rtl/dump.vcd (gtkwave build/rtl/dump.vcd)
+make test                                           # tests/ then rtl_tests/
 ```
 
 ## Design pressures

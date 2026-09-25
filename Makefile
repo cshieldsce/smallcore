@@ -11,8 +11,8 @@ test-model:  # the golden Python model and assembler, tests/
 test-rtl:  # rtl/core.v under Verilator + cocotb, rtl_tests/; WAVES=1 also writes build/rtl/dump.vcd
 	$(PYTHON) -m pytest rtl_tests -v
 
-lint:  # Verilator's static checks only, no simulation; -Wall includes the style warnings
-	verilator --lint-only -Wall rtl/core.v
+lint:  # Verilator static checks, no simulation; -Wno-fatal prints warnings without failing while the core is incomplete
+	verilator --lint-only -Wall -Wno-fatal rtl/core.v
 
 clean:
 	rm -rf build

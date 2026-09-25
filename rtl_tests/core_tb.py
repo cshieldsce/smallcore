@@ -38,9 +38,10 @@ async def reset_matches_model(dut):
     starting state, and imem_word is the first word of the program."""
     program = load_program(PROGRAMS / "uart_tx_0x55.asm")
     cpu = CPU(program)
-    Imem(dut, program)
+    dut.imem_word.value = 0
     start_clock(dut)
     await reset(dut)
+    Imem(dut, program)  # after reset: imem_addr is a known 0, not X, when Imem first reads it
     await ReadOnly()
 
     assert rtl_state(dut) == model_state(cpu)
