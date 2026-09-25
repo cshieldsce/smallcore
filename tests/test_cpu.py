@@ -84,8 +84,8 @@ def test_shift_dir_resets_to_lsb_first():
     assert CPU(assemble("PULL"), tx_data=[0]).shift_dir == 0
 
 
-def test_config_shift_sets_shift_dir_and_touches_nothing_else():
-    cpu = CPU(assemble("PULL\nCONFIG_SHIFT 1 [1]\nCONFIG_SHIFT 0"), tx_data=[0xA5])
+def test_config_shift_dir_sets_shift_dir_and_touches_nothing_else():
+    cpu = CPU(assemble("PULL\nCONFIG shift_dir, 1 [1]\nCONFIG shift_dir, 0"), tx_data=[0xA5])
     cpu.step()
     assert cpu.shift_dir == 0
     cpu.step()  # first cycle: shift_dir <- 1, pins and shift_reg untouched
@@ -97,16 +97,16 @@ def test_config_shift_sets_shift_dir_and_touches_nothing_else():
     assert cpu.halted
 
 
-def test_shift_out_sends_msb_first_after_config_shift_1():
+def test_shift_out_sends_msb_first_after_config_shift_dir_1():
     # 0b1000_0110 -> 1 0 0 0 0 1 1 0; extra SHIFT_OUTs read the zero fill
-    trace = run0("CONFIG_SHIFT 1\nPULL\n" + "SHIFT_OUT\n" * 10, tx_data=[0b1000_0110])
+    trace = run0("CONFIG shift_dir, 1\nPULL\n" + "SHIFT_OUT\n" * 10, tx_data=[0b1000_0110])
     assert trace[2:] == [1, 0, 0, 0, 0, 1, 1, 0, 0, 0]
 
 
 def test_msb_first_shift_out_order_pin_then_shift_left_on_first_cycle():
     """The RTL contract mirrored: with shift_dir 1, gpio[0] takes shift_reg[7]
     and shift_reg <<= 1 (zero fill) on the same edge; delay cycles hold."""
-    cpu = CPU(assemble("CONFIG_SHIFT 1\nPULL\nSHIFT_OUT [1]\nSHIFT_OUT"), gpio=0, tx_data=[0b1100_0000])
+    cpu = CPU(assemble("CONFIG shift_dir, 1\nPULL\nSHIFT_OUT [1]\nSHIFT_OUT"), gpio=0, tx_data=[0b1100_0000])
     cpu.step()
     cpu.step()
     assert (cpu.gpio[0], cpu.shift_reg) == (0, 0xC0)  # configured and filled, pin untouched
@@ -120,7 +120,7 @@ def test_msb_first_shift_out_order_pin_then_shift_left_on_first_cycle():
 
 
 def test_shift_dir_is_configuration_and_persists_across_pull_and_jmp():
-    cpu = CPU(assemble("CONFIG_SHIFT 1\nloop: PULL\nSHIFT_OUT\nJMP loop"), tx_data=[0x80, 0x01])
+    cpu = CPU(assemble("CONFIG shift_dir, 1\nloop: PULL\nSHIFT_OUT\nJMP loop"), tx_data=[0x80, 0x01])
     while not cpu.stalled:
         cpu.step()
     # config, PULL, bit 7 of 0x80 = 1, JMP, PULL, bit 7 of 0x01 = 0, JMP, stall
@@ -128,10 +128,10 @@ def test_shift_dir_is_configuration_and_persists_across_pull_and_jmp():
     assert cpu.shift_dir == 1
 
 
-def test_config_shift_mid_byte_switches_the_end_that_shifts():
+def test_config_mid_byte_switches_the_end_that_shifts():
     # 0b1000_0001: the LSB goes out first; the right shift leaves the other 1 in
     # bit 6, so after switching to MSB first the next bit out is bit 7 = 0.
-    cpu = CPU(assemble("PULL\nSHIFT_OUT\nCONFIG_SHIFT 1\nSHIFT_OUT"), tx_data=[0b1000_0001])
+    cpu = CPU(assemble("PULL\nSHIFT_OUT\nCONFIG shift_dir, 1\nSHIFT_OUT"), tx_data=[0b1000_0001])
     cpu.run()
     assert cpu.pin_trace(0) == [1, 1, 1, 0]
     assert cpu.shift_reg == 0x80
@@ -256,7 +256,7 @@ def test_decode_rejects_bad_words(isa):
     with pytest.raises(ValueError):
         decode(0x2004, isa)  # SHIFT_OUT with an input pin: bits 3:2 are SHIFT_IN's
     with pytest.raises(ValueError):
-        decode(0x8002, isa)  # CONFIG_SHIFT with operand bit 1 set: only bit 0 is dir
+        decode(0x8002, isa)  # CONFIG shift_dir, 2: the field is one bit wide
     with pytest.raises(ValueError):
         decode(0x2003, isa)  # SHIFT_IN with the side value set but no side flag
     with pytest.raises(ValueError):
@@ -295,7 +295,7 @@ def test_shift_in_lsb_first_enters_at_bit_7_and_shifts_right():
 
 def test_shift_in_msb_first_enters_at_bit_0_and_shifts_left():
     """With shift_dir 1: in_shift_reg <= {in_shift_reg[6:0], gpio_in[pin]}."""
-    cpu = CPU(assemble("CONFIG_SHIFT 1\nSHIFT_IN 2\nSHIFT_IN 2\nSHIFT_IN 2"))
+    cpu = CPU(assemble("CONFIG shift_dir, 1\nSHIFT_IN 2\nSHIFT_IN 2\nSHIFT_IN 2"))
     cpu.step()
     cpu.gpio_in[2] = 1
     cpu.step()
@@ -317,7 +317,7 @@ def test_eight_shift_ins_rebuild_a_byte_in_normal_order(byte, shift_dir):
     configuration serves both directions of a protocol."""
     bits = [(byte >> i) & 1 for i in range(8)]
     wire = bits[::-1] if shift_dir else bits
-    cpu = CPU(assemble(f"CONFIG_SHIFT {shift_dir}\n" + "SHIFT_IN 1 [2]\n" * 8))
+    cpu = CPU(assemble(f"CONFIG shift_dir, {shift_dir}\n" + "SHIFT_IN 1 [2]\n" * 8))
     cpu.step()
     for bit in wire:
         cpu.gpio_in[1] = bit
@@ -365,7 +365,7 @@ def test_shift_in_samples_the_level_present_as_the_cycle_executes():
 
 
 def test_shift_in_touches_no_output_pin_nor_the_output_side():
-    cpu = CPU(assemble("CONFIG_SHIFT 1\nPULL\nSHIFT_IN 3 [1]"), tx_data=[0xA5])
+    cpu = CPU(assemble("CONFIG shift_dir, 1\nPULL\nSHIFT_IN 3 [1]"), tx_data=[0xA5])
     cpu.gpio_in[3] = 1
     cpu.run()
     assert (cpu.gpio, cpu.shift_reg, cpu.shift_dir, cpu.tx_fifo) == ([1, 1, 1, 1], 0xA5, 1, [])
@@ -399,7 +399,7 @@ def test_shift_in_side_effect_may_drive_gpio0():
 def test_shift_in_and_shift_out_share_shift_dir_but_not_a_register():
     """Full duplex in the small: the output register drains while the input
     register fills, each from its own end, both under one shift_dir."""
-    cpu = CPU(assemble("CONFIG_SHIFT 1\nPULL\n" + "SHIFT_OUT\nSHIFT_IN 0\n" * 8), tx_data=[0xA3])
+    cpu = CPU(assemble("CONFIG shift_dir, 1\nPULL\n" + "SHIFT_OUT\nSHIFT_IN 0\n" * 8), tx_data=[0xA3])
     cpu.step()
     cpu.step()
     for bit in [(0x5C >> i) & 1 for i in range(7, -1, -1)]:  # MSB first on the wire

@@ -13,9 +13,9 @@
 # normal order: with shift_dir 0 each sample lands in bit 7 and the register
 # shifts right, so the first bit sampled ends up in bit 0. There is no PUSH
 # yet; the test bench reads the register directly.
-# spi_duplex_msb.asm is this same program with CONFIG_SHIFT 1.
+# spi_duplex_msb.asm is this same program with CONFIG shift_dir, 1.
 
-        CONFIG_SHIFT 0      # LSB first (also the reset value), for SHIFT_OUT and SHIFT_IN alike
+        CONFIG shift_dir, 0 # LSB first (also the reset value), for SHIFT_OUT and SHIFT_IN alike
         SET 1, 0            # SCLK idle low
         PULL                # shift_reg = byte to send (stalls here while the FIFO is empty)
         SET 2, 0 [3]        # CS low: start of frame

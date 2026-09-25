@@ -1,8 +1,8 @@
-"""Mini PIO-style CPU that runs 16-bit SET / SHIFT_OUT / PULL / JMP / CONFIG_SHIFT / SHIFT_IN instructions one clock
+"""Mini PIO-style CPU that runs 16-bit SET / SHIFT_OUT / PULL / JMP / CONFIG / SHIFT_IN instructions one clock
 cycle at a time, driving gpio[3:0] and sampling gpio_in[3:0]: SET picks a pin, SHIFT_OUT always drives gpio[0], SHIFT_IN
 samples the pin it names into the input shift register, and both can drive one more pin as a side effect. SHIFT_OUT and
-SHIFT_IN are one opcode, SHIFT, told apart by an in/out bit in the operand. CONFIG_SHIFT sets shift_dir, the one bit of
-persistent configuration: which end of the shift registers is the wire."""
+SHIFT_IN are one opcode, SHIFT, told apart by an in/out bit in the operand. CONFIG field, value writes the configuration
+registers, so far only shift_dir: which end of the shift registers is the wire."""
 
 import re
 import sys
@@ -14,7 +14,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 ISA_PATH = ROOT / "isa.yaml"
 
-# e.g. "SET 0, 1 [7]", "SHIFT_OUT [7]", "SHIFT_OUT 1, 0 [3]", "SHIFT_IN 3, 1, 1 [3]", "set 1 0", "loop:", "JMP loop"
+# e.g. "SET 0, 1 [7]", "SHIFT_OUT [7]", "SHIFT_OUT 1, 0 [3]", "SHIFT_IN 3, 1, 1 [3]", "CONFIG shift_dir, 1", "loop:", "JMP loop"
 LINE_RE = re.compile(
     r"^(?:(?P<label>[A-Za-z_]\w*):)?\s*"
     r"(?:(?P<op>\w+)(?P<args>[^\[]*?)\s*(?:\[\s*(?P<delay>\w+)\s*\])?)?$"
@@ -53,7 +53,18 @@ def load_isa(path=ISA_PATH):
         pin = next(o for o in isa["instructions"][op]["operands"] if o["name"] == "pin")
         if 1 << pin["bits"] != isa[pins]:
             raise ValueError(f"isa.yaml: {op} pin doesn't address exactly {pins} pins")
+    field, value = (next(o for o in isa["instructions"]["CONFIG"]["operands"] if o["name"] == n) for n in ("field", "value"))
+    for name, cfg in isa["config"].items():
+        if cfg["field"] >> field["bits"] or cfg["bits"] > value["bits"]:
+            raise ValueError(f"isa.yaml: config {name} doesn't fit CONFIG's operands")
+    if len({cfg["field"] for cfg in isa["config"].values()}) != len(isa["config"]):
+        raise ValueError("isa.yaml: two config registers share a field number")
     return isa
+
+
+def config_field(isa, field):
+    """The config register spec for CONFIG's field number, or None if unassigned."""
+    return next((cfg for cfg in isa["config"].values() if cfg["field"] == field), None)
 
 
 def operand_mask(operand):
@@ -83,6 +94,13 @@ def check_operands(instr, isa):
             raise ValueError(
                 f"{instr.op} {operand['name']}={value} outside 0..{(1 << operand['bits']) - 1}"
             )
+    if instr.op == "CONFIG":
+        field, value = instr.args
+        cfg = config_field(isa, field)
+        if cfg is None:
+            raise ValueError(f"CONFIG field {field} is unassigned")
+        if value >> cfg["bits"]:
+            raise ValueError(f"CONFIG field {field} value={value} outside 0..{(1 << cfg['bits']) - 1}")
     if not 0 <= instr.delay <= delay_max(isa):
         raise ValueError(f"delay {instr.delay} outside 0..{delay_max(isa)}")
 
@@ -157,6 +175,9 @@ def assemble(source, isa=None):
     Operands written after an instruction's own are its GPIO side effect,
     e.g. `SHIFT_OUT 1, 0 [3]` shifts and drives gpio[1] low, and
     `SHIFT_IN 3, 1, 1 [3]` samples gpio_in[3] and drives gpio[1] high.
+
+    CONFIG takes its field by name or number: `CONFIG shift_dir, 1` is
+    `CONFIG 0, 1`. Like labels, the names never reach the words.
     """
     isa = isa or load_isa()
     labels = {}
@@ -178,9 +199,11 @@ def assemble(source, isa=None):
                 raise SyntaxError(f"line {lineno}: unknown instruction {op!r}")
             lines.append((lineno, op, m["args"].replace(",", " ").split(), m["delay"]))
 
-    def operand(lineno, text):
+    def operand(lineno, text, op=None):
         if text in labels:
             return labels[text]
+        if op == "CONFIG" and text in isa["config"]:
+            return isa["config"][text]["field"]
         try:
             return int(text, 0)
         except ValueError:
@@ -189,7 +212,7 @@ def assemble(source, isa=None):
     words = []
     for lineno, op, args, delay in lines:
         try:
-            args = tuple(operand(lineno, a) for a in args)
+            args = tuple(operand(lineno, a, op if i == 0 else None) for i, a in enumerate(args))
             delay = int(delay, 0) if delay else 0
             n = len(isa["instructions"][op]["operands"])
             side = args[n:] if len(args) > n and "side_effect" in isa["instructions"][op] else None
@@ -265,8 +288,11 @@ class CPU:
                     self.in_shift_reg = ((self.in_shift_reg << 1) & 0xFF) | bit
             elif instr.op == "PULL":
                 self.shift_reg = self.tx_fifo.pop(0)
-            elif instr.op == "CONFIG_SHIFT":
-                self.shift_dir = instr.args[0]
+            elif instr.op == "CONFIG":
+                # One write port into the configuration registers, field-decoded.
+                field, value = instr.args
+                if field == self.isa["config"]["shift_dir"]["field"]:
+                    self.shift_dir = value
             if instr.side is not None:
                 # GPIO side effect: one more pin, same edge as the primary operation.
                 pin, value = instr.side

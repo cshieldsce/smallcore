@@ -32,14 +32,20 @@
 # / MSB first. SHIFT_OUT sends that end of the output register, SHIFT_IN
 # samples into the opposite end of the input register and shifts towards the
 # wire end, so eight samples rebuild the byte in normal order either way.
-# CONFIG_SHIFT sets it and it holds until the next CONFIG_SHIFT, so a program
-# states its bit order once per protocol, not once per bit. Experiment: the
-# first piece of protocol configuration.
+# `CONFIG shift_dir, d` sets it and it holds until the next CONFIG, so a
+# program states its bit order once per protocol, not once per bit. CONFIG
+# takes a field number and a value, and `config` below names the fields:
+# shift_dir is field 0 and so far the only one, so a shift pin, an input pin
+# or an idle level can join later without costing an opcode each.
+# Experiment: the first piece of protocol configuration.
 #
 
 word_bits: 16
 gpio_out: 4
 gpio_in: 4
+
+config:   # CONFIG field, value: the configuration registers, by field number
+  shift_dir: {field: 0, bits: 1}   # 0 = LSB first (reset), 1 = MSB first
 
 fields:
   opcode:  {lsb: 13, bits: 3}
@@ -96,16 +102,20 @@ instructions:
     operands:
       - {name: target, lsb: 0, bits: 8}
 
-  CONFIG_SHIFT:
+  CONFIG:
     opcode: 0b100
     description: >
-      Set shift_dir to `dir`: 0 = LSB first (SHIFT_OUT sends shift_reg[0] and
-      shifts right), 1 = MSB first (sends shift_reg[7] and shifts left). It
-      resets to 0 and holds until the next CONFIG_SHIFT. The pins and shift
-      register are unchanged. Experiment: opcode and shape not final.
+      Set configuration register `field` to `value`; the assembler takes the
+      field by name. Field 0 is shift_dir: 0 = LSB first (SHIFT_OUT sends
+      shift_reg[0] and shifts right), 1 = MSB first (sends shift_reg[7] and
+      shifts left). Every field resets to 0 and holds until the next CONFIG
+      of it. The pins and shift registers are unchanged. Fields 1..3 are
+      unassigned and a `value` wider than the field is an error.
+      Experiment: opcode and shape not final.
     cycles: 1 + delay
     operands:
-      - {name: dir, lsb: 0, bits: 1}
+      - {name: field, lsb: 2, bits: 2}
+      - {name: value, lsb: 0, bits: 2}
 
   SHIFT_IN:
     opcode: 0b001   # SHIFT with in = 1

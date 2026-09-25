@@ -14,7 +14,7 @@
 # shifts left, so the first bit sampled ends up in bit 7. There is no PUSH
 # yet; the test bench reads the register directly.
 
-        CONFIG_SHIFT 1      # MSB first, for SHIFT_OUT and SHIFT_IN alike
+        CONFIG shift_dir, 1 # MSB first, for SHIFT_OUT and SHIFT_IN alike
         SET 1, 0            # SCLK idle low
         PULL                # shift_reg = byte to send (stalls here while the FIFO is empty)
         SET 2, 0 [3]        # CS low: start of frame

@@ -3,7 +3,7 @@ transmit-only and the full-duplex programs. The `run` helper is the only place
 that knows which pin is which; every check watches the pins like a slave
 would: CS frames the transfer, MOSI is sampled on each rising edge of SCLK,
 and a slave model drives MISO for the master to sample on that same edge. The
-programs of one pair are the same words apart from their CONFIG_SHIFT, so the
+programs of one pair are the same words apart from their CONFIG shift_dir value, so the
 slave must see the same byte in opposite order; the duplex programs are the
 transmit programs with SHIFT_IN raising the clock instead of SET."""
 
@@ -180,14 +180,14 @@ def test_msb_program_puts_the_lsb_programs_bits_on_the_wire_backwards(pair, byte
 
 
 @pytest.mark.parametrize("pair", (TX, DUPLEX), ids=("tx", "duplex"))
-def test_programs_differ_only_in_the_config_shift_operand(pair):
+def test_programs_differ_only_in_the_config_shift_dir_value(pair):
     """Bit order is configuration: the transfer itself is word for word the same."""
     isa = load_isa()
     lsb, msb = (load_program(p) for p in pair)
     assert len(lsb) == len(msb)
     (i,) = [i for i, (a, b) in enumerate(zip(lsb, msb)) if a != b]
-    assert decode(lsb[i], isa).op == decode(msb[i], isa).op == "CONFIG_SHIFT"
-    assert (decode(lsb[i], isa).args, decode(msb[i], isa).args) == ((0,), (1,))
+    assert decode(lsb[i], isa).op == decode(msb[i], isa).op == "CONFIG"
+    assert (decode(lsb[i], isa).args, decode(msb[i], isa).args) == ((0, 0), (0, 1))
 
 
 def test_program_is_two_instructions_per_bit(program):

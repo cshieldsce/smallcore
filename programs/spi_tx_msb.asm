@@ -9,12 +9,12 @@
 # the clock on the same edge (its GPIO side effect), then SET raises the clock.
 # 4 cycles low, 4 cycles high.
 #
-# Bit order is machine configuration, not part of SHIFT_OUT: CONFIG_SHIFT 1
+# Bit order is machine configuration, not part of SHIFT_OUT: CONFIG shift_dir, 1
 # makes every SHIFT_OUT send shift_reg[7] and shift left, so the frame goes
 # out MSB first, as most SPI devices expect. The eight SHIFT_OUTs below are
 # the same words as in spi_tx_lsb.asm; only the configuration differs.
 
-        CONFIG_SHIFT 1      # MSB first
+        CONFIG shift_dir, 1 # MSB first
         SET 1, 0            # SCLK idle low
         PULL                # shift_reg = byte to send (stalls here while the FIFO is empty)
         SET 2, 0 [3]        # CS low: start of frame

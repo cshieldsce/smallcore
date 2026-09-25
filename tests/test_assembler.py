@@ -27,9 +27,9 @@ def isa():
     (Instruction("JMP", (0,), 0), 0x6000),  # 011 00000 00000000
     (Instruction("JMP", (1,), 0), 0x6001),
     (Instruction("JMP", (255,), 31), 0x7FFF),  # 011 11111 11111111
-    (Instruction("CONFIG_SHIFT", (0,), 0), 0x8000),  # 100 00000 00000000
-    (Instruction("CONFIG_SHIFT", (1,), 0), 0x8001),  # 100 00000 00000001
-    (Instruction("CONFIG_SHIFT", (1,), 7), 0x8701),  # 100 00111 00000001
+    (Instruction("CONFIG", (0, 0), 0), 0x8000),  # 100 00000 00000000  field 0 = shift_dir in operand[3:2], value in [1:0]
+    (Instruction("CONFIG", (0, 1), 0), 0x8001),  # 100 00000 00000001
+    (Instruction("CONFIG", (0, 1), 7), 0x8701),  # 100 00111 00000001
     (Instruction("SHIFT_IN", (0,), 0), 0x2002),  # 001 00000 00000010  SHIFT with in = 1 in operand[1]
     (Instruction("SHIFT_IN", (3,), 0), 0x200E),  # 001 00000 00001110  pin in operand[3:2]
     (Instruction("SHIFT_IN", (3,), 3, side=(1, 1)), 0x239F),  # 001 00011 10011111  flag, side pin 1, pin 3, in, value 1
@@ -46,7 +46,8 @@ def test_encoding(isa, instr, word):
                                   "SHIFT_OUT 1", "SHIFT_OUT 0, 1", "SHIFT_OUT 4, 0", "SHIFT_OUT 1, 2",
                                   "SHIFT_OUT 1, 0, 1", "SET 1, 0, 1", "PULL 1, 0", "JMP 0, 1, 0",
                                   "PULL 0x55", "JMP", "JMP 256", "JMP nowhere",
-                                  "CONFIG_SHIFT", "CONFIG_SHIFT 2", "CONFIG_SHIFT 0, 1", "CONFIG_SHIFT 1, 0",
+                                  "CONFIG", "CONFIG shift_dir", "CONFIG shift_dir, 2", "CONFIG 0, 1, 0", "CONFIG 1, 0",
+                                  "CONFIG 4, 0", "CONFIG nothing, 0", "CONFIG_SHIFT 1", "CONFIG 0, shift_dir",
                                   "SHIFT_IN", "SHIFT_IN 4", "SHIFT_IN 3, 1", "SHIFT_IN 3, 4, 1", "SHIFT_IN 3, 1, 2",
                                   "SHIFT_IN 3, 1, 1, 0",
                                   "1: SET 0, 0", "loop:: SET 0, 0"])
@@ -98,9 +99,19 @@ def test_side_effect_pin_and_value_sit_in_sets_operand_bits(isa):
         assert side["flag"] == {"lsb": 7, "bits": 1}
 
 
-def test_config_shift_takes_the_direction_bit():
-    assert assemble("CONFIG_SHIFT 0") == [0x8000]
-    assert assemble("CONFIG_SHIFT 1 [3]") == assemble("config_shift 1 [3]") == [0x8301]
+def test_config_takes_a_field_by_name_or_number_then_a_value():
+    assert assemble("CONFIG shift_dir, 0") == assemble("CONFIG 0, 0") == [0x8000]
+    assert assemble("CONFIG shift_dir, 1 [3]") == assemble("config shift_dir,1 [3]") == [0x8301]
+    assert decode(0x8301, load_isa()) == Instruction("CONFIG", (0, 1), 3)
+
+
+def test_config_fields_1_to_3_are_unassigned(isa):
+    assert isa["config"] == {"shift_dir": {"field": 0, "bits": 1}}
+    for word in (0x8004, 0x8008, 0x800C):  # fields 1, 2, 3
+        with pytest.raises(ValueError, match="unassigned"):
+            decode(word, isa)
+    with pytest.raises(ValueError, match="outside 0..1"):
+        decode(0x8002, isa)  # shift_dir is one bit wide
 
 
 def test_jmp_takes_an_absolute_address():
