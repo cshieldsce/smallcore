@@ -268,3 +268,79 @@ def test_a_pad_that_lets_go_on_a_1_is_all_the_ack_needs(byte, wave):
     nacked = run(WRITE, [byte], Slave(address=other(byte >> 1)), open_drain)
     assert nacked.fights == [] and nacked.slave.events == ["START", (byte, False), "STOP"]
     assert nacked.cpu.rx_fifo == [1], "NACK"
+
+
+# --- programs/i2c_write_stretch.asm: WAIT on SCL before every high phase ------
+
+
+def test_stretch_program_is_the_plain_one_with_a_wait_before_every_high_phase():
+    """One word per clock: `SET 1, 1 [3]` becomes `SET 1, 1` then `WAIT 1, 1
+    [2]`, and one more for the ACK clock, whose sample can no longer ride on
+    the rise. With a slave that never stretches, the bus is the same, cycle
+    for cycle, and so is what both sides took from it."""
+    isa = load_isa()
+    plain, stretch = load_program(WRITE, isa), load_program(STRETCH, isa)
+    waits = [decode(w, isa) for w in stretch if decode(w, isa).op == "WAIT"]
+    assert len(stretch) == len(plain) + CLOCKS + 1 and len(waits) == CLOCKS
+    assert all(w.args == (SCL, 1) and w.side is None for w in waits)
+    for byte in BYTES:
+        a, b = run(WRITE, [byte]), run(STRETCH, [byte])
+        assert (b.sda, b.scl) == (a.sda, a.scl)
+        assert (b.slave.events, b.cpu.rx_fifo, b.waits) == (a.slave.events, [0], 0)
+
+
+@pytest.mark.parametrize("stretch", (1, 3, 4, 5, 8, 20))
+def test_master_waits_for_a_slave_that_stretches_the_clock(stretch, wave):
+    """The slave holds SCL low for `stretch` cycles after each falling edge.
+    The master's low phase already covers three of them (its release reaches
+    the bus on the fourth), so the WAIT stalls for the rest, every high phase
+    is still HIGH cycles from the rise the bus shows, and the byte, the ACK
+    and the STOP are all right. The same WAIT that found a start bit."""
+    r = run(STRETCH, [0xA3], Slave(stretch=stretch))
+    if stretch == 8:
+        show(wave, r)
+    over = max(stretch - 3, 0)
+    ups, downs = rising_edges(r.scl), falling_edges(r.scl)
+    assert r.fights == [] and r.slave.events == ["START", (0xA3, True), "STOP"] and r.cpu.rx_fifo == [0]
+    assert [d - u for u, d in zip(ups, downs[1:])] == [HIGH] * (CLOCKS - 1), "high phases, from the real rise"
+    assert [u - d for d, u in zip(downs, ups)] == [HIGH + over] * CLOCKS, "low phases, as long as the slave says"
+    assert r.waits == CLOCKS * over
+    assert r.cpu.cycle == run(WRITE, [0xA3]).cpu.cycle + CLOCKS * over
+
+
+def test_master_follows_a_slave_that_stretches_a_different_amount_each_time():
+    rng = random.Random(5)
+    holds = [rng.choice((0, 0, 2, 5, 9, 17)) for _ in range(CLOCKS)]
+    r = run(STRETCH, [0x5C], Slave(stretch=lambda fall: holds[fall - 1]))
+    ups, downs = rising_edges(r.scl), falling_edges(r.scl)
+    assert r.fights == [] and r.slave.events == ["START", (0x5C, True), "STOP"] and r.cpu.rx_fifo == [0]
+    assert [d - u for u, d in zip(ups, downs[1:])] == [HIGH] * (CLOCKS - 1)
+    assert [u - d for d, u in zip(downs, ups)] == [HIGH + max(h - 3, 0) for h in holds]
+    assert r.waits == sum(max(h - 3, 0) for h in holds) > 0
+
+
+def test_push_pull_master_drives_scl_high_through_the_slaves_stretch():
+    """The same wall on the other line. The master lets go of SCL with a
+    driven 1 while the slave holds it low: a slave that holds for 8 cycles
+    after each fall is still holding through every high phase, so every
+    cycle the master drives SCL high from the first fall on is a fight. The
+    WAIT reads the master's own 1 and never stalls, the transfer takes
+    exactly as long as with no stretch, and the ACK is unseen as before. The
+    WAIT works, the pin does not."""
+    r = run(STRETCH, [0xA3], Slave(stretch=8), push_pull)
+    out = r.cpu.pin_trace(SCL)
+    first = falling_edges(out)[0]
+    assert [c for c, line in r.fights if line == SCL] == [c for c in range(first + 2, r.cpu.cycle) if out[c - 1] == 1]
+    assert r.waits == 0
+    assert r.cpu.cycle == run(WRITE, [0xA3]).cpu.cycle
+    assert r.slave.events == ["START", (0xA3, True), "STOP"] and r.cpu.rx_fifo == [1]
+
+
+def test_the_release_cannot_be_the_waits_own_side_effect():
+    """`WAIT 1, 1, 1, 1`, let go of SCL and wait for it to rise in one word,
+    never issues: the side effect lands on the edge the WAIT issues, and the
+    WAIT issues once SCL is high, which the side effect was to make it. Two
+    words per clock, then."""
+    r = run(assemble("SET 1, 0\nWAIT 1, 1, 1, 1\nSET 0, 0"), [], Slave(), open_drain, cycles=50)
+    assert r.cpu.stalled and decode(r.cpu.program[r.cpu.pc], r.cpu.isa).op == "WAIT"
+    assert r.cpu.pin_trace(SCL)[-1] == 0 and r.scl[-1] == 0 and not r.cpu.halted
