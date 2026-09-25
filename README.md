@@ -68,7 +68,7 @@ From the big picture down to what the Verilog will look like:
 |---|---|
 | `docs/overview.svg` | program and bytes in, UART or SPI out, how a byte reaches the pins |
 | `docs/isa_encoding.svg` | the 16-bit word: opcode / delay / side effect / own operands per instruction |
-| `docs/isa_execute.svg` | what each instruction does, cycles, the PULL and PUSH stalls |
+| `docs/isa_execute.svg` | what each instruction does, cycles, the PULL, PUSH and WAIT stalls |
 | `docs/core.svg` | datapath at register level, named as in the Verilog |
 | `docs/control.svg` | the control block: inputs, equations, counter, enables |
 | `docs/states.svg` | the same block as per-cycle states: Issue, Hold, Stall, Halt |

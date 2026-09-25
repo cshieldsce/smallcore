@@ -1,5 +1,5 @@
 %% What the control block does each cycle. Not a separate state register:
-%% each state is read off counter, pc and fifo_empty.
+%% each state is read off counter, pc, tx_empty, rx_full and gpio_in.
 stateDiagram-v2
   direction LR
   [*] --> Issue
@@ -11,15 +11,15 @@ stateDiagram-v2
   Hold : Hold (counter > 0)
   Hold : counter ← counter − 1
 
-  Stall : Stall (PULL, FIFO empty)
-  Stall : everything holds
+  Stall : Stall (PULL, TX FIFO empty / PUSH, RX FIFO full /<br/>WAIT, pin not at the level)
+  Stall : everything holds, side effect waits too
 
   Halt : Halt (pc == N)
   Halt : pins keep their levels
 
   Issue --> Hold : delay > 0
   Hold --> Issue : counter == 1
-  Issue --> Stall : FIFO empty
-  Stall --> Issue : byte arrived
+  Issue --> Stall : FIFO empty / full,<br/>pin not at the level
+  Stall --> Issue : byte arrived / room /<br/>the level
   Issue --> Halt : last instruction<br/>finished
   Hold --> Halt : last instruction<br/>finished

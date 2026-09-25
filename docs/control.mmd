@@ -1,6 +1,7 @@
-%%{init: {"flowchart": {"wrappingWidth": 420}}}%%
+%%{init: {"flowchart": {"wrappingWidth": 440}}}%%
 %% The control block: what it reads, what it computes, what it drives. All combinational
-%% except the counter register. Signal names match core.svg.
+%% except the counter register. Signal names match core.svg. The opcode names stand for
+%% opcode == that value: NOP/SET = 000, SHIFT = 001, FIFO = 010, JMP = 011, CONFIG = 100, WAIT = 101.
 flowchart LR
   classDef sig fill:#f0f0f0,stroke:#888
   classDef reg fill:#dbe8ff,stroke:#4a6fa5
@@ -9,27 +10,35 @@ flowchart LR
   OPC(["opcode"]):::sig
   DLY(["delay"]):::sig
   PCV(["pc"]):::sig
-  EMP(["fifo_empty"]):::sig
+  EMP(["tx_empty"]):::sig
+  FUL(["rx_full"]):::sig
+  GIN(["gpio_in[3:0]"]):::sig
   SIDE(["side = operand[7]"]):::sig
+  OWN(["own = operand[3:0]<br/>in = own[1], push = own[0], field = own[3:2]<br/>in_pin = own[3:2], level = own[0]"]):::sig
 
-  CU["<b>control</b><br/><br/>cycles = 1 + delay<br/>halted = pc == N<br/>issue = !halted & counter == 0<br/>stall = issue & PULL & fifo_empty<br/>last = issue ? delay == 0 : counter == 1<br/><br/><b>counter</b> reg, 5 bits, rst → 0<br/>issue & !stall → delay<br/>counter > 0 → counter − 1"]:::comb
+  CU["<b>control</b><br/><br/>cycles = 1 + delay<br/>halted = pc == N<br/>issue = !halted & counter == 0<br/>stall = issue & (FIFO & (push ? rx_full : tx_empty)<br/>| WAIT & gpio_in[in_pin] != level)<br/>last = issue ? delay == 0 : counter == 1<br/><br/><b>counter</b> reg, 5 bits, rst → 0<br/>issue & !stall → delay<br/>counter > 0 → counter − 1"]:::comb
 
   PCI(["pc_en = last & !stall"]):::sig
   PCJ(["pc_jmp = JMP"]):::sig
-  PLE(["pull_en = issue & PULL & !fifo_empty"]):::sig
-  SHE(["shift_en = issue & SHIFT_OUT"]):::sig
-  SIE(["shift_in_en = issue & SHIFT_IN"]):::sig
-  PNE(["gpio_en = issue & (SET | (SHIFT_OUT | SHIFT_IN) & side)"]):::sig
-  DIE(["dir_en = issue & CONFIG_SHIFT"]):::sig
+  PLE(["pull_en = issue & FIFO & !push & !tx_empty"]):::sig
+  PSE(["push_en = issue & FIFO & push & !rx_full"]):::sig
+  SHE(["shift_en = issue & SHIFT & !in"]):::sig
+  SIE(["shift_in_en = issue & SHIFT & in"]):::sig
+  PNE(["gpio_en = issue & !stall & side & !JMP<br/>(one pin-write port: SET and every side effect)"]):::sig
+  DIE(["dir_en = issue & CONFIG & field == 0"]):::sig
 
   OPC --> CU
   DLY --> CU
   PCV --> CU
   EMP --> CU
+  FUL --> CU
+  GIN --> CU
   SIDE --> CU
+  OWN --> CU
   CU --> PCI
   CU --> PCJ
   CU --> PLE
+  CU --> PSE
   CU --> SHE
   CU --> SIE
   CU --> PNE

@@ -1,20 +1,30 @@
 %%{init: {"flowchart": {"wrappingWidth": 260}}}%%
-flowchart LR
+flowchart-elk LR
   W["16-bit word<br/>at PC"] --> OP{"opcode<br/>[15:13]"}
-  OP -->|010| PULL["<b>PULL [d]</b><br/>shift_reg ← FIFO head<br/>pins unchanged<br/>takes 1 + d cycles<br/>after any stall"]
+  OP -->|"010, pull"| PULL["<b>PULL [p, l] [d]</b><br/>shift_reg ← TX FIFO head<br/>takes 1 + d cycles<br/>after any stall"]
   PULL -->|"TX FIFO empty: stall,<br/>everything holds"| PULL
-  OP -->|000| SET["<b>SET p, v [d]</b><br/>gpio[p] ← v<br/>other pins unchanged<br/>takes 1 + d cycles"]
-  OP -->|001| SHIFT["<b>SHIFT_OUT [p, v] [d]</b><br/>gpio[0] ← next bit, then shift:<br/>shift_dir 0: shift_reg[0], >> 1<br/>shift_dir 1: shift_reg[7], << 1<br/>with p, v: gpio[p] ← v<br/>(one edge, then hold)<br/>takes 1 + d cycles"]
-  OP -->|011| JMP["<b>JMP target [d]</b><br/>pins, shift registers unchanged<br/>takes 1 + d cycles"]
-  OP -->|100| CFG["<b>CONFIG_SHIFT r [d]</b><br/>shift_dir ← r<br/>pins, shift registers unchanged<br/>takes 1 + d cycles"]
-  OP -->|101| SHIN["<b>SHIFT_IN i [p, v] [d]</b><br/>bit = gpio_in[i] at cycle start<br/>shift_dir 0: >> 1, then [7] ← bit<br/>shift_dir 1: << 1, then [0] ← bit<br/>(of in_shift_reg)<br/>with p, v: gpio[p] ← v<br/>(one edge, then hold)<br/>takes 1 + d cycles"]
+  OP -->|"010, push"| PUSH["<b>PUSH [p, l] [d]</b><br/>RX FIFO ← in_shift_reg<br/>(register keeps its value)<br/>takes 1 + d cycles<br/>after any stall"]
+  PUSH -->|"RX FIFO full: stall,<br/>everything holds"| PUSH
+  OP -->|"000, no side"| NOP["<b>NOP [d]</b><br/>nothing changes<br/>takes 1 + d cycles"]
+  OP -->|"000, side"| SET["<b>SET p, l [d]</b><br/>gpio[p] ← l<br/>other pins unchanged<br/>takes 1 + d cycles"]
+  OP -->|"001, out"| SHIFT["<b>SHIFT_OUT [p, l] [d]</b><br/>gpio[0] ← next bit, then shift:<br/>shift_dir 0: shift_reg[0], >> 1<br/>shift_dir 1: shift_reg[7], << 1<br/>takes 1 + d cycles"]
+  OP -->|"001, in"| SHIN["<b>SHIFT_IN i [p, l] [d]</b><br/>bit = gpio_in[i] at cycle start<br/>shift_dir 0: >> 1, then [7] ← bit<br/>shift_dir 1: << 1, then [0] ← bit<br/>(of in_shift_reg)<br/>takes 1 + d cycles"]
+  OP -->|100| CFG["<b>CONFIG f, v [p, l] [d]</b><br/>config[f] ← v<br/>(f = 0: shift_dir)<br/>takes 1 + d cycles"]
+  OP -->|101| WAIT["<b>WAIT i, v [p, l] [d]</b><br/>stall while gpio_in[i] != v<br/>(read at cycle start, like SHIFT_IN)<br/>takes 1 + d cycles<br/>after any stall"]
+  WAIT -->|"gpio_in[i] != v: stall,<br/>everything holds"| WAIT
+  OP -->|011| JMP["<b>JMP target [d]</b><br/>pins, registers unchanged<br/>no side effect<br/>takes 1 + d cycles"]
   PULL --> NEXT["PC ← PC + 1"]
+  PUSH --> NEXT
+  NOP --> NEXT
   SET --> NEXT
   SHIFT --> NEXT
-  CFG --> NEXT
   SHIN --> NEXT
+  CFG --> NEXT
+  WAIT --> NEXT
   JMP --> JNEXT["PC ← target"]
+  HALT ~~~ SIDE["<b>side effect</b> [p, l]<br/>on every instruction but JMP:<br/>gpio[p] ← l on the first cycle,<br/>the same edge as the operation<br/>(after any stall)"]
   NEXT --> END{"PC past last<br/>instruction?"}
   JNEXT --> END
   END -->|no| W
   END -->|yes| HALT(["halt<br/>pins keep their levels"])
+  style SIDE fill:#fff4d6,stroke:#c49a2a

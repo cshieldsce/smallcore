@@ -1,10 +1,12 @@
 %%{init: {"flowchart": {"wrappingWidth": 320}}}%%
 %% Datapath at Verilog level. Blue = register (one always @(posedge clk)), yellow = combinational.
-%% Only data wires are drawn. The enables named inside each register (pull_en, shift_en,
+%% Only data wires are drawn. The enables named inside each register (pull_en, push_en, shift_en,
 %% shift_in_en, gpio_en, dir_en, pc_en, pc_jmp) come from the control block, see control.svg.
-%% gpio has two write ports: SHIFT_OUT writes gpio[0], SET and a side effect write the operand
-%% pin. shift_dir selects which end of shift_reg feeds gpio[0], which end of in_shift_reg the
-%% sampled input pin enters, and which way both shift.
+%% gpio has two write ports: SHIFT_OUT writes gpio[0]; the one side-effect port (SET and every
+%% other instruction's `pin, level`) writes gpio[side_pin]. shift_dir selects which end of
+%% shift_reg feeds gpio[0], which end of in_shift_reg the sampled input pin enters, and which
+%% way both shift. in_bit, the input pin own[3:2] selects, also goes to the control block:
+%% WAIT stalls while in_bit != own[0], see control.svg.
 flowchart LR
   classDef reg fill:#dbe8ff,stroke:#4a6fa5
   classDef comb fill:#fff4d6,stroke:#c49a2a
@@ -17,27 +19,30 @@ flowchart LR
     direction LR
     PC["<b>pc</b> reg, 8 bits<br/>rst → 0<br/>pc_en → pc_jmp ? operand : pc + 1"]:::reg
     IMEM["<b>imem</b> ROM<br/>N × 16 bits<br/>word = imem[pc]"]:::comb
-    DEC["<b>decode</b><br/>opcode = word[15:13]<br/>delay = word[12:8]<br/>operand = word[7:0]"]:::comb
+    DEC["<b>decode</b><br/>opcode = word[15:13]<br/>delay = word[12:8]<br/>operand = word[7:0]<br/>side = operand[7]<br/>side_pin = operand[6:5]<br/>side_val = operand[4]<br/>own = operand[3:0]"]:::comb
     FIFO["<b>tx_fifo</b><br/>8 bits × depth<br/>tx_push → append<br/>pull_en → drop head"]:::reg
-    SD["<b>shift_dir</b> reg, 1 bit<br/>rst → 0 (LSB first)<br/>dir_en → operand[0]"]:::reg
+    SD["<b>shift_dir</b> reg, 1 bit<br/>rst → 0 (LSB first)<br/>dir_en → own[0]<br/>(CONFIG field own[3:2] = 0)"]:::reg
     SR["<b>shift_reg</b> reg, 8 bits<br/>rst → 0<br/>pull_en → fifo_head<br/>shift_en → shift_dir ?<br/>{shift_reg[6:0], 1'b0} : {1'b0, shift_reg[7:1]}<br/>shift_bit = shift_dir ?<br/>shift_reg[7] : shift_reg[0]"]:::reg
-    PIN["<b>gpio</b> reg, 4 bits<br/>rst → 4'b1111<br/>shift_en → gpio[0] ← shift_bit<br/>gpio_en → gpio[pin] ← operand[0]<br/>pin = operand[5:4]<br/>(SHIFT_OUT's side effect fires both:<br/>its pin is never 0)"]:::reg
-    ISR["<b>in_shift_reg</b> reg, 8 bits<br/>rst → 0<br/>shift_in_en → shift_dir ?<br/>{in_shift_reg[6:0], in_bit} : {in_bit, in_shift_reg[7:1]}<br/>in_bit = gpio_in[operand[3:2]]<br/>(sampled at the same edge<br/>a side effect writes gpio)"]:::reg
+    PIN["<b>gpio</b> reg, 4 bits<br/>rst → 4'b1111<br/>shift_en → gpio[0] ← shift_bit<br/>gpio_en → gpio[side_pin] ← side_val<br/>(SHIFT_OUT's side pin is never 0:<br/>the two ports never collide)"]:::reg
+    ISR["<b>in_shift_reg</b> reg, 8 bits<br/>rst → 0<br/>shift_in_en → shift_dir ?<br/>{in_shift_reg[6:0], in_bit} : {in_bit, in_shift_reg[7:1]}<br/>in_bit = gpio_in[own[3:2]]<br/>(sampled at the same edge<br/>a side effect writes gpio;<br/>WAIT compares it with own[0])"]:::reg
+    RXF["<b>rx_fifo</b><br/>8 bits × depth<br/>push_en → append in_shift_reg<br/>rx_pop → drop head"]:::reg
 
     PC -->|"pc"| IMEM
     IMEM -->|"word[15:0]"| DEC
-    DEC -->|"operand[5:4], operand[0]"| PIN
+    DEC -->|"side_pin, side_val"| PIN
     DEC -->|"operand[7:0]"| PC
-    DEC -->|"operand[0]"| SD
+    DEC -->|"own[0]"| SD
     SD -->|"shift_dir"| SR
     SD -->|"shift_dir"| ISR
-    DEC -->|"operand[3:2]"| ISR
+    DEC -->|"own[3:2]"| ISR
     FIFO -->|"fifo_head[7:0]"| SR
     SR -->|"shift_bit"| PIN
+    ISR -->|"in_shift_reg[7:0]"| RXF
   end
 
   TXIN --> FIFO
   GIN -->|"gpio_in[3:0]"| ISR
   PIN -->|"gpio[3:0]"| OUT(["gpio out"]):::ext
+  RXF --> RXOUT(["rx_data[7:0], rx_pop"]):::ext
 
   style core fill:#f6f8fb,stroke:#9aa7b8

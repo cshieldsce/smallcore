@@ -2,15 +2,21 @@ block-beta
   columns 16
   b15["15"] b14["14"] b13["13"] b12["12"] b11["11"] b10["10"] b9["9"] b8["8"]
   b7["7"] b6["6"] b5["5"] b4["4"] b3["3"] b2["2"] b1["1"] b0["0"]
-  opcode["opcode (3)"]:3 delay["delay (5)<br/>0–31 extra cycles"]:5 operand["operand (8)"]:8
-  set["000 = SET"]:3 setd["d"]:5 setop["00pp 000v<br/>p = pin 0–3, v = level"]:8
-  shift["001 = SHIFT_OUT"]:3 shiftd["d"]:5 shiftop["s0pp 000v<br/>s = 1: side effect, also gpio[p] ← v (p = 1–3)"]:8
-  pull["010 = PULL"]:3 pulld["d"]:5 pullop["0"]:8
-  jmp["011 = JMP"]:3 jmpd["d"]:5 jmpop["target<br/>program address 0–255"]:8
-  cfg["100 = CONFIG_SHIFT"]:3 cfgd["d"]:5 cfgop["0000 000r<br/>r = shift_dir: 0 = LSB first, 1 = MSB first"]:8
-  shin["101 = SHIFT_IN"]:3 shind["d"]:5 shinop["s0pp ii0v<br/>i = input pin 0–3; s = 1: side effect, also gpio[p] ← v (p = 0–3)"]:8
+  opcode["opcode (3)"]:3 delay["delay (5)<br/>0–31 extra cycles"]:5 side["side effect (4): s p p l<br/>s = 1: also gpio[p] ← l"]:4 own["own operands (4)"]:4
+  nop["000 = NOP"]:3 nopd["d"]:5 nopop["0000 0000"]:8
+  set["000 = SET"]:3 setd["d"]:5 setop["1ppl 0000<br/>p = pin 0–3, l = level: the side effect alone"]:8
+  shift["001 = SHIFT_OUT"]:3 shiftd["d"]:5 shiftop["sppl 0000<br/>side pin p = 1–3, gpio[0] is the shift pin"]:8
+  shin["001 = SHIFT_IN"]:3 shind["d"]:5 shinop["sppl ii10<br/>i = input pin 0–3, bit 1 = in; side pin p = 0–3"]:8
+  pull["010 = PULL"]:3 pulld["d"]:5 pullop["sppl 0000"]:8
+  push["010 = PUSH"]:3 pushd["d"]:5 pushop["sppl 0001<br/>bit 0 = push"]:8
+  jmp["011 = JMP"]:3 jmpd["d"]:5 jmpop["target<br/>program address 0–255, no side effect"]:8
+  cfg["100 = CONFIG"]:3 cfgd["d"]:5 cfgop["sppl ffvv<br/>f = field (0 = shift_dir), v = value"]:8
+  wait["101 = WAIT"]:3 waitd["d"]:5 waitop["sppl ii0v<br/>i = input pin 0–3, v = level to wait for; bit 1 unused"]:8
+  free["110, 111"]:3 freed["free"]:13
 
   classDef hdr fill:#eee,stroke:#999,color:#555
   classDef field fill:#dbe8ff,stroke:#4a6fa5
+  classDef unused fill:#f6f6f6,stroke:#bbb,color:#888
   class b15,b14,b13,b12,b11,b10,b9,b8,b7,b6,b5,b4,b3,b2,b1,b0 hdr
-  class opcode,delay,operand field
+  class opcode,delay,side,own field
+  class free,freed unused
