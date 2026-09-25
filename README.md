@@ -38,6 +38,7 @@ python sim/cpu.py programs/spi_tx_lsb.asm 0xA3      # SPI mode 0: MOSI, SCLK, CS
 python sim/cpu.py programs/spi_tx_msb.asm 0xA3      # same words except CONFIG shift_dir, 1
 python sim/cpu.py programs/spi_duplex_msb.asm 0xA3  # also samples MISO on gpio_in 3 and PUSHes the byte (the CLI holds inputs at 0)
 python -m pytest tests/test_uart_rx.py -v           # UART RX: uart_rx.asm fed by uart_tx_loop.asm over a wire, waves in build/waves/uart_rx/
+python -m pytest tests/test_i2c.py -v               # I2C master write on a bus model with a slave: one byte, clock stretching, address + data
 python tools/render_docs.py                         # docs/*.mmd -> .svg (needs mermaid-cli)
 ```
 
@@ -54,7 +55,10 @@ What the protocols have asked of the core, in order. Open items stay open until 
 | get the received byte out | SPI duplex | `PUSH` into an RX FIFO; `PUSH 2, 1` also ends the frame |
 | six of eight opcodes used | the ISA | one `SHIFT` opcode with an in bit, one `FIFO` opcode with a push bit, generic `CONFIG`, the side effect on every opcode, `SET` = `NOP` + side effect |
 | wait for an input level: the start bit | UART RX | `WAIT pin, level`: the stall PULL and PUSH already had, with a pin level as its third condition; `uart_rx.asm` is 11 words, `WAIT 0, 0 [11]` then eight mid-bit `SHIFT_IN`s |
-| compact repetition / bit count | SPI, 16 words per byte | open |
+| let go of a line: a third output state | I2C | open, the wall: `SET 0, 1` drives a 1 against the slave's ACK and the master reads its own driver; an open-drain pad in `tests/test_i2c.py` stands in and nothing else is missing |
+| wait for the clock to really rise | I2C clock stretching | `SET 1, 1` then `WAIT 1, 1 [2]`: the WAIT as built, one more word per clock |
+| act on the ACK: STOP after a NACK | I2C address + data | open: the master clocks the data byte anyway, and the host has no lever; a JMP the bench aims at the sampled bit stands in |
+| compact repetition / bit count | SPI, 16 words per byte; I2C, 3 per bit | open |
 | per-pin idle level | SPI, one `SET` for SCLK | open, not hurting yet |
 | configurable shift-output pin | SPI | open, fixed `gpio[0]` has not failed |
 
