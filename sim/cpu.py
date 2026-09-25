@@ -1,8 +1,10 @@
-"""Mini PIO-style CPU that runs 16-bit SET / SHIFT_OUT / PULL / JMP / CONFIG / SHIFT_IN instructions one clock
-cycle at a time, driving gpio[3:0] and sampling gpio_in[3:0]: SET picks a pin, SHIFT_OUT always drives gpio[0], SHIFT_IN
-samples the pin it names into the input shift register, and both can drive one more pin as a side effect. SHIFT_OUT and
-SHIFT_IN are one opcode, SHIFT, told apart by an in/out bit in the operand. CONFIG field, value writes the configuration
-registers, so far only shift_dir: which end of the shift registers is the wire."""
+"""Mini PIO-style CPU that runs 16-bit NOP / SET / SHIFT_OUT / SHIFT_IN / PULL / JMP / CONFIG instructions one clock
+cycle at a time, driving gpio[3:0] and sampling gpio_in[3:0]. SHIFT_OUT always drives gpio[0], SHIFT_IN samples the pin it
+names into the input shift register, PULL fills the output shift register from the TX FIFO, and every instruction but JMP
+can drive one more pin as a GPIO side effect through the one pin-write port; SET is that side effect on its own (opcode
+000, NOP, with the side flag set). SHIFT_OUT and SHIFT_IN are one opcode, SHIFT, told apart by an in/out bit in the
+operand. CONFIG field, value writes the configuration registers, so far only shift_dir: which end of the shift registers
+is the wire."""
 
 import re
 import sys
@@ -37,7 +39,7 @@ def load_isa(path=ISA_PATH):
     seen = {}  # (opcode, select value) -> instruction name
     for name, spec in isa["instructions"].items():
         used = 0
-        side = spec.get("side_effect")
+        side = side_effect(isa, name)
         select = spec.get("select")
         operands = spec["operands"] + ([select] if select else []) + ([side["flag"]] + side["operands"] if side else [])
         for operand in operands:
@@ -53,6 +55,8 @@ def load_isa(path=ISA_PATH):
         pin = next(o for o in isa["instructions"][op]["operands"] if o["name"] == "pin")
         if 1 << pin["bits"] != isa[pins]:
             raise ValueError(f"isa.yaml: {op} pin doesn't address exactly {pins} pins")
+    if isa["instructions"]["SET"]["operands"] != isa["side_effect"]["operands"]:
+        raise ValueError("isa.yaml: SET's operands must be the side effect's bits: there is one pin-write port")
     field, value = (next(o for o in isa["instructions"]["CONFIG"]["operands"] if o["name"] == n) for n in ("field", "value"))
     for name, cfg in isa["config"].items():
         if cfg["field"] >> field["bits"] or cfg["bits"] > value["bits"]:
@@ -71,6 +75,11 @@ def operand_mask(operand):
     return ((1 << operand["bits"]) - 1) << operand["lsb"]
 
 
+def side_effect(isa, op):
+    """The GPIO side effect spec (one shape for all instructions) if `op` allows one, else None."""
+    return isa["side_effect"] if isa["instructions"][op].get("side_effect") else None
+
+
 def delay_max(isa):
     return (1 << isa["fields"]["delay"]["bits"]) - 1
 
@@ -81,7 +90,7 @@ def check_operands(instr, isa):
         raise ValueError(f"{instr.op} takes {len(spec['operands'])} operand(s), got {len(instr.args)}")
     checks = list(zip(instr.args, spec["operands"]))
     if instr.side is not None:
-        side = spec.get("side_effect")
+        side = side_effect(isa, instr.op)
         if side is None:
             raise ValueError(f"{instr.op} has no GPIO side effect")
         if len(instr.side) != len(side["operands"]):
@@ -116,7 +125,7 @@ def encode(instr, isa):
     if "select" in spec:
         operand |= spec["select"]["value"] << spec["select"]["lsb"]
     if instr.side is not None:
-        side = spec["side_effect"]
+        side = side_effect(isa, instr.op)
         operand |= 1 << side["flag"]["lsb"]
         for value, o in zip(instr.side, side["operands"]):
             operand |= value << o["lsb"]
@@ -150,7 +159,7 @@ def decode(word, isa):
             used = operand_mask(select) if select else 0
             for o in spec["operands"]:
                 used |= operand_mask(o)
-            side_spec, side = spec.get("side_effect"), None
+            side_spec, side = side_effect(isa, op), None
             if side_spec:
                 used |= operand_mask(side_spec["flag"])
                 if operand & operand_mask(side_spec["flag"]):
@@ -173,8 +182,9 @@ def assemble(source, isa=None):
     are purely an assembler feature: the words only contain addresses.
 
     Operands written after an instruction's own are its GPIO side effect,
-    e.g. `SHIFT_OUT 1, 0 [3]` shifts and drives gpio[1] low, and
-    `SHIFT_IN 3, 1, 1 [3]` samples gpio_in[3] and drives gpio[1] high.
+    e.g. `SHIFT_OUT 1, 0 [3]` shifts and drives gpio[1] low, `SHIFT_IN 3, 1, 1 [3]`
+    samples gpio_in[3] and drives gpio[1] high, and `PULL 2, 0` pulls a byte
+    and drives gpio[2] low. `SET pin, value` is the side effect by itself.
 
     CONFIG takes its field by name or number: `CONFIG shift_dir, 1` is
     `CONFIG 0, 1`. Like labels, the names never reach the words.
@@ -215,7 +225,7 @@ def assemble(source, isa=None):
             args = tuple(operand(lineno, a, op if i == 0 else None) for i, a in enumerate(args))
             delay = int(delay, 0) if delay else 0
             n = len(isa["instructions"][op]["operands"])
-            side = args[n:] if len(args) > n and "side_effect" in isa["instructions"][op] else None
+            side = args[n:] if len(args) > n and side_effect(isa, op) else None
             words.append(encode(Instruction(op, args[:n] if side else args, delay, side), isa))
         except ValueError as e:
             raise SyntaxError(f"line {lineno}: {e}") from None
@@ -265,10 +275,7 @@ class CPU:
                 self.cycle += 1
                 return
             self.stalled = False
-            if instr.op == "SET":
-                pin, value = instr.args
-                self.gpio[pin] = value
-            elif instr.op == "SHIFT_OUT":
+            if instr.op == "SHIFT_OUT":
                 # Both happen on this one clock edge: gpio[0] takes the old
                 # end bit and the register shifts. RTL must keep this order.
                 if self.shift_dir == 0:  # LSB first
@@ -293,9 +300,11 @@ class CPU:
                 field, value = instr.args
                 if field == self.isa["config"]["shift_dir"]["field"]:
                     self.shift_dir = value
-            if instr.side is not None:
-                # GPIO side effect: one more pin, same edge as the primary operation.
-                pin, value = instr.side
+            # The one pin-write port: SET's operands and every other instruction's
+            # GPIO side effect land here, on the same edge as the primary operation.
+            pin_write = instr.args if instr.op == "SET" else instr.side
+            if pin_write is not None:
+                pin, value = pin_write
                 self.gpio[pin] = value
             self.counter = cycles(instr)
 

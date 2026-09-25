@@ -26,6 +26,33 @@ def test_set_drives_one_pin_and_leaves_the_others():
     assert cpu.gpio == [1, 1, 0, 0]
 
 
+def test_nop_holds_everything_for_its_cycles():
+    cpu = CPU(assemble("SET 1, 0\nNOP [2]\nSET 1, 1"))
+    assert cpu.run() == [(1, 0, 1, 1)] * 4 + [(1, 1, 1, 1)]
+
+
+def test_pull_side_effect_lands_on_the_cycle_the_byte_is_pulled():
+    """`PULL 2, 0`: the stall keeps every pin, then the pull and the pin write
+    happen on one edge, so CS (or a UART start bit) falls exactly when there
+    is a byte to send."""
+    cpu = CPU(assemble("PULL 2, 0 [1]\nSHIFT_OUT"))
+    cpu.run_cycles(3)
+    assert cpu.stalled and cpu.gpio == [1, 1, 1, 1]
+    cpu.tx_fifo.append(0x01)
+    cpu.step()
+    assert not cpu.stalled and (cpu.gpio, cpu.shift_reg) == ([1, 1, 0, 1], 0x01)
+    cpu.step()
+    assert (cpu.pc, cpu.gpio, cpu.shift_reg) == (1, [1, 1, 0, 1], 0x01)  # delay cycle: hold, then PC + 1
+    cpu.step()
+    assert (cpu.pc, cpu.gpio, cpu.shift_reg) == (2, [1, 1, 0, 1], 0x00)  # SHIFT_OUT: gpio[0] = bit 0
+
+
+def test_config_side_effect_writes_the_pin_and_the_field_together():
+    cpu = CPU(assemble("CONFIG shift_dir, 1, 3, 0"))
+    cpu.step()
+    assert (cpu.shift_dir, cpu.gpio) == (1, [1, 1, 1, 0])
+
+
 def test_every_pin_resets_to_the_same_level():
     assert CPU(assemble("PULL"), gpio=0, tx_data=[0]).run() == [(0, 0, 0, 0)]
     assert CPU(assemble("PULL"), tx_data=[0]).run() == [(1, 1, 1, 1)]
@@ -250,7 +277,9 @@ def test_loop_over_pull_drains_the_fifo_then_stalls():
 
 def test_decode_rejects_bad_words(isa):
     with pytest.raises(ValueError):
-        decode(0x0002, isa)  # SET with operand bit 1 set: no operand lives there
+        decode(0x0002, isa)  # NOP with operand bit 1 set: no operand lives there
+    with pytest.raises(ValueError):
+        decode(0x0010, isa)  # NOP with the side value set but no side flag
     with pytest.raises(ValueError):
         decode(0x2001, isa)  # SHIFT_OUT takes no operand
     with pytest.raises(ValueError):
@@ -258,9 +287,11 @@ def test_decode_rejects_bad_words(isa):
     with pytest.raises(ValueError):
         decode(0x8002, isa)  # CONFIG shift_dir, 2: the field is one bit wide
     with pytest.raises(ValueError):
-        decode(0x2003, isa)  # SHIFT_IN with the side value set but no side flag
+        decode(0x2012, isa)  # SHIFT_IN with the side value set but no side flag
     with pytest.raises(ValueError):
-        decode(0x2042, isa)  # SHIFT_IN with operand bit 6 set: nothing lives there
+        decode(0x2042, isa)  # SHIFT_IN with a side pin but no side flag
+    with pytest.raises(ValueError):
+        decode(0x4010, isa)  # PULL with the side value set but no side flag
     with pytest.raises(ValueError):
         decode(0xA000, isa)  # opcode 0b101 unassigned since SHIFT_IN joined SHIFT_OUT
     with pytest.raises(ValueError):
