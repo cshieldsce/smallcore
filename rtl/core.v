@@ -4,14 +4,14 @@ module core(
     output [7:0]  imem_addr,
     output reg [3:0]  gpio
 );
-    // op codes
-    localparam OP_NOP_SET = 3'b000;
-    localparam OP_SHIFT   = 3'b001;
-    localparam OP_FIFO    = 3'b010;
-    localparam OP_JMP     = 3'b011;
-    localparam OP_CONFIG  = 3'b100;
-    localparam OP_WAIT    = 3'b101;
-    localparam OP_SKIP    = 3'b110;
+    // opcodes
+    localparam [2:0] OP_NOP_SET = 3'b000;
+    localparam [2:0] OP_SHIFT   = 3'b001;
+    localparam [2:0] OP_FIFO    = 3'b010;
+    localparam [2:0] OP_JMP     = 3'b011;
+    localparam [2:0] OP_CONFIG  = 3'b100;
+    localparam [2:0] OP_WAIT    = 3'b101;
+    localparam [2:0] OP_SKIP    = 3'b110;
 
     reg  [8:0] pc;
     reg  [4:0] delay_counter;
@@ -53,6 +53,24 @@ module core(
     assign is_config  = (opcode == OP_CONFIG);
     assign is_wait    = (opcode == OP_WAIT);
     assign is_skip    = (opcode == OP_SKIP);
+
+    // own decode
+
+    wire       shift_select;
+    wire       fifo_select;
+    wire [1:0] config_field;
+    wire [1:0] config_value;
+    wire [1:0] input_pin;
+    wire [2:0] skip_bit;
+    wire       level;
+
+    assign shift_select = own[1];
+    assign fifo_select  = own[0];
+    assign config_field = own[3:2];
+    assign config_value = own[1:0];
+    assign input_pin    = own[3:2];
+    assign skip_bit     = own[3:1];
+    assign level        = own[1];
 
     always @(posedge clk) begin
         if (reset) begin            
