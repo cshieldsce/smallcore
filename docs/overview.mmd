@@ -13,12 +13,12 @@ flowchart LR
     IMEM["Program memory"]:::core
     EXEC["Execute<br/>one instruction at a time,<br/>each holds for 1 + delay cycles<br/>(JMP loops the program)"]:::core
     FIFO["TX FIFO<br/>(PULL waits here<br/>while it is empty)"]:::core
-    SR["Shift register (8-bit)"]:::core
+    SR["Shift register (8-bit)<br/>shift_dir: LSB or MSB first,<br/>set once by CONFIG_SHIFT"]:::core
     PIN["gpio[3:0]<br/>four output pins"]:::core
     IMEM --> EXEC
     EXEC -->|"SET pin, value,<br/>or a SHIFT_OUT side effect:<br/>one pin at a time"| PIN
     FIFO -->|"PULL: next byte"| SR
-    SR -->|"SHIFT_OUT: bit 0 to gpio 0,<br/>then shift right"| PIN
+    SR -->|"SHIFT_OUT: next bit to gpio 0,<br/>then shift"| PIN
   end
 
   PIN --> LINE(["output lines<br/>UART: TX on gpio 0<br/>SPI: MOSI, SCLK, CS on gpio 0, 1, 2"]):::out

@@ -19,6 +19,7 @@ flowchart LR
   PLE(["pull_en = issue & PULL & !fifo_empty"]):::sig
   SHE(["shift_en = issue & SHIFT_OUT"]):::sig
   PNE(["gpio_en = issue & (SET | SHIFT_OUT & side)"]):::sig
+  DIE(["dir_en = issue & CONFIG_SHIFT"]):::sig
 
   OPC --> CU
   DLY --> CU
@@ -30,3 +31,4 @@ flowchart LR
   CU --> PLE
   CU --> SHE
   CU --> PNE
+  CU --> DIE

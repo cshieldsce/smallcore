@@ -1,14 +1,17 @@
+%%{init: {"flowchart": {"wrappingWidth": 260}}}%%
 flowchart LR
   W["16-bit word<br/>at PC"] --> OP{"opcode<br/>[15:13]"}
   OP -->|000| SET["<b>SET p, v [d]</b><br/>gpio[p] ← v<br/>other pins unchanged<br/>takes 1 + d cycles"]
-  OP -->|001| SHIFT["<b>SHIFT_OUT [p, v] [d]</b><br/>gpio[0] ← shift_reg[0]<br/>shift_reg ← shift_reg >> 1<br/>with p, v: gpio[p] ← v<br/>(one edge, then hold)<br/>takes 1 + d cycles"]
+  OP -->|001| SHIFT["<b>SHIFT_OUT [p, v] [d]</b><br/>gpio[0] ← next bit, then shift:<br/>shift_dir 0: shift_reg[0], >> 1<br/>shift_dir 1: shift_reg[7], << 1<br/>with p, v: gpio[p] ← v<br/>(one edge, then hold)<br/>takes 1 + d cycles"]
   OP -->|010| EMPTY{"TX FIFO<br/>empty?"}
   EMPTY -->|"yes: stall<br/>pins unchanged"| EMPTY
   EMPTY -->|no| PULL["<b>PULL [d]</b><br/>shift_reg ← FIFO head<br/>pins unchanged<br/>takes 1 + d cycles<br/>after the stall"]
   OP -->|011| JMP["<b>JMP target [d]</b><br/>pins, shift_reg unchanged<br/>takes 1 + d cycles"]
+  OP -->|100| CFG["<b>CONFIG_SHIFT r [d]</b><br/>shift_dir ← r<br/>pins, shift_reg unchanged<br/>takes 1 + d cycles"]
   SET --> NEXT["PC ← PC + 1"]
   SHIFT --> NEXT
   PULL --> NEXT
+  CFG --> NEXT
   JMP --> JNEXT["PC ← target"]
   NEXT --> END{"PC past last<br/>instruction?"}
   JNEXT --> END

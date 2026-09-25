@@ -7,6 +7,7 @@ block-beta
   shift["001 = SHIFT_OUT"]:3 shiftd["d"]:5 shiftop["s0pp 000v<br/>s = 1: side effect, also gpio[p] ← v (p = 1–3)"]:8
   pull["010 = PULL"]:3 pulld["d"]:5 pullop["0"]:8
   jmp["011 = JMP"]:3 jmpd["d"]:5 jmpop["target<br/>program address 0–255"]:8
+  cfg["100 = CONFIG_SHIFT"]:3 cfgd["d"]:5 cfgop["0000 000r<br/>r = shift_dir: 0 = LSB first, 1 = MSB first"]:8
 
   classDef hdr fill:#eee,stroke:#999,color:#555
   classDef field fill:#dbe8ff,stroke:#4a6fa5
