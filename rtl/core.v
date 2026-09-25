@@ -12,10 +12,18 @@ module core(
     wire [4:0] delay;
     wire [7:0] operand;
 
-    assign opcode  = imem_word[15:13];
-    assign delay   = imem_word[12:8];
-    assign operand = imem_word[7:0];
+    assign opcode    = imem_word[15:13];
+    assign delay     = imem_word[12:8];
+    assign operand   = imem_word[7:0];
 
     assign imem_addr = pc[7:0];
+
+    always @(posedge clk) begin
+        if (reset) begin            // Reset sets PC=0, Counter=0, GPIO=1111
+            pc            <= 9'd0;
+            delay_counter <= 5'd0;
+            gpio          <= 4'b1111;
+        end
+    end
 
 endmodule
