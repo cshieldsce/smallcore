@@ -24,6 +24,8 @@ module core(
     assign delay     = imem_word[12:8];
     assign operand   = imem_word[7:0];
 
+    assign imem_addr = pc[7:0];
+
     // operand fields
     wire       side;
     wire [1:0] side_pin;
@@ -35,7 +37,22 @@ module core(
     assign side_val = operand[4];
     assign own      = operand[3:0];
 
-    assign imem_addr = pc[7:0];
+    // instruction wires
+    wire is_nop_set;
+    wire is_shift;
+    wire is_fifo;
+    wire is_jmp;
+    wire is_config;
+    wire is_wait;
+    wire is_skip;
+
+    assign is_nop_set = (opcode == OP_NOP_SET);
+    assign is_shift   = (opcode == OP_SHIFT);
+    assign is_fifo    = (opcode == OP_FIFO);
+    assign is_jmp     = (opcode == OP_JMP);
+    assign is_config  = (opcode == OP_CONFIG);
+    assign is_wait    = (opcode == OP_WAIT);
+    assign is_skip    = (opcode == OP_SKIP);
 
     always @(posedge clk) begin
         if (reset) begin            
