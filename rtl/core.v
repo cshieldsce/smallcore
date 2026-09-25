@@ -1,6 +1,6 @@
 module core(
     input  clk, reset,
-    input  [15:0] mem_word,
+    input  [15:0] imem_word,
     output [7:0]  imem_addr,
     output reg [3:0]  gpio
 );
@@ -19,7 +19,8 @@ module core(
     assign imem_addr = pc[7:0];
 
     always @(posedge clk) begin
-        if (reset) begin            // Reset sets PC=0, Counter=0, GPIO=1111
+        if (reset) begin            
+            // Reset sets PC=0, Counter=0, GPIO=1111 
             pc            <= 9'd0;
             delay_counter <= 5'd0;
             gpio          <= 4'b1111;
