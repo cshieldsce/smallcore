@@ -7,18 +7,22 @@ flowchart LR
   HOST["Host / test bench"]:::ext
   HOST -->|"program (16-bit words)"| IMEM
   HOST -->|"bytes to send"| FIFO
+  LINEIN(["input lines<br/>SPI: MISO on gpio_in 3"]):::ext --> GIN
 
   subgraph core["core"]
     direction LR
     IMEM["Program memory"]:::core
     EXEC["Execute<br/>one instruction at a time,<br/>each holds for 1 + delay cycles<br/>(JMP loops the program)"]:::core
     FIFO["TX FIFO<br/>(PULL waits here<br/>while it is empty)"]:::core
-    SR["Shift register (8-bit)<br/>shift_dir: LSB or MSB first,<br/>set once by CONFIG_SHIFT"]:::core
+    SR["Output shift register (8-bit)<br/>shift_dir: LSB or MSB first,<br/>set once by CONFIG_SHIFT"]:::core
     PIN["gpio[3:0]<br/>four output pins"]:::core
+    GIN["gpio_in[3:0]<br/>four input pins"]:::core
+    ISR["Input shift register (8-bit)<br/>fills from the end opposite the wire,<br/>same shift_dir<br/>(no PUSH yet: read directly)"]:::core
     IMEM --> EXEC
-    EXEC -->|"SET pin, value,<br/>or a SHIFT_OUT side effect:<br/>one pin at a time"| PIN
+    EXEC -->|"SET pin, value,<br/>or a SHIFT_OUT / SHIFT_IN side effect:<br/>one pin at a time"| PIN
     FIFO -->|"PULL: next byte"| SR
     SR -->|"SHIFT_OUT: next bit to gpio 0,<br/>then shift"| PIN
+    GIN -->|"SHIFT_IN pin: sample the pin,<br/>shift it in"| ISR
   end
 
   PIN --> LINE(["output lines<br/>UART: TX on gpio 0<br/>SPI: MOSI, SCLK, CS on gpio 0, 1, 2"]):::out

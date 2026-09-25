@@ -18,7 +18,8 @@ flowchart LR
   PCJ(["pc_jmp = JMP"]):::sig
   PLE(["pull_en = issue & PULL & !fifo_empty"]):::sig
   SHE(["shift_en = issue & SHIFT_OUT"]):::sig
-  PNE(["gpio_en = issue & (SET | SHIFT_OUT & side)"]):::sig
+  SIE(["shift_in_en = issue & SHIFT_IN"]):::sig
+  PNE(["gpio_en = issue & (SET | (SHIFT_OUT | SHIFT_IN) & side)"]):::sig
   DIE(["dir_en = issue & CONFIG_SHIFT"]):::sig
 
   OPC --> CU
@@ -30,5 +31,6 @@ flowchart LR
   CU --> PCJ
   CU --> PLE
   CU --> SHE
+  CU --> SIE
   CU --> PNE
   CU --> DIE
