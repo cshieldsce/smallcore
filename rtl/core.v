@@ -1,6 +1,6 @@
 module core(
     input             clk, reset,
-    input             tx_empty, rx_full
+    input             tx_empty, rx_full,
     input      [15:0] imem_word,
     input      [8:0]  program_words,
     input      [3:0]  gpio_in,
@@ -77,11 +77,19 @@ module core(
     wire halted;
     wire issue;
     wire stall;
+    wire last;
 
     assign halted = (pc >= program_words);
     assign issue  = !halted && (delay_counter == 5'd0);
 
-    assign stall = issue && (is_fifo && (push ? rx_full : tx_empty) || is_wait && gpio_in[input_pin] != level);
+    assign stall =
+        issue &&
+        (
+            (is_fifo && (fifo_select ? rx_full : tx_empty)) ||
+            (is_wait && (gpio_in[input_pin] != level))
+        );
+
+    assign last = issue ? (delay == 0) : (delay_counter == 1);
 
     always @(posedge clk) begin
         if (reset) begin            

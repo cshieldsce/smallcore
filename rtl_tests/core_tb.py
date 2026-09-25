@@ -27,7 +27,7 @@ async def reset_state(dut):
     await ReadOnly()  # let this edge's nonblocking assignments settle before reading
 
     assert int(dut.imem_addr.value) == 0
-    assert dut.gpio.value == 0b1111
+    assert dut.gpio_out.value == 0b1111
     assert int(dut.pc.value) == 0  # internal, read through VPI
     assert int(dut.delay_counter.value) == 0
 

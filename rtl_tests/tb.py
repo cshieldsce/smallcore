@@ -61,7 +61,7 @@ def rtl_state(dut):
     return {
         "pc": int(dut.pc.value),
         "counter": int(dut.delay_counter.value),
-        "gpio": gpio_bits(dut.gpio.value),
+        "gpio": gpio_bits(dut.gpio_out.value),
     }
 
 
@@ -69,5 +69,5 @@ def model_state(cpu):
     return {
         "pc": cpu.pc,
         "counter": cpu.counter,
-        "gpio": list(cpu.gpio),
+        "gpio": list(cpu.gpio_out),
     }
