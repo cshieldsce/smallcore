@@ -230,15 +230,14 @@ def cycles(instr):
 
 
 class CPU:
-    def __init__(self, program, gpio=1, gpio_in=0, open_drain=0, tx_data=(), rx_depth=4, isa=None):
+    def __init__(self, program, gpio=1, gpio_in=0, tx_data=(), rx_depth=4, isa=None):
         self.isa = isa or load_isa()
         self.program = list(program)  # instruction words
         self.pc = 0
         self.gpio = [gpio] * self.isa["gpio_out"]  # output pins, all reset to `gpio`
-        # Configuration, one bit per pin: 0 = push-pull, gpio[pin] is driven; 1 = open-drain, a 0 is driven and
-        # a 1 lets go of the line (see gpio_oe). `open_drain` is a mask, bit k for gpio[k]: 0b0011 for an I2C
-        # master on gpio 0 and 1. Set at reset by the host: no CONFIG field yet.
-        self.open_drain = [(open_drain >> pin) & 1 for pin in range(self.isa["gpio_out"])]
+        # Configuration, one bit per pin: 0 = push-pull (reset), gpio[pin] is driven; 1 = open-drain, a 0 is
+        # driven and a 1 lets go of the line (see gpio_oe). CONFIG open_drain01 writes [1:0], open_drain23 [3:2].
+        self.open_drain = [0] * self.isa["gpio_out"]
         self.gpio_in = [gpio_in] * self.isa["gpio_in"]  # input pins: the outside world sets these before each step
         self.shift_reg = 0  # 8-bit, emptied one bit at a time by SHIFT_OUT from the end shift_dir picks
         self.in_shift_reg = 0  # 8-bit, filled one bit at a time by SHIFT_IN from the end opposite shift_dir
@@ -305,8 +304,13 @@ class CPU:
             elif instr.op == "CONFIG":
                 # One write port into the configuration registers, field-decoded.
                 field, value = instr.args
-                if field == self.isa["config"]["shift_dir"]["field"]:
+                config = self.isa["config"]
+                if field == config["shift_dir"]["field"]:
                     self.shift_dir = value
+                elif field == config["open_drain01"]["field"]:
+                    self.open_drain[0:2] = [value & 1, value >> 1]
+                elif field == config["open_drain23"]["field"]:
+                    self.open_drain[2:4] = [value & 1, value >> 1]
             # The one pin-write port: SET's operands and every other instruction's
             # GPIO side effect land here, on the same edge as the primary operation.
             pin_write = instr.args if instr.op == "SET" else instr.side

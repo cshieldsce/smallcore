@@ -13,7 +13,7 @@ A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay
 | `WAIT pin, level [d]` | stalls while gpio_in[pin] != level, a level not an edge |
 | `SKIP bit, level [d]` | steps over the next word if in_shift_reg[bit] == level: pc <- pc + 2 |
 | `JMP label [d]` | continue at label |
-| `CONFIG shift_dir, 0 or 1 [d]` | LSB first (reset) or MSB first, for both shift registers |
+| `CONFIG field, value [d]` | config[field] <- value: `shift_dir` 0 (reset) or 1, LSB or MSB first for both shift registers; `open_drain01` and `open_drain23`, a 2-bit mask for pins 1:0 or 3:2, 1 = open-drain |
 
 `[d]` holds for d extra cycles. Every instruction but `JMP` can take a GPIO side effect, `pin, value` after its own operands, that drives one more pin on the same edge as the operation: `SHIFT_OUT 1, 0` puts the next bit on MOSI and drops the clock, `SHIFT_IN 3, 1, 1` raises the clock and samples MISO, `PULL 2, 0` drops CS the moment a byte arrives, `PUSH 2, 1` raises it as the received byte leaves, and a WAIT's side effect lands on the cycle the level arrives. `SET` is the side effect on its own. The FIFOs are fed and drained from outside the core, by the test bench or the CLI.
 
@@ -56,14 +56,14 @@ What the protocols have asked of the core, in order. Open items stay open until 
 | get the received byte out | SPI duplex | `PUSH` into an RX FIFO; `PUSH 2, 1` also ends the frame |
 | six of eight opcodes used | the ISA | one `SHIFT` opcode with an in bit, one `FIFO` opcode with a push bit, generic `CONFIG`, the side effect on every opcode, `SET` = `NOP` + side effect |
 | wait for an input level: the start bit | UART RX | `WAIT pin, level`: the stall PULL and PUSH already had, with a pin level as its third condition; `uart_rx.asm` is 11 words, `WAIT 0, 0 [11]` then eight mid-bit `SHIFT_IN`s |
-| let go of a line: a third output state | I2C | `open_drain[3:0]`, one mode bit per pin: `gpio_oe[k] = !(open_drain[k] & gpio[k])`, an open-drain pin drives its 0 and lets go on a 1; the same words see the ACK and follow the stretch. Set at reset by the host: a `CONFIG` field for four bits is open, the value is two |
+| let go of a line: a third output state | I2C | `open_drain[3:0]`, one mode bit per pin: `gpio_oe[k] = !(open_drain[k] & gpio[k])`, an open-drain pin drives its 0 and lets go on a 1; the same words see the ACK and follow the stretch. `CONFIG open_drain01, 3` sets both I2C pins in one word: two 2-bit fields cover the four pins with CONFIG's shape unchanged, field 3 stays free |
 | wait for the clock to really rise | I2C clock stretching | `SET 1, 1` then `WAIT 1, 1 [2]`: the WAIT as built, one more word per clock |
 | act on the ACK: STOP after a NACK | I2C address + data | `SKIP bit, level`, pc + 2 when a bit of the input shift register holds the level: `SKIP 0, 0` then `JMP stop` after the ACK clock, from the register since SDA has let go by then. A conditional JMP on the last sample was one word shorter and could not pick the bit, the polarity or the word it guards; JMP keeps its 8-bit target |
 | compact repetition / bit count | SPI, 16 words per byte; I2C, 3 per bit | open |
 | per-pin idle level | SPI, one `SET` for SCLK | open, not hurting yet |
 | configurable shift-output pin | SPI | open, fixed `gpio[0]` has not failed |
 
-Three kinds of state: instruction (`pc`, the delay counter), stream (the shift registers and FIFOs) and configuration (`shift_dir`, `open_drain`). A shift pin or input pin would join the third kind as another `CONFIG` field; `open_drain` has none yet.
+Three kinds of state: instruction (`pc`, the delay counter), stream (the shift registers and FIFOs) and configuration (`shift_dir`, `open_drain`), each a `CONFIG` field. A shift pin or input pin would join the third kind as the last field.
 
 ## Docs
 

@@ -87,7 +87,7 @@ def test_every_word_decodes_or_is_rejected_deliberately():
 
 
 def test_valid_word_count_per_instruction():
-    """The claim, in numbers: 17,920 of 65,536 words mean something."""
+    """The claim, in numbers: 20,224 of 65,536 words mean something."""
     counts = {op: sum(1 for i in VALID.values() if i.op == op) for op in OPS}
     assert counts == {
         "NOP": 32,          # delay only
@@ -97,11 +97,11 @@ def test_valid_word_count_per_instruction():
         "PULL": 9 * 32,
         "PUSH": 9 * 32,
         "JMP": 256 * 32,
-        "CONFIG": 2 * 9 * 32,       # shift_dir 0 or 1 x side
+        "CONFIG": (2 + 4 + 4) * 9 * 32,  # shift_dir 0 or 1, open_drain01 and open_drain23 0..3, x side
         "WAIT": 4 * 2 * 9 * 32,     # pin x level x side
         "SKIP": 8 * 2 * 9 * 32,     # bit x level x side
     }
-    assert len(VALID) == 17920
+    assert len(VALID) == 20224
 
 
 def test_words_wider_than_16_bits_are_rejected():
@@ -151,7 +151,7 @@ def checked_step(cpu):
     assert cpu.trace[-1] == tuple(after["gpio"])
     assert all(level in (0, 1) for level in after["gpio"])
     assert cpu.gpio_oe == [0 if od and level else 1 for od, level in zip(after["open_drain"], after["gpio"])]
-    assert after["open_drain"] == before["open_drain"], "no instruction writes the pin modes"
+    assert all(mode in (0, 1) for mode in after["open_drain"])
     assert 0 <= after["shift_reg"] <= 0xFF and 0 <= after["in_shift_reg"] <= 0xFF
     assert after["shift_dir"] in (0, 1)
     assert len(after["rx_fifo"]) <= cpu.rx_depth
@@ -187,8 +187,13 @@ def checked_step(cpu):
             expected["rx_fifo"] = before["rx_fifo"] + [before["in_shift_reg"]]
         elif instr.op == "CONFIG":
             field, value = instr.args
+            expected["open_drain"] = list(before["open_drain"])
             if field == ISA["config"]["shift_dir"]["field"]:
                 expected["shift_dir"] = value
+            elif field == ISA["config"]["open_drain01"]["field"]:
+                expected["open_drain"][0:2] = [value & 1, value >> 1]
+            elif field == ISA["config"]["open_drain23"]["field"]:
+                expected["open_drain"][2:4] = [value & 1, value >> 1]
         pin_write = instr.args if instr.op == "SET" else instr.side
         if pin_write is not None:
             pin, value = pin_write
@@ -222,7 +227,8 @@ def random_instruction(rng, n_words):
     if op == "JMP":
         return Instruction(op, (rng.randrange(n_words + 1),), delay)  # n_words is the halt address
     if op == "CONFIG":
-        args = (ISA["config"]["shift_dir"]["field"], rng.randrange(2))
+        cfg = rng.choice(list(ISA["config"].values()))
+        args = (cfg["field"], rng.randrange(1 << cfg["bits"]))
     else:
         args = tuple(rng.randrange(1 << o["bits"]) for o in spec["operands"])
     side = None
@@ -250,8 +256,7 @@ def outside_world(rng, cpu, tx_max=6):
 def test_random_program_under_invariants(seed):
     rng = random.Random(seed)
     program = random_program(rng)
-    cpu = CPU(program, gpio=rng.randrange(2), gpio_in=rng.randrange(2), rx_depth=rng.randrange(1, 5),
-              open_drain=rng.randrange(16))
+    cpu = CPU(program, gpio=rng.randrange(2), gpio_in=rng.randrange(2), rx_depth=rng.randrange(1, 5))
     assert all(w in VALID for w in program)
     kinds = set()
     for _ in range(300):
@@ -268,8 +273,7 @@ def test_random_walk_reaches_every_kind_of_cycle():
     for seed in range(300):
         rng = random.Random(seed)
         program = random_program(rng)
-        cpu = CPU(program, gpio=rng.randrange(2), gpio_in=rng.randrange(2), rx_depth=rng.randrange(1, 5),
-                  open_drain=rng.randrange(16))
+        cpu = CPU(program, gpio=rng.randrange(2), gpio_in=rng.randrange(2), rx_depth=rng.randrange(1, 5))
         ops |= {decode(w, ISA).op for w in program}
         for _ in range(300):
             if cpu.halted:
@@ -285,16 +289,14 @@ def test_random_walk_reaches_every_kind_of_cycle():
 
 
 def test_reset_state():
-    for gpio, gpio_in, open_drain in itertools.product((0, 1), (0, 1), (0, 0b0011, 0b1111)):
-        cpu = CPU([0x0000], gpio=gpio, gpio_in=gpio_in, open_drain=open_drain)
-        modes = [(open_drain >> pin) & 1 for pin in range(4)]
+    for gpio, gpio_in in itertools.product((0, 1), (0, 1)):
+        cpu = CPU([0x0000], gpio=gpio, gpio_in=gpio_in)
         assert snapshot(cpu) == {
-            "pc": 0, "gpio": [gpio] * 4, "open_drain": modes, "shift_reg": 0, "in_shift_reg": 0, "shift_dir": 0,
+            "pc": 0, "gpio": [gpio] * 4, "open_drain": [0, 0, 0, 0], "shift_reg": 0, "in_shift_reg": 0, "shift_dir": 0,
             "tx_fifo": [], "rx_fifo": [], "counter": 0, "halted": False,
         }
-        assert cpu.gpio_oe == [0 if od and gpio else 1 for od in modes]
+        assert cpu.gpio_oe == [1, 1, 1, 1], "push-pull is the reset: every pin driven"
         assert (cpu.gpio_in, cpu.cycle, cpu.stalled, cpu.trace) == ([gpio_in] * 4, 0, False, [])
-    assert CPU([0x0000]).open_drain == [0, 0, 0, 0], "push-pull is the reset"
     assert CPU([]).halted
 
 

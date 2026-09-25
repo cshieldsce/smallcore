@@ -9,6 +9,7 @@
 # two cycles into the high phase. The WAIT cannot let go of SCL itself: its
 # side effect lands on the edge it issues, and it issues once SCL is high.
 
+        CONFIG open_drain01, 3  # SDA and SCL open-drain: a 1 lets go
         CONFIG shift_dir, 1     # MSB first
         PULL 0, 0 [3]           # START as the byte arrives: SDA low while SCL is high
 

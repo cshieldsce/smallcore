@@ -7,6 +7,7 @@
 # the input shift register, MSB first), so after a NACK the master stops one
 # clock later and the data byte stays in the FIFO.
 
+        CONFIG open_drain01, 3  # SDA and SCL open-drain: a 1 lets go
         CONFIG shift_dir, 1     # MSB first
         PULL 0, 0 [3]           # START as the address byte arrives: SDA low while SCL is high
 

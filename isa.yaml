@@ -26,15 +26,19 @@
 # shift_dir, d` sets it once per protocol.
 # open_drain[3:0], one bit per pin, 0 = push-pull (reset), 1 = open-drain:
 # gpio_oe[k] = !(open_drain[k] & gpio[k]), so an open-drain pin drives its 0
-# and lets go of the line on a 1, from whichever instruction wrote it. Set
-# at reset by the host; no CONFIG field holds four bits yet.
+# and lets go of the line on a 1, from whichever instruction wrote it. Two
+# CONFIG fields of two bits set it, `open_drain01` for pins 1:0 and
+# `open_drain23` for pins 3:2, bit k of the value for the lower pin + k:
+# `CONFIG open_drain01, 3` makes an I2C master's SDA and SCL let go.
 
 word_bits: 16
 gpio_out: 4
 gpio_in: 4
 
 config:   # CONFIG field, value: the configuration registers, by field number
-  shift_dir: {field: 0, bits: 1}
+  shift_dir:    {field: 0, bits: 1}
+  open_drain01: {field: 1, bits: 2}   # open_drain[1:0]
+  open_drain23: {field: 2, bits: 2}   # open_drain[3:2]
 
 fields:
   opcode:  {lsb: 13, bits: 3}
@@ -136,8 +140,8 @@ instructions:
     opcode: 0b100
     description: >
       config[field] <- value. The assembler takes the field by name
-      (`CONFIG shift_dir, 1`). Fields 1..3 are unassigned; a value wider
-      than the field is an error.
+      (`CONFIG shift_dir, 1`, `CONFIG open_drain01, 3`). Field 3 is
+      unassigned; a value wider than the field is an error.
     operands:
       - {name: field, lsb: 2, bits: 2}
       - {name: value, lsb: 0, bits: 2}

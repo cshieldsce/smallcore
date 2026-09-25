@@ -82,7 +82,8 @@ def test_every_pin_resets_to_the_same_level():
     assert CPU(assemble("PULL"), tx_data=[0]).run() == [(1, 1, 1, 1)]
 
 
-# open_drain: one mode bit per pin, set at reset. gpio_oe[k] = !(open_drain[k] & gpio[k]).
+# open_drain: one mode bit per pin, CONFIG open_drain01 for pins 1:0 and open_drain23 for 3:2.
+# gpio_oe[k] = !(open_drain[k] & gpio[k]).
 
 
 def test_pins_reset_push_pull_and_always_driven():
@@ -92,13 +93,30 @@ def test_pins_reset_push_pull_and_always_driven():
     assert (cpu.gpio, cpu.gpio_oe) == ([0, 0, 1, 1], [1, 1, 1, 1])
 
 
+def test_config_open_drain_writes_two_pins_at_a_time_and_the_pad_follows_at_once():
+    """Bit k of the value is the lower pin + k. The enable is combinational:
+    a pin already at 1 lets go on the edge the mode is written, and drives
+    again when the mode is cleared."""
+    cpu = CPU(assemble("CONFIG open_drain01, 3\nCONFIG open_drain23, 1\nCONFIG open_drain01, 2\nCONFIG open_drain23, 0"))
+    cpu.step()
+    assert (cpu.open_drain, cpu.gpio_oe) == ([1, 1, 0, 0], [0, 0, 1, 1])
+    cpu.step()
+    assert (cpu.open_drain, cpu.gpio_oe) == ([1, 1, 1, 0], [0, 0, 0, 1])
+    cpu.step()
+    assert (cpu.open_drain, cpu.gpio_oe) == ([0, 1, 1, 0], [1, 0, 0, 1])
+    cpu.step()
+    assert (cpu.open_drain, cpu.gpio_oe, cpu.gpio) == ([0, 1, 0, 0], [1, 0, 1, 1], [1, 1, 1, 1])
+    assert cpu.halted and (cpu.shift_dir, cpu.shift_reg, cpu.in_shift_reg) == (0, 0, 0)
+
+
 def test_open_drain_pin_drives_its_0_and_lets_go_on_a_1():
-    """The mask names the pins: 0b0011 makes gpio 0 and 1 open-drain. A 1 in
-    gpio is then gpio_oe 0, the pad off, whether the 1 came from reset, SET,
-    a side effect or SHIFT_OUT; a 0 is driven. Pins 2 and 3 stay push-pull."""
-    cpu = CPU(assemble("SET 0, 0\nSET 0, 1 [1]\nPULL 1, 0\nSHIFT_OUT 1, 1\nSHIFT_OUT\nSET 2, 0\nSET 3, 1"),
-              open_drain=0b0011, tx_data=[0b01])
-    assert (cpu.open_drain, cpu.gpio, cpu.gpio_oe) == ([1, 1, 0, 0], [1, 1, 1, 1], [0, 0, 1, 1])  # reset: let go
+    """`CONFIG open_drain01, 3` makes gpio 0 and 1 open-drain. A 1 in gpio is
+    then gpio_oe 0, the pad off, whether the 1 came from reset, SET, a side
+    effect or SHIFT_OUT; a 0 is driven. Pins 2 and 3 stay push-pull."""
+    cpu = CPU(assemble("CONFIG open_drain01, 3\nSET 0, 0\nSET 0, 1 [1]\nPULL 1, 0\nSHIFT_OUT 1, 1\nSHIFT_OUT\nSET 2, 0\nSET 3, 1"),
+              tx_data=[0b01])
+    cpu.step()
+    assert (cpu.open_drain, cpu.gpio, cpu.gpio_oe) == ([1, 1, 0, 0], [1, 1, 1, 1], [0, 0, 1, 1])  # configured: let go
     cpu.step()
     assert (cpu.gpio, cpu.gpio_oe) == ([0, 1, 1, 1], [1, 0, 1, 1])  # SET 0, 0: driven
     cpu.step()
@@ -120,12 +138,14 @@ def test_open_drain_changes_the_enable_and_nothing_else():
     trace, same registers, cycle for cycle. The mode only says which of
     those levels reach the line."""
     source = "CONFIG shift_dir, 1\nPULL 2, 0\n" + "SHIFT_OUT 1, 0\nSHIFT_IN 3, 1, 1\n" * 8 + "PUSH 2, 1"
-    plain, od = CPU(assemble(source), tx_data=[0xA3]), CPU(assemble(source), open_drain=0b1111, tx_data=[0xA3])
+    plain = CPU(assemble("NOP\nNOP\n" + source), tx_data=[0xA3])
+    od = CPU(assemble("CONFIG open_drain01, 3\nCONFIG open_drain23, 3\n" + source), tx_data=[0xA3])
     while not plain.halted:
         plain.gpio_in[3] = od.gpio_in[3] = plain.cycle & 1
         plain.step()
         od.step()
-        assert od.gpio_oe == [1 - level for level in od.gpio]
+        if od.pc >= 2:  # both modes written
+            assert od.gpio_oe == [1 - level for level in od.gpio]
     assert od.halted and od.trace == plain.trace
     assert (od.shift_reg, od.in_shift_reg, od.rx_fifo, od.cycle) == \
         (plain.shift_reg, plain.in_shift_reg, plain.rx_fifo, plain.cycle)

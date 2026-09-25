@@ -1,8 +1,8 @@
 # I2C master, one byte from the TX FIFO, MSB first, 8 cycles per bit.
 # gpio 0 = SDA (the shift pin), gpio 1 = SCL. gpio_in 0 = SDA, gpio_in 1 =
 # SCL, the lines as the bus holds them. The bus is open-drain and so are the
-# two pins (open_drain 0b0011): a 1 on either lets go and leaves the line to
-# its pull-up, a 0 pulls it low.
+# two pins (CONFIG open_drain01, 3): a 1 on either lets go and leaves the
+# line to its pull-up, a 0 pulls it low.
 # START: SDA falls while SCL is high, on the edge the byte arrives. Each bit:
 # SCL falls, SDA changes two cycles later (hold), SCL rises two cycles after
 # that (setup) and the slave samples while it is high. The ninth clock is the
@@ -10,6 +10,7 @@
 # edge, 0 = ACK, and PUSHes the sample as it drops SCL. STOP: SDA rises while
 # SCL is high. Both lines rest high.
 
+        CONFIG open_drain01, 3  # SDA and SCL open-drain: a 1 lets go
         CONFIG shift_dir, 1     # MSB first
         PULL 0, 0 [3]           # START as the byte arrives: SDA low while SCL is high (stalls while the FIFO is empty)
 

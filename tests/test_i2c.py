@@ -2,8 +2,9 @@
 pull-ups, the master's pins on one end and a slave model on the other,
 resolved every cycle from what each side drove on the cycle before. The
 master drives a line while gpio_oe says so and lets go otherwise: with SDA
-and SCL open-drain (open_drain 0b11) a 1 lets go, with them push-pull (the
-reset) a 1 is driven, and the bus shows the difference. programs/i2c_write.asm
+and SCL open-drain (`CONFIG open_drain01, 3`, each program's first word) a 1
+lets go, with them push-pull (the same program with that word a NOP) a 1 is
+driven, and the bus shows the difference. programs/i2c_write.asm
 sends one byte: START, eight bits, the ACK clock, STOP. i2c_write_stretch.asm
 is the same with a WAIT on SCL before every high phase, for a slave that
 stretches the clock. i2c_write_addr_data.asm sends an address byte and a data
@@ -22,7 +23,7 @@ WRITE = PROGRAMS / "i2c_write.asm"
 STRETCH = PROGRAMS / "i2c_write_stretch.asm"
 ADDR_DATA = PROGRAMS / "i2c_write_addr_data.asm"
 SDA, SCL = 0, 1  # the same pin numbers on gpio (what the master drives) and gpio_in (the bus)
-PUSH_PULL, OPEN_DRAIN = 0, 1 << SDA | 1 << SCL  # open_drain masks: the reset, and both lines open-drain
+OPEN_DRAIN, PUSH_PULL = False, True  # run(push_pull=...): the program as written, or with its CONFIG open_drain01 a NOP
 PINS = ((PUSH_PULL, "push_pull"), (OPEN_DRAIN, "open_drain"))
 BYTES = (0x00, 0x01, 0x55, 0x80, 0xA3, 0xFF)
 ADDRESS = 0x50  # the slave's 7-bit address; a write to it starts with the byte ADDRESS << 1
@@ -107,14 +108,21 @@ class Run(NamedTuple):
     cpu: CPU
 
 
-def run(program, tx_data, slave=None, open_drain=OPEN_DRAIN, before=None, cycles=2000):
-    """Run a program on the bus until it halts or `cycles` pass, the master's
-    pins configured by the `open_drain` mask, `before(cpu)` acting on the CPU
-    before each cycle. The pad is gpio and gpio_oe: gpio[line] on the bus
-    while gpio_oe[line] is 1, nothing while it is 0."""
+def run(program, tx_data, slave=None, push_pull=OPEN_DRAIN, before=None, cycles=2000):
+    """Run a program on the bus until it halts or `cycles` pass, `before(cpu)`
+    acting on the CPU before each cycle. With `push_pull` the program's
+    `CONFIG open_drain01` word runs as a NOP, same cycles, pins driven. The
+    pad is gpio and gpio_oe: gpio[line] on the bus while gpio_oe[line] is 1,
+    nothing while it is 0."""
     slave = slave or Slave()
-    cpu = CPU(program if isinstance(program, list) else load_program(program), gpio_in=1, open_drain=open_drain,
-              tx_data=tx_data)
+    words = program if isinstance(program, list) else load_program(program)
+    if push_pull:
+        isa = load_isa()
+        od01 = isa["config"]["open_drain01"]["field"]
+        as_written = words
+        words = [0x0000 if decode(w, isa).op == "CONFIG" and decode(w, isa).args[0] == od01 else w for w in words]
+        assert words != as_written, "no CONFIG open_drain01 to take out"
+    cpu = CPU(words, gpio_in=1, tx_data=tx_data)
     bus = [1, 1]
     sda, scl, fights, samples, waits = [], [], [], [], 0
     while not cpu.halted and cpu.cycle < cycles:
@@ -192,7 +200,7 @@ def test_master_drives_start_the_byte_msb_first_a_ninth_clock_and_stop(byte, wav
     assert sda[ups[8]] == 1, "the ninth clock is the slave's"
     assert all(scl[c] == 0 and scl[c - 1] == 0 for c in moves(sda) if c not in (start, stop))
     assert (sda[-1], scl[-1], r.cpu.halted) == (1, 1, True)
-    assert len(r.cpu.program) == 2 + 8 * 3 + 4 + 3
+    assert len(r.cpu.program) == 3 + 8 * 3 + 4 + 3
 
 
 def test_bit_period_is_8_cycles_sda_moves_2_after_scl_falls_and_2_before_it_rises():
@@ -204,24 +212,25 @@ def test_bit_period_is_8_cycles_sda_moves_2_after_scl_falls_and_2_before_it_rise
     assert [u - d for d, u in zip(downs, ups)] == [HIGH] * CLOCKS, "low phases"
     assert [d - u for u, d in zip(ups, downs[1:])] == [HIGH] * (CLOCKS - 1), "high phases"
     assert [c for c in moves(sda) if scl[c] == 0] == [d + 2 for d in downs]
-    assert r.cpu.cycle == 5 + 8 * 8 + 10 + 8  # config and PULL, the bits, the ACK clock, the STOP
+    assert r.cpu.cycle == 6 + 8 * 8 + 10 + 8  # two CONFIGs and the PULL, the bits, the ACK clock, the STOP
 
 
 # --- on the bus: the pins must be open-drain for the slave's ACK -------------
 
 
-@pytest.mark.parametrize("open_drain", [p for p, _ in PINS], ids=[n for _, n in PINS])
+@pytest.mark.parametrize("push_pull", [p for p, _ in PINS], ids=[n for _, n in PINS])
 @pytest.mark.parametrize("byte", BYTES, ids=lambda b: f"{b:#04x}")
-def test_slave_receives_the_byte_from_push_pull_or_open_drain_pins(open_drain, byte):
+def test_slave_receives_the_byte_from_push_pull_or_open_drain_pins(push_pull, byte):
     """Master to slave needs no third state: the slave sees START, eight bits
     it samples while SCL is high, STOP, whichever way the pins are set."""
-    r = run(WRITE, [byte], Slave(), open_drain)
+    r = run(WRITE, [byte], Slave(), push_pull)
     assert r.slave.events == ["START", (byte, True), "STOP"]
 
 
 def test_push_pull_pins_fight_the_slave_through_the_ack_clock_and_cannot_see_the_ack(wave):
-    """Why the pins have a mode. Push-pull, the reset, drives a 0 or a 1 every
-    cycle, so 'let go of SDA' is `SET 0, 1`, a driven 1. The slave answers
+    """Why the pins have a mode. Push-pull, the reset, with the program's
+    `CONFIG open_drain01, 3` taken out, drives a 0 or a 1 every cycle, so
+    'let go of SDA' is `SET 0, 1`, a driven 1. The slave answers
     the byte by pulling SDA low through the ninth clock, against that 1: a
     fight for every cycle the slave holds, in which the master reads its own
     driver. Its sample says NACK, and a slave that does not answer at all
@@ -346,7 +355,7 @@ def test_the_release_cannot_be_the_waits_own_side_effect():
     never issues: the side effect lands on the edge the WAIT issues, and the
     WAIT issues once SCL is high, which the side effect was to make it. Two
     words per clock, then."""
-    r = run(assemble("SET 1, 0\nWAIT 1, 1, 1, 1\nSET 0, 0"), [], Slave(), OPEN_DRAIN, cycles=50)
+    r = run(assemble("CONFIG open_drain01, 3\nSET 1, 0\nWAIT 1, 1, 1, 1\nSET 0, 0"), [], Slave(), cycles=50)
     assert r.cpu.stalled and decode(r.cpu.program[r.cpu.pc], r.cpu.isa).op == "WAIT"
     assert r.cpu.pin_trace(SCL)[-1] == 0 and r.scl[-1] == 0 and not r.cpu.halted
 
@@ -367,7 +376,7 @@ def test_write_to_the_addressed_slave_is_start_address_ack_data_ack_stop(wave):
     assert [u - d for d, u in zip(downs, ups)] == [HIGH] * 9 + [HIGH + 2] + [HIGH] * 9, "the data byte's PULL adds two"
     isa = load_isa()
     program = load_program(ADDR_DATA, isa)
-    assert len(program) == 2 * len(load_program(WRITE)) - 3
+    assert len(program) == 2 * len(load_program(WRITE)) - 4
     ack = next(i for i, w in enumerate(program) if decode(w, isa).op == "PUSH")
     stop = len(program) - 3  # the STOP's three words end the program
     assert [decode(w, isa) for w in program[ack + 1:ack + 3]] == [decode(w, isa) for w in assemble(f"SKIP 0, 0\nJMP {stop}", isa)]

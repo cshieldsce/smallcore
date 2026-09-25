@@ -37,6 +37,8 @@ def isa():
     (Instruction("CONFIG", (0, 1), 0), 0x8001),  # 100 00000 00000001
     (Instruction("CONFIG", (0, 1), 7), 0x8701),  # 100 00111 00000001
     (Instruction("CONFIG", (0, 1), 0, side=(1, 0)), 0x80A1),  # 100 00000 10100001  side effect on CONFIG too
+    (Instruction("CONFIG", (1, 3), 0), 0x8007),  # 100 00000 00000111  field 1 = open_drain01, value 0b11
+    (Instruction("CONFIG", (2, 2), 1), 0x810A),  # 100 00001 00001010  field 2 = open_drain23, value 0b10
     (Instruction("SHIFT_IN", (0,), 0), 0x2002),  # 001 00000 00000010  SHIFT with in = 1 in operand[1]
     (Instruction("SHIFT_IN", (3,), 0), 0x200E),  # 001 00000 00001110  pin in operand[3:2]
     (Instruction("SHIFT_IN", (3,), 3, side=(1, 1)), 0x23BE),  # 001 00011 10111110  flag, side pin 1, value 1, pin 3, in
@@ -68,8 +70,9 @@ def test_encoding(isa, instr, word):
                                   "NOP 1", "NOP 1, 0", "JMP 0, 1, 0", "JMP 0, 1", "CONFIG shift_dir, 1, 4, 0",
                                   "PUSH 1", "PUSH 0x55", "PUSH 4, 1", "PUSH 1, 0, 1",
                                   "PULL 0x55", "JMP", "JMP 256", "JMP nowhere",
-                                  "CONFIG", "CONFIG shift_dir", "CONFIG shift_dir, 2", "CONFIG 0, 1, 0", "CONFIG 1, 0",
+                                  "CONFIG", "CONFIG shift_dir", "CONFIG shift_dir, 2", "CONFIG 0, 1, 0", "CONFIG 3, 0",
                                   "CONFIG 4, 0", "CONFIG nothing, 0", "CONFIG_SHIFT 1", "CONFIG 0, shift_dir",
+                                  "CONFIG open_drain01, 4", "CONFIG open_drain23, 4", "CONFIG open_drain, 3",
                                   "SHIFT_IN", "SHIFT_IN 4", "SHIFT_IN 3, 1", "SHIFT_IN 3, 4, 1", "SHIFT_IN 3, 1, 2",
                                   "SHIFT_IN 3, 1, 1, 0",
                                   "1: SET 0, 0", "loop:: SET 0, 0"])
@@ -184,11 +187,17 @@ def test_config_takes_a_field_by_name_or_number_then_a_value():
     assert decode(0x8301, load_isa()) == Instruction("CONFIG", (0, 1), 3)
 
 
-def test_config_fields_1_to_3_are_unassigned(isa):
-    assert isa["config"] == {"shift_dir": {"field": 0, "bits": 1}}
-    for word in (0x8004, 0x8008, 0x800C):  # fields 1, 2, 3
-        with pytest.raises(ValueError, match="unassigned"):
-            decode(word, isa)
+def test_config_open_drain_is_two_fields_of_two_pins_and_field_3_is_unassigned(isa):
+    """CONFIG's value is two bits, the pin modes are four: two fields, the
+    lower pins in 1 and the upper in 2, so an I2C master sets SDA and SCL in
+    one word and CONFIG keeps its shape and its side effect."""
+    assert isa["config"] == {"shift_dir": {"field": 0, "bits": 1},
+                             "open_drain01": {"field": 1, "bits": 2}, "open_drain23": {"field": 2, "bits": 2}}
+    assert assemble("CONFIG open_drain01, 3") == assemble("CONFIG 1, 3") == [0x8007]
+    assert assemble("CONFIG open_drain23, 1 [2]") == assemble("config open_drain23,1 [2]") == [0x8209]
+    assert decode(0x8209, isa) == Instruction("CONFIG", (2, 1), 2)
+    with pytest.raises(ValueError, match="unassigned"):
+        decode(0x800C, isa)  # field 3
     with pytest.raises(ValueError, match="outside 0..1"):
         decode(0x8002, isa)  # shift_dir is one bit wide
 
