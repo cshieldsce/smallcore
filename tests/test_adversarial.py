@@ -30,7 +30,7 @@ class CPU(_CPU):
 OPS = tuple(ISA["instructions"])
 WORD_BITS = ISA["word_bits"]
 DELAY_MAX = (1 << ISA["fields"]["delay"]["bits"]) - 1
-STATE = ("pc", "gpio", "shift_reg", "in_shift_reg", "shift_dir", "tx_fifo", "rx_fifo", "counter", "halted")
+STATE = ("pc", "gpio", "open_drain", "shift_reg", "in_shift_reg", "shift_dir", "tx_fifo", "rx_fifo", "counter", "halted")
 
 
 def to_asm(instr):
@@ -129,9 +129,9 @@ def test_every_instruction_has_every_delay():
 
 def snapshot(cpu):
     return {
-        "pc": cpu.pc, "gpio": list(cpu.gpio), "shift_reg": cpu.shift_reg, "in_shift_reg": cpu.in_shift_reg,
-        "shift_dir": cpu.shift_dir, "tx_fifo": list(cpu.tx_fifo), "rx_fifo": list(cpu.rx_fifo),
-        "counter": cpu.counter, "halted": cpu.halted,
+        "pc": cpu.pc, "gpio": list(cpu.gpio), "open_drain": list(cpu.open_drain), "shift_reg": cpu.shift_reg,
+        "in_shift_reg": cpu.in_shift_reg, "shift_dir": cpu.shift_dir, "tx_fifo": list(cpu.tx_fifo),
+        "rx_fifo": list(cpu.rx_fifo), "counter": cpu.counter, "halted": cpu.halted,
     }
 
 
@@ -149,6 +149,8 @@ def checked_step(cpu):
     assert cpu.cycle == cycle + 1 and len(cpu.trace) == n_trace + 1
     assert cpu.trace[-1] == tuple(after["gpio"])
     assert all(level in (0, 1) for level in after["gpio"])
+    assert cpu.gpio_oe == [0 if od and level else 1 for od, level in zip(after["open_drain"], after["gpio"])]
+    assert after["open_drain"] == before["open_drain"], "no instruction writes the pin modes"
     assert 0 <= after["shift_reg"] <= 0xFF and 0 <= after["in_shift_reg"] <= 0xFF
     assert after["shift_dir"] in (0, 1)
     assert len(after["rx_fifo"]) <= cpu.rx_depth
@@ -241,7 +243,8 @@ def outside_world(rng, cpu, tx_max=6):
 def test_random_program_under_invariants(seed):
     rng = random.Random(seed)
     program = random_program(rng)
-    cpu = CPU(program, gpio=rng.randrange(2), gpio_in=rng.randrange(2), rx_depth=rng.randrange(1, 5))
+    cpu = CPU(program, gpio=rng.randrange(2), gpio_in=rng.randrange(2), rx_depth=rng.randrange(1, 5),
+              open_drain=rng.randrange(16))
     assert all(w in VALID for w in program)
     kinds = set()
     for _ in range(300):
@@ -258,7 +261,8 @@ def test_random_walk_reaches_every_kind_of_cycle():
     for seed in range(300):
         rng = random.Random(seed)
         program = random_program(rng)
-        cpu = CPU(program, gpio=rng.randrange(2), gpio_in=rng.randrange(2), rx_depth=rng.randrange(1, 5))
+        cpu = CPU(program, gpio=rng.randrange(2), gpio_in=rng.randrange(2), rx_depth=rng.randrange(1, 5),
+                  open_drain=rng.randrange(16))
         ops |= {decode(w, ISA).op for w in program}
         for _ in range(300):
             if cpu.halted:
@@ -274,13 +278,16 @@ def test_random_walk_reaches_every_kind_of_cycle():
 
 
 def test_reset_state():
-    for gpio, gpio_in in itertools.product((0, 1), (0, 1)):
-        cpu = CPU([0x0000], gpio=gpio, gpio_in=gpio_in)
+    for gpio, gpio_in, open_drain in itertools.product((0, 1), (0, 1), (0, 0b0011, 0b1111)):
+        cpu = CPU([0x0000], gpio=gpio, gpio_in=gpio_in, open_drain=open_drain)
+        modes = [(open_drain >> pin) & 1 for pin in range(4)]
         assert snapshot(cpu) == {
-            "pc": 0, "gpio": [gpio] * 4, "shift_reg": 0, "in_shift_reg": 0, "shift_dir": 0,
+            "pc": 0, "gpio": [gpio] * 4, "open_drain": modes, "shift_reg": 0, "in_shift_reg": 0, "shift_dir": 0,
             "tx_fifo": [], "rx_fifo": [], "counter": 0, "halted": False,
         }
+        assert cpu.gpio_oe == [0 if od and gpio else 1 for od in modes]
         assert (cpu.gpio_in, cpu.cycle, cpu.stalled, cpu.trace) == ([gpio_in] * 4, 0, False, [])
+    assert CPU([0x0000]).open_drain == [0, 0, 0, 0], "push-pull is the reset"
     assert CPU([]).halted
 
 
@@ -291,6 +298,7 @@ def fresh(word, rng, program=None):
     """A CPU on `word` alone (or `program`) in a random but stall-free state."""
     cpu = CPU(program or [word], gpio=rng.randrange(2), gpio_in=rng.randrange(2), rx_depth=4)
     cpu.shift_reg, cpu.in_shift_reg, cpu.shift_dir = rng.randrange(256), rng.randrange(256), rng.randrange(2)
+    cpu.open_drain = [rng.randrange(2) for _ in cpu.open_drain]
     cpu.gpio = [rng.randrange(2) for _ in cpu.gpio]
     cpu.gpio_in = [rng.randrange(2) for _ in cpu.gpio_in]
     cpu.tx_fifo = [rng.randrange(256) for _ in range(rng.randrange(1, 4))]

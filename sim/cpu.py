@@ -1,5 +1,6 @@
 """Simulator and assembler for the ISA in isa.yaml: a PIO-style CPU stepped one clock cycle at a time, driving
-gpio[3:0] and sampling or waiting on gpio_in[3:0]. isa.yaml is the reference for what each instruction does."""
+gpio[3:0], push-pull or open-drain per pin, and sampling or waiting on gpio_in[3:0]. isa.yaml is the reference
+for what each instruction does."""
 
 import re
 import sys
@@ -229,11 +230,15 @@ def cycles(instr):
 
 
 class CPU:
-    def __init__(self, program, gpio=1, gpio_in=0, tx_data=(), rx_depth=4, isa=None):
+    def __init__(self, program, gpio=1, gpio_in=0, open_drain=0, tx_data=(), rx_depth=4, isa=None):
         self.isa = isa or load_isa()
         self.program = list(program)  # instruction words
         self.pc = 0
         self.gpio = [gpio] * self.isa["gpio_out"]  # output pins, all reset to `gpio`
+        # Configuration, one bit per pin: 0 = push-pull, gpio[pin] is driven; 1 = open-drain, a 0 is driven and
+        # a 1 lets go of the line (see gpio_oe). `open_drain` is a mask, bit k for gpio[k]: 0b0011 for an I2C
+        # master on gpio 0 and 1. Set at reset by the host: no CONFIG field yet.
+        self.open_drain = [(open_drain >> pin) & 1 for pin in range(self.isa["gpio_out"])]
         self.gpio_in = [gpio_in] * self.isa["gpio_in"]  # input pins: the outside world sets these before each step
         self.shift_reg = 0  # 8-bit, emptied one bit at a time by SHIFT_OUT from the end shift_dir picks
         self.in_shift_reg = 0  # 8-bit, filled one bit at a time by SHIFT_IN from the end opposite shift_dir
@@ -246,6 +251,13 @@ class CPU:
         self.counter = 0  # cycles left in the current instruction
         self.halted = not self.program
         self.trace = []  # gpio levels (gpio[0], gpio[1], ...) at the end of each cycle
+
+    @property
+    def gpio_oe(self):
+        """Output enable per pin, combinational: gpio_oe[k] = !(open_drain[k] & gpio[k]). The pad drives
+        gpio[k] while it is 1 and lets go while it is 0, so an open-drain pin drives its 0s and releases on
+        a 1; a push-pull pin is always driven. The outside world resolves a released line."""
+        return [0 if od and level else 1 for od, level in zip(self.open_drain, self.gpio)]
 
     def pin_trace(self, pin):
         """One pin's level at the end of each cycle."""

@@ -1,14 +1,13 @@
-"""I2C master checks, and where the core stops: the master cannot let go of
-a line. The bench is the bus, two open-drain lines with pull-ups, the
-master's pins on one end and a slave model on the other, resolved every
-cycle from what each side drove on the cycle before. The master's pins go
-through one of two pads: push-pull, which is what gpio[pin] is today, a 0 or
-a 1 every cycle, or open-drain, a wrapper that turns the 1 into not driving,
-standing in for whatever the core grows. programs/i2c_write.asm sends one
-byte: START, eight bits, the ACK clock, STOP. i2c_write_stretch.asm is the
-same with a WAIT on SCL before every high phase, for a slave that stretches
-the clock. i2c_write_addr_data.asm sends an address byte and a data byte and
-shows what a NACK asks for."""
+"""I2C master checks. The bench is the bus, two open-drain lines with
+pull-ups, the master's pins on one end and a slave model on the other,
+resolved every cycle from what each side drove on the cycle before. The
+master drives a line while gpio_oe says so and lets go otherwise: with SDA
+and SCL open-drain (open_drain 0b11) a 1 lets go, with them push-pull (the
+reset) a 1 is driven, and the bus shows the difference. programs/i2c_write.asm
+sends one byte: START, eight bits, the ACK clock, STOP. i2c_write_stretch.asm
+is the same with a WAIT on SCL before every high phase, for a slave that
+stretches the clock. i2c_write_addr_data.asm sends an address byte and a data
+byte and shows what a NACK asks for."""
 
 import random
 from pathlib import Path
@@ -23,6 +22,8 @@ WRITE = PROGRAMS / "i2c_write.asm"
 STRETCH = PROGRAMS / "i2c_write_stretch.asm"
 ADDR_DATA = PROGRAMS / "i2c_write_addr_data.asm"
 SDA, SCL = 0, 1  # the same pin numbers on gpio (what the master drives) and gpio_in (the bus)
+PUSH_PULL, OPEN_DRAIN = 0, 1 << SDA | 1 << SCL  # open_drain masks: the reset, and both lines open-drain
+PINS = ((PUSH_PULL, "push_pull"), (OPEN_DRAIN, "open_drain"))
 BYTES = (0x00, 0x01, 0x55, 0x80, 0xA3, 0xFF)
 ADDRESS = 0x50  # the slave's 7-bit address; a write to it starts with the byte ADDRESS << 1
 DATA = 0x3C
@@ -31,19 +32,6 @@ CLOCKS = 10  # rises of SCL in one byte's transaction: eight bits, the ACK clock
 
 
 # --- the bus ------------------------------------------------------------------
-
-
-def push_pull(level):
-    """The core's pin today: driven every cycle, 0 or 1."""
-    return level
-
-
-def open_drain(level):
-    """A pad that ties the driver's enable to the level: 0 pulls low, 1 lets go (None)."""
-    return 0 if level == 0 else None
-
-
-PADS = (push_pull, open_drain)
 
 
 def resolve(drives):
@@ -119,17 +107,20 @@ class Run(NamedTuple):
     cpu: CPU
 
 
-def run(program, tx_data, slave=None, pad=open_drain, before=None, cycles=2000):
+def run(program, tx_data, slave=None, open_drain=OPEN_DRAIN, before=None, cycles=2000):
     """Run a program on the bus until it halts or `cycles` pass, the master's
-    pins through `pad`, `before(cpu)` acting on the CPU before each cycle."""
+    pins configured by the `open_drain` mask, `before(cpu)` acting on the CPU
+    before each cycle. The pad is gpio and gpio_oe: gpio[line] on the bus
+    while gpio_oe[line] is 1, nothing while it is 0."""
     slave = slave or Slave()
-    cpu = CPU(program if isinstance(program, list) else load_program(program), gpio_in=1, tx_data=tx_data)
+    cpu = CPU(program if isinstance(program, list) else load_program(program), gpio_in=1, open_drain=open_drain,
+              tx_data=tx_data)
     bus = [1, 1]
     sda, scl, fights, samples, waits = [], [], [], [], 0
     while not cpu.halted and cpu.cycle < cycles:
         drives = slave.update(*bus)
         for line in (SDA, SCL):
-            bus[line], fight = resolve((pad(cpu.gpio[line]), drives[line]))
+            bus[line], fight = resolve((cpu.gpio[line] if cpu.gpio_oe[line] else None, drives[line]))
             cpu.gpio_in[line] = bus[line]
             if fight:
                 fights.append((cpu.cycle, line))
@@ -216,25 +207,26 @@ def test_bit_period_is_8_cycles_sda_moves_2_after_scl_falls_and_2_before_it_rise
     assert r.cpu.cycle == 5 + 8 * 8 + 10 + 8  # config and PULL, the bits, the ACK clock, the STOP
 
 
-# --- on the bus: master to slave works, slave to master cannot ----------------
+# --- on the bus: the pins must be open-drain for the slave's ACK -------------
 
 
-@pytest.mark.parametrize("pad", PADS, ids=lambda p: p.__name__)
+@pytest.mark.parametrize("open_drain", [p for p, _ in PINS], ids=[n for _, n in PINS])
 @pytest.mark.parametrize("byte", BYTES, ids=lambda b: f"{b:#04x}")
-def test_slave_receives_the_byte_on_either_pad(pad, byte):
-    """Master to slave is the direction the core has: the slave sees START,
-    eight bits it samples while SCL is high, STOP."""
-    r = run(WRITE, [byte], Slave(), pad)
+def test_slave_receives_the_byte_from_push_pull_or_open_drain_pins(open_drain, byte):
+    """Master to slave needs no third state: the slave sees START, eight bits
+    it samples while SCL is high, STOP, whichever way the pins are set."""
+    r = run(WRITE, [byte], Slave(), open_drain)
     assert r.slave.events == ["START", (byte, True), "STOP"]
 
 
-def test_push_pull_master_fights_the_slave_through_the_ack_clock_and_cannot_see_the_ack(wave):
-    """The wall. The core's pin is 0 or 1 every cycle, so 'let go of SDA' is
-    `SET 0, 1`, a driven 1. The slave answers the byte by pulling SDA low
-    through the ninth clock, against that 1: a fight for every cycle the
-    slave holds, in which the master reads its own driver. Its sample says
-    NACK, and a slave that does not answer at all looks exactly the same."""
-    acked = run(WRITE, [0xA3], Slave(), push_pull)
+def test_push_pull_pins_fight_the_slave_through_the_ack_clock_and_cannot_see_the_ack(wave):
+    """Why the pins have a mode. Push-pull, the reset, drives a 0 or a 1 every
+    cycle, so 'let go of SDA' is `SET 0, 1`, a driven 1. The slave answers
+    the byte by pulling SDA low through the ninth clock, against that 1: a
+    fight for every cycle the slave holds, in which the master reads its own
+    driver. Its sample says NACK, and a slave that does not answer at all
+    looks exactly the same."""
+    acked = run(WRITE, [0xA3], Slave(), PUSH_PULL)
     show(wave, acked)
     (sample,) = acked.samples
     cycles = [c for c, _ in acked.fights]
@@ -244,20 +236,19 @@ def test_push_pull_master_fights_the_slave_through_the_ack_clock_and_cannot_see_
     assert cycles[0] < sample < cycles[-1], "sampled mid-fight"
     assert acked.cpu.rx_fifo == [1], "read as NACK"
 
-    silent = run(WRITE, [0xA3], Slave(address=other(0xA3 >> 1)), push_pull)  # not its address: no ACK
+    silent = run(WRITE, [0xA3], Slave(address=other(0xA3 >> 1)), PUSH_PULL)  # not its address: no ACK
     assert silent.slave.events == ["START", (0xA3, False), "STOP"] and silent.fights == []
     assert silent.cpu.rx_fifo == [1]
     assert [1 if l is None else l for l in acked.sda] == silent.sda, "the master saw the same SDA either way"
 
 
 @pytest.mark.parametrize("byte", BYTES, ids=lambda b: f"{b:#04x}")
-def test_a_pad_that_lets_go_on_a_1_is_all_the_ack_needs(byte, wave):
-    """The shape of what is missing. The same words on a pad that turns the 1
-    into not driving: no fight, the slave's ACK is on the wire when the
-    master samples, and a NACK is a 1 the pull-up holds. The master never
-    wants to drive a line high, so the pad can be set once for the whole
-    protocol. The core is one output state away."""
-    acked = run(WRITE, [byte], Slave(), open_drain)
+def test_open_drain_pins_let_go_on_a_1_and_the_master_sees_the_ack(byte, wave):
+    """The same words with SDA and SCL open-drain: gpio_oe drops on every 1,
+    so there is no fight, the slave's ACK is on the wire when the master
+    samples, and a NACK is a 1 the pull-up holds. The master never wants to
+    drive a line high, so the mode is set once for the whole protocol."""
+    acked = run(WRITE, [byte], Slave(), OPEN_DRAIN)
     if byte == 0xA3:
         show(wave, acked)
     ups, downs = rising_edges(acked.cpu.pin_trace(SCL)), falling_edges(acked.cpu.pin_trace(SCL))
@@ -265,9 +256,23 @@ def test_a_pad_that_lets_go_on_a_1_is_all_the_ack_needs(byte, wave):
     assert acked.fights == [] and acked.slave.events == ["START", (byte, True), "STOP"]
     assert ups[8] <= sample < downs[9], "sampled in the ACK clock"
     assert acked.sda[sample] == 0 and acked.cpu.rx_fifo == [0], "ACK"
-    nacked = run(WRITE, [byte], Slave(address=other(byte >> 1)), open_drain)
+    assert acked.cpu.gpio_oe[SDA] == 0 and acked.cpu.gpio[SDA] == 1, "let go at the end, not driven high"
+    nacked = run(WRITE, [byte], Slave(address=other(byte >> 1)), OPEN_DRAIN)
     assert nacked.fights == [] and nacked.slave.events == ["START", (byte, False), "STOP"]
     assert nacked.cpu.rx_fifo == [1], "NACK"
+
+
+def test_open_drain_pins_drive_their_zeros_and_release_their_ones():
+    """Every cycle of the transfer: a 0 in gpio is on the bus with gpio_oe 1,
+    a 1 is gpio_oe 0 and the bus is the pull-up's or the slave's. The other
+    two pins, push-pull, keep driving."""
+    r = run(STRETCH, [0xA3], Slave(stretch=5), OPEN_DRAIN)
+    assert r.cpu.open_drain == [1, 1, 0, 0] and r.cpu.gpio_oe == [0, 0, 1, 1]
+    for cycle, (levels, sda, scl) in enumerate(zip(r.cpu.trace, r.sda[1:], r.scl[1:]), start=1):  # the bus follows one cycle behind
+        for line, bus in ((SDA, sda), (SCL, scl)):
+            if levels[line] == 0:
+                assert bus == 0, f"cycle {cycle}: a driven 0 is on the bus"
+    assert any(l == 1 and b == 0 for l, b in zip(r.cpu.pin_trace(SCL), r.scl[1:])), "the slave held SCL through a release"
 
 
 # --- programs/i2c_write_stretch.asm: WAIT on SCL before every high phase ------
@@ -319,15 +324,15 @@ def test_master_follows_a_slave_that_stretches_a_different_amount_each_time():
     assert r.waits == sum(max(h - 3, 0) for h in holds) > 0
 
 
-def test_push_pull_master_drives_scl_high_through_the_slaves_stretch():
-    """The same wall on the other line. The master lets go of SCL with a
-    driven 1 while the slave holds it low: a slave that holds for 8 cycles
-    after each fall is still holding through every high phase, so every
-    cycle the master drives SCL high from the first fall on is a fight. The
-    WAIT reads the master's own 1 and never stalls, the transfer takes
-    exactly as long as with no stretch, and the ACK is unseen as before. The
-    WAIT works, the pin does not."""
-    r = run(STRETCH, [0xA3], Slave(stretch=8), push_pull)
+def test_push_pull_pins_drive_scl_high_through_the_slaves_stretch():
+    """The same fight on the other line. Push-pull, the master lets go of SCL
+    with a driven 1 while the slave holds it low: a slave that holds for 8
+    cycles after each fall is still holding through every high phase, so
+    every cycle the master drives SCL high from the first fall on is a
+    fight. The WAIT reads the master's own 1 and never stalls, the transfer
+    takes exactly as long as with no stretch, and the ACK is unseen as
+    before. The WAIT works, the mode is wrong."""
+    r = run(STRETCH, [0xA3], Slave(stretch=8), PUSH_PULL)
     out = r.cpu.pin_trace(SCL)
     first = falling_edges(out)[0]
     assert [c for c, line in r.fights if line == SCL] == [c for c in range(first + 2, r.cpu.cycle) if out[c - 1] == 1]
@@ -341,7 +346,7 @@ def test_the_release_cannot_be_the_waits_own_side_effect():
     never issues: the side effect lands on the edge the WAIT issues, and the
     WAIT issues once SCL is high, which the side effect was to make it. Two
     words per clock, then."""
-    r = run(assemble("SET 1, 0\nWAIT 1, 1, 1, 1\nSET 0, 0"), [], Slave(), open_drain, cycles=50)
+    r = run(assemble("SET 1, 0\nWAIT 1, 1, 1, 1\nSET 0, 0"), [], Slave(), OPEN_DRAIN, cycles=50)
     assert r.cpu.stalled and decode(r.cpu.program[r.cpu.pc], r.cpu.isa).op == "WAIT"
     assert r.cpu.pin_trace(SCL)[-1] == 0 and r.scl[-1] == 0 and not r.cpu.halted
 

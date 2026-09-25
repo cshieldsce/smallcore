@@ -1,6 +1,6 @@
 # core
 
-A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay, four output pins `gpio[3:0]`, four input pins `gpio_in[3:0]`, an 8-bit output shift register fed by a TX FIFO, an 8-bit input shift register drained into an RX FIFO, a wait on an input level, and one configuration bit, `shift_dir`. Nine mnemonics in six opcodes, two free. The encoding is in `isa.yaml`.
+A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay, four output pins `gpio[3:0]`, each push-pull or open-drain, four input pins `gpio_in[3:0]`, an 8-bit output shift register fed by a TX FIFO, an 8-bit input shift register drained into an RX FIFO, a wait on an input level, and two pieces of configuration, `shift_dir` and `open_drain`. Nine mnemonics in six opcodes, two free. The encoding is in `isa.yaml`.
 
 | instruction | does |
 |---|---|
@@ -55,14 +55,14 @@ What the protocols have asked of the core, in order. Open items stay open until 
 | get the received byte out | SPI duplex | `PUSH` into an RX FIFO; `PUSH 2, 1` also ends the frame |
 | six of eight opcodes used | the ISA | one `SHIFT` opcode with an in bit, one `FIFO` opcode with a push bit, generic `CONFIG`, the side effect on every opcode, `SET` = `NOP` + side effect |
 | wait for an input level: the start bit | UART RX | `WAIT pin, level`: the stall PULL and PUSH already had, with a pin level as its third condition; `uart_rx.asm` is 11 words, `WAIT 0, 0 [11]` then eight mid-bit `SHIFT_IN`s |
-| let go of a line: a third output state | I2C | open, the wall: `SET 0, 1` drives a 1 against the slave's ACK and the master reads its own driver; an open-drain pad in `tests/test_i2c.py` stands in and nothing else is missing |
+| let go of a line: a third output state | I2C | `open_drain[3:0]`, one mode bit per pin: `gpio_oe[k] = !(open_drain[k] & gpio[k])`, an open-drain pin drives its 0 and lets go on a 1; the same words see the ACK and follow the stretch. Set at reset by the host: a `CONFIG` field for four bits is open, the value is two |
 | wait for the clock to really rise | I2C clock stretching | `SET 1, 1` then `WAIT 1, 1 [2]`: the WAIT as built, one more word per clock |
 | act on the ACK: STOP after a NACK | I2C address + data | open: the master clocks the data byte anyway, and the host has no lever; a JMP the bench aims at the sampled bit stands in |
 | compact repetition / bit count | SPI, 16 words per byte; I2C, 3 per bit | open |
 | per-pin idle level | SPI, one `SET` for SCLK | open, not hurting yet |
 | configurable shift-output pin | SPI | open, fixed `gpio[0]` has not failed |
 
-Three kinds of state: instruction (`pc`, the delay counter), stream (the shift registers and FIFOs) and configuration (`shift_dir`). A shift pin, input pin or pin direction would join the third kind as another `CONFIG` field.
+Three kinds of state: instruction (`pc`, the delay counter), stream (the shift registers and FIFOs) and configuration (`shift_dir`, `open_drain`). A shift pin or input pin would join the third kind as another `CONFIG` field; `open_drain` has none yet.
 
 ## Docs
 

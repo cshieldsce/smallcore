@@ -1,7 +1,7 @@
-# Mini ISA: four output pins gpio[3:0], four input pins gpio_in[3:0], an 8-bit
-# output shift register fed from a TX FIFO, an 8-bit input shift register
-# emptied into an RX FIFO, one configuration bit (shift_dir), a wait on an
-# input level, 16-bit words:
+# Mini ISA: four output pins gpio[3:0], each push-pull or open-drain, four
+# input pins gpio_in[3:0], an 8-bit output shift register fed from a TX FIFO,
+# an 8-bit input shift register emptied into an RX FIFO, configuration
+# (shift_dir, open_drain), a wait on an input level, 16-bit words:
 #
 #   15 14 13 | 12 11 10 9 8 | 7 6 5 4 | 3 2 1 0
 #    opcode  |     delay    |  side   |  own
@@ -23,6 +23,10 @@
 # shifts away from it, SHIFT_IN samples into the opposite end and shifts
 # towards it, so eight of either move a byte in normal order. `CONFIG
 # shift_dir, d` sets it once per protocol.
+# open_drain[3:0], one bit per pin, 0 = push-pull (reset), 1 = open-drain:
+# gpio_oe[k] = !(open_drain[k] & gpio[k]), so an open-drain pin drives its 0
+# and lets go of the line on a 1, from whichever instruction wrote it. Set
+# at reset by the host; no CONFIG field holds four bits yet.
 
 word_bits: 16
 gpio_out: 4

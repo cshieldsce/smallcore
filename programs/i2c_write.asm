@@ -1,8 +1,8 @@
 # I2C master, one byte from the TX FIFO, MSB first, 8 cycles per bit.
 # gpio 0 = SDA (the shift pin), gpio 1 = SCL. gpio_in 0 = SDA, gpio_in 1 =
-# SCL, the lines as the bus holds them. The bus is open-drain: a 1 on either
-# pin means let go and leave the line to its pull-up, which this core cannot
-# do, see tests/test_i2c.py.
+# SCL, the lines as the bus holds them. The bus is open-drain and so are the
+# two pins (open_drain 0b0011): a 1 on either lets go and leaves the line to
+# its pull-up, a 0 pulls it low.
 # START: SDA falls while SCL is high, on the edge the byte arrives. Each bit:
 # SCL falls, SDA changes two cycles later (hold), SCL rises two cycles after
 # that (setup) and the slave samples while it is high. The ninth clock is the

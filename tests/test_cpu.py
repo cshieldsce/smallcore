@@ -82,6 +82,55 @@ def test_every_pin_resets_to_the_same_level():
     assert CPU(assemble("PULL"), tx_data=[0]).run() == [(1, 1, 1, 1)]
 
 
+# open_drain: one mode bit per pin, set at reset. gpio_oe[k] = !(open_drain[k] & gpio[k]).
+
+
+def test_pins_reset_push_pull_and_always_driven():
+    cpu = CPU(assemble("SET 0, 0\nSET 1, 0"))
+    assert cpu.open_drain == [0, 0, 0, 0] and cpu.gpio_oe == [1, 1, 1, 1]
+    cpu.run()
+    assert (cpu.gpio, cpu.gpio_oe) == ([0, 0, 1, 1], [1, 1, 1, 1])
+
+
+def test_open_drain_pin_drives_its_0_and_lets_go_on_a_1():
+    """The mask names the pins: 0b0011 makes gpio 0 and 1 open-drain. A 1 in
+    gpio is then gpio_oe 0, the pad off, whether the 1 came from reset, SET,
+    a side effect or SHIFT_OUT; a 0 is driven. Pins 2 and 3 stay push-pull."""
+    cpu = CPU(assemble("SET 0, 0\nSET 0, 1 [1]\nPULL 1, 0\nSHIFT_OUT 1, 1\nSHIFT_OUT\nSET 2, 0\nSET 3, 1"),
+              open_drain=0b0011, tx_data=[0b01])
+    assert (cpu.open_drain, cpu.gpio, cpu.gpio_oe) == ([1, 1, 0, 0], [1, 1, 1, 1], [0, 0, 1, 1])  # reset: let go
+    cpu.step()
+    assert (cpu.gpio, cpu.gpio_oe) == ([0, 1, 1, 1], [1, 0, 1, 1])  # SET 0, 0: driven
+    cpu.step()
+    assert (cpu.gpio, cpu.gpio_oe) == ([1, 1, 1, 1], [0, 0, 1, 1])  # SET 0, 1: let go
+    cpu.step()
+    assert (cpu.gpio, cpu.gpio_oe) == ([1, 1, 1, 1], [0, 0, 1, 1])  # delay: holds
+    cpu.step()
+    assert (cpu.gpio, cpu.gpio_oe) == ([1, 0, 1, 1], [0, 1, 1, 1])  # PULL's side effect drives gpio[1] low
+    cpu.step()
+    assert (cpu.gpio, cpu.gpio_oe) == ([1, 1, 1, 1], [0, 0, 1, 1])  # SHIFT_OUT: bit 0 = 1 lets go, gpio[1] released
+    cpu.step()
+    assert (cpu.gpio, cpu.gpio_oe) == ([0, 1, 1, 1], [1, 0, 1, 1])  # SHIFT_OUT: bit 1 = 0 drives
+    cpu.run()
+    assert (cpu.gpio, cpu.gpio_oe) == ([0, 1, 0, 1], [1, 0, 1, 1])  # push-pull pins drive both levels
+
+
+def test_open_drain_changes_the_enable_and_nothing_else():
+    """The same program on push-pull and open-drain pins: same gpio, same
+    trace, same registers, cycle for cycle. The mode only says which of
+    those levels reach the line."""
+    source = "CONFIG shift_dir, 1\nPULL 2, 0\n" + "SHIFT_OUT 1, 0\nSHIFT_IN 3, 1, 1\n" * 8 + "PUSH 2, 1"
+    plain, od = CPU(assemble(source), tx_data=[0xA3]), CPU(assemble(source), open_drain=0b1111, tx_data=[0xA3])
+    while not plain.halted:
+        plain.gpio_in[3] = od.gpio_in[3] = plain.cycle & 1
+        plain.step()
+        od.step()
+        assert od.gpio_oe == [1 - level for level in od.gpio]
+    assert od.halted and od.trace == plain.trace
+    assert (od.shift_reg, od.in_shift_reg, od.rx_fifo, od.cycle) == \
+        (plain.shift_reg, plain.in_shift_reg, plain.rx_fifo, plain.cycle)
+
+
 def test_shift_out_drives_gpio0_and_nothing_else():
     cpu = CPU(assemble("PULL\nSET 1, 0\nSHIFT_OUT\nSHIFT_OUT"), tx_data=[0b01])
     assert cpu.run()[1:] == [(1, 0, 1, 1), (1, 0, 1, 1), (0, 0, 1, 1)]
