@@ -1,7 +1,8 @@
 module core(
-    input  clk, reset,
-    input  [15:0] imem_word,
-    output [7:0]  imem_addr,
+    input             clk, reset,
+    input      [15:0] imem_word,
+    input      [8:0]  program_words,
+    output     [7:0]  imem_addr,
     output reg [3:0]  gpio
 );
     // opcodes
@@ -55,7 +56,6 @@ module core(
     assign is_skip    = (opcode == OP_SKIP);
 
     // own decode
-
     wire       shift_select;
     wire       fifo_select;
     wire [1:0] config_field;
@@ -70,7 +70,13 @@ module core(
     assign config_value = own[1:0];
     assign input_pin    = own[3:2];
     assign skip_bit     = own[3:1];
-    assign level        = own[1];
+    assign level        = own[0];
+
+    wire halted;
+    wire issue;
+
+    assign halted = (pc >= program_words);
+    assign issue  = (!halted && delay_counter == 0);
 
     always @(posedge clk) begin
         if (reset) begin            
