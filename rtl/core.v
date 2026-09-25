@@ -1,9 +1,11 @@
 module core(
     input             clk, reset,
+    input             tx_empty, rx_full
     input      [15:0] imem_word,
     input      [8:0]  program_words,
+    input      [3:0]  gpio_in,
     output     [7:0]  imem_addr,
-    output reg [3:0]  gpio
+    output reg [3:0]  gpio_out
 );
     // opcodes
     localparam [2:0] OP_NOP_SET = 3'b000;
@@ -74,16 +76,19 @@ module core(
 
     wire halted;
     wire issue;
+    wire stall;
 
     assign halted = (pc >= program_words);
-    assign issue  = (!halted && delay_counter == 0);
+    assign issue  = !halted && (delay_counter == 5'd0);
+
+    assign stall = issue && (is_fifo && (push ? rx_full : tx_empty) || is_wait && gpio_in[input_pin] != level);
 
     always @(posedge clk) begin
         if (reset) begin            
             // Reset sets PC=0, Counter=0, GPIO=1111 
             pc            <= 9'd0;
             delay_counter <= 5'd0;
-            gpio          <= 4'b1111;
+            gpio_out      <= 4'b1111;
         end
     end
 
