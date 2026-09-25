@@ -7,7 +7,7 @@ reset) a 1 is driven, and the bus shows the difference. programs/i2c_write.asm
 sends one byte: START, eight bits, the ACK clock, STOP. i2c_write_stretch.asm
 is the same with a WAIT on SCL before every high phase, for a slave that
 stretches the clock. i2c_write_addr_data.asm sends an address byte and a data
-byte and shows what a NACK asks for."""
+byte, and STOPs after a NACK on the address: a SKIP on the sampled bit."""
 
 import random
 from pathlib import Path
@@ -15,7 +15,7 @@ from typing import NamedTuple
 
 import pytest
 
-from cpu import CPU, Instruction, assemble, decode, encode, load_isa, load_program
+from cpu import CPU, assemble, decode, load_isa, load_program
 
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
 WRITE = PROGRAMS / "i2c_write.asm"
@@ -351,65 +351,72 @@ def test_the_release_cannot_be_the_waits_own_side_effect():
     assert r.cpu.pin_trace(SCL)[-1] == 0 and r.scl[-1] == 0 and not r.cpu.halted
 
 
-# --- programs/i2c_write_addr_data.asm: what a NACK asks for -------------------
+# --- programs/i2c_write_addr_data.asm: ACK, then data; NACK, then STOP -------
 
 
 def test_write_to_the_addressed_slave_is_start_address_ack_data_ack_stop(wave):
+    """The ACK path: `SKIP 0, 0` after the address byte's ACK clock steps
+    over the `JMP stop` and the data byte follows, its low phase as long as
+    without the two words (the PUSH gave up its delay to them)."""
     r = run(ADDR_DATA, [ADDRESS << 1, DATA], Slave(ADDRESS))
     show(wave, r)
     assert r.slave.events == ["START", (ADDRESS << 1, True), (DATA, True), "STOP"]
     assert r.cpu.rx_fifo == [0, 0] and r.fights == []
-    assert len(rising_edges(r.scl)) == 2 * (CLOCKS - 1) + 1
-    assert len(r.cpu.program) == 2 * len(load_program(WRITE)) - 5
-
-
-def test_after_a_nack_the_master_clocks_the_data_byte_anyway():
-    """No slave at the address: the address byte is not acked. The spec asks
-    for a STOP (or a repeated START) next. This master's next word is the
-    data byte's PULL, so it clocks a byte nobody takes and stops a byte late.
-    The host has the NACK from the RX FIFO the cycle the ACK clock ends and
-    has no lever: withholding the data byte leaves the master stalled on
-    PULL with SCL low, the bus held, and still no STOP."""
-    r = run(ADDR_DATA, [ADDRESS << 1, DATA], Slave(other(ADDRESS)))
-    assert r.slave.events == ["START", (ADDRESS << 1, False), (DATA, False), "STOP"]
-    assert r.cpu.rx_fifo == [0b1, 0b11], "each PUSH carries every sample so far"
-
-    def withhold(cpu):
-        if cpu.rx_fifo and cpu.rx_fifo[-1] & 1:
-            cpu.tx_fifo.clear()
-
-    hung = run(ADDR_DATA, [ADDRESS << 1, DATA], Slave(other(ADDRESS)), before=withhold, cycles=400)
-    assert hung.slave.events == ["START", (ADDRESS << 1, False)]
-    assert hung.cpu.stalled and decode(hung.cpu.program[hung.cpu.pc], hung.cpu.isa).op == "PULL"
-    assert hung.scl[-1] == 0 and hung.cpu.rx_fifo == [1]
-
-
-def test_a_jmp_the_bench_aims_at_the_sample_stands_in_for_the_missing_branch():
-    """The shape of what is missing. A JMP right after the address byte's ACK
-    clock, aimed by the bench at the data byte if the sample was 0 and at the
-    STOP if it was 1. The addressed slave gets its data byte; any other gets
-    the STOP the spec asks for, one clock after the NACK. The master is one
-    conditional jump away, on the bit it just sampled: by the time the JMP
-    is up, SCL is low and the slave has let go of SDA, so the pin no longer
-    holds the answer, the input shift register does."""
+    ups, downs = rising_edges(r.scl), falling_edges(r.scl)
+    assert len(ups) == 2 * (CLOCKS - 1) + 1
+    assert [u - d for d, u in zip(downs, ups)] == [HIGH] * 9 + [HIGH + 2] + [HIGH] * 9, "the data byte's PULL adds two"
     isa = load_isa()
-    lines = ADDR_DATA.read_text().splitlines()
-    ack = next(i for i, line in enumerate(lines) if "PUSH 1, 0" in line)  # the address byte's
-    lines[ack + 1:ack + 1] = ["        JMP data"]
-    lines[ack + 2] = "data: " + lines[ack + 2]
-    (stop,) = [i for i, line in enumerate(lines) if "# STOP:" in line]
-    lines[stop] = "stop: " + lines[stop]
-    program = assemble("\n".join(lines), isa)
-    jmp = next(i for i, w in enumerate(program) if decode(w, isa).op == "JMP")
-    data, stop = decode(program[jmp], isa).args[0], len(program) - 3
+    program = load_program(ADDR_DATA, isa)
+    assert len(program) == 2 * len(load_program(WRITE)) - 3
+    ack = next(i for i, w in enumerate(program) if decode(w, isa).op == "PUSH")
+    stop = len(program) - 3  # the STOP's three words end the program
+    assert [decode(w, isa) for w in program[ack + 1:ack + 3]] == [decode(w, isa) for w in assemble(f"SKIP 0, 0\nJMP {stop}", isa)]
+    assert decode(program[stop], isa) == decode(assemble("SET 0, 0 [1]")[0], isa), "the JMP's target is the STOP"
 
-    def aim(cpu):
-        if cpu.pc == jmp and cpu.counter == 0:
-            cpu.program[jmp] = encode(Instruction("JMP", (stop if cpu.in_shift_reg & 1 else data,)), isa)
 
-    acked = run(program, [ADDRESS << 1, DATA], Slave(ADDRESS), before=aim)
-    assert acked.slave.events == ["START", (ADDRESS << 1, True), (DATA, True), "STOP"]
-    nacked = run(program, [ADDRESS << 1, DATA], Slave(other(ADDRESS)), before=aim)
-    assert nacked.slave.events == ["START", (ADDRESS << 1, False), "STOP"]
-    assert nacked.cpu.rx_fifo == [1] and nacked.cpu.tx_fifo == [DATA], "the data byte was never sent"
-    assert len(rising_edges(nacked.scl)) == CLOCKS, "the STOP came right after the NACK"
+def test_after_a_nack_the_master_stops_and_keeps_the_data_byte(wave):
+    """No slave at the address: the address byte is not acked, the sample is
+    a 1, the SKIP falls into the JMP and the STOP follows one clock after
+    the NACK: SDA low while SCL is low, SCL let go, SDA let go while SCL is
+    high. Nothing is clocked to nobody and the data byte is still in the TX
+    FIFO for the host to see, next to the NACK in the RX FIFO."""
+    r = run(ADDR_DATA, [ADDRESS << 1, DATA], Slave(other(ADDRESS)))
+    show(wave, r)
+    assert r.slave.events == ["START", (ADDRESS << 1, False), "STOP"]
+    assert r.cpu.rx_fifo == [1] and r.cpu.tx_fifo == [DATA] and r.fights == []
+    ups, downs = rising_edges(r.scl), falling_edges(r.scl)
+    assert len(ups) == CLOCKS, "the STOP's rise is the next after the ACK clock"
+    start, stop = start_and_stop(r.sda, r.scl)
+    assert ups[9] - downs[9] == 5 and stop == ups[9] + 2, "PUSH, SKIP, JMP, then the STOP's two words"
+    assert r.cpu.halted and (r.sda[-1], r.scl[-1]) == (1, 1), "bus free"
+    assert r.cpu.cycle == run(WRITE, [ADDRESS << 1], Slave(other(ADDRESS))).cpu.cycle + 1, "one byte's transfer and a cycle"
+
+
+def test_the_host_may_hold_the_data_byte_until_the_ack_and_a_nack_never_asks_for_it():
+    """A host that feeds the data byte only once it has seen the address
+    acked: the master waits on PULL with SCL low, which the slave takes as
+    the master's own time, and goes on when the byte comes. After a NACK
+    the master never reaches the PULL: no hang, and the STOP goes out with
+    the FIFO empty."""
+    isa = load_isa()
+    program = load_program(ADDR_DATA, isa)
+    data_pull = [i for i, w in enumerate(program) if decode(w, isa).op == "PULL"][1]
+    visited, stalls = set(), []
+
+    def late_host(cpu):
+        visited.add(cpu.pc)
+        if cpu.rx_fifo == [0] and cpu.stalled:
+            stalls.append(cpu.cycle)
+            if len(stalls) == 7:
+                cpu.tx_fifo.append(DATA)
+
+    prompt = run(ADDR_DATA, [ADDRESS << 1, DATA], Slave(ADDRESS))
+    late = run(ADDR_DATA, [ADDRESS << 1], Slave(ADDRESS), before=late_host)
+    assert late.slave.events == prompt.slave.events == ["START", (ADDRESS << 1, True), (DATA, True), "STOP"]
+    assert late.cpu.rx_fifo == [0, 0] and late.fights == [] and data_pull in visited
+    assert late.cpu.cycle == prompt.cpu.cycle + 7 and late.scl[stalls[0]:stalls[-1] + 1] == [0] * 7
+    visited.clear()
+    stalls.clear()
+    nacked = run(ADDR_DATA, [ADDRESS << 1], Slave(other(ADDRESS)), before=late_host)
+    assert nacked.slave.events == ["START", (ADDRESS << 1, False), "STOP"] and nacked.cpu.halted
+    assert data_pull not in visited and stalls == [] and nacked.cpu.tx_fifo == []
