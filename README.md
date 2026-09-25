@@ -1,6 +1,6 @@
 # core
 
-A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay, four output pins `gpio[3:0]`, four input pins `gpio_in[3:0]`, an 8-bit output shift register fed by a TX FIFO, an 8-bit input shift register drained into an RX FIFO, and one configuration bit, `shift_dir`. Eight mnemonics in five opcodes, three free. The encoding is in `isa.yaml`.
+A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay, four output pins `gpio[3:0]`, four input pins `gpio_in[3:0]`, an 8-bit output shift register fed by a TX FIFO, an 8-bit input shift register drained into an RX FIFO, a wait on an input level, and one configuration bit, `shift_dir`. Nine mnemonics in six opcodes, two free. The encoding is in `isa.yaml`.
 
 | instruction | does |
 |---|---|
@@ -10,10 +10,11 @@ A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay
 | `SHIFT_IN pin [d]` | sample gpio_in[pin] into the input shift register, then shift |
 | `PULL [d]` | output shift register <- next TX FIFO byte; stalls while the FIFO is empty |
 | `PUSH [d]` | RX FIFO <- input shift register; stalls while the FIFO is full |
+| `WAIT pin, level [d]` | stalls while gpio_in[pin] != level, a level not an edge |
 | `JMP label [d]` | continue at label |
 | `CONFIG shift_dir, 0 or 1 [d]` | LSB first (reset) or MSB first, for both shift registers |
 
-`[d]` holds for d extra cycles. Every instruction but `JMP` can take a GPIO side effect, `pin, value` after its own operands, that drives one more pin on the same edge as the operation: `SHIFT_OUT 1, 0` puts the next bit on MOSI and drops the clock, `SHIFT_IN 3, 1, 1` raises the clock and samples MISO, `PULL 2, 0` drops CS the moment a byte arrives, `PUSH 2, 1` raises it as the received byte leaves. `SET` is the side effect on its own. The FIFOs are fed and drained from outside the core, by the test bench or the CLI.
+`[d]` holds for d extra cycles. Every instruction but `JMP` can take a GPIO side effect, `pin, value` after its own operands, that drives one more pin on the same edge as the operation: `SHIFT_OUT 1, 0` puts the next bit on MOSI and drops the clock, `SHIFT_IN 3, 1, 1` raises the clock and samples MISO, `PULL 2, 0` drops CS the moment a byte arrives, `PUSH 2, 1` raises it as the received byte leaves, and a WAIT's side effect lands on the cycle the level arrives. `SET` is the side effect on its own. The FIFOs are fed and drained from outside the core, by the test bench or the CLI.
 
 ```
 isa.yaml      instruction set: encoding, opcodes, operand ranges
@@ -36,6 +37,7 @@ python sim/cpu.py programs/uart_tx_loop.asm 0x55 0xA3   # streams the FIFO, then
 python sim/cpu.py programs/spi_tx_lsb.asm 0xA3      # SPI mode 0: MOSI, SCLK, CS on gpio 0, 1, 2
 python sim/cpu.py programs/spi_tx_msb.asm 0xA3      # same words except CONFIG shift_dir, 1
 python sim/cpu.py programs/spi_duplex_msb.asm 0xA3  # also samples MISO on gpio_in 3 and PUSHes the byte (the CLI holds inputs at 0)
+python -m pytest tests/test_uart_rx.py -v           # UART RX: uart_rx.asm fed by uart_tx_loop.asm over a wire, waves in build/waves/uart_rx/
 python tools/render_docs.py                         # docs/*.mmd -> .svg (needs mermaid-cli)
 ```
 
@@ -51,6 +53,7 @@ What the protocols have asked of the core, in order. Open items stay open until 
 | sample a pin on the edge that raises the clock | SPI duplex | `gpio_in[3:0]`, `SHIFT_IN pin, out_pin, value`; RX costs no instructions or cycles |
 | get the received byte out | SPI duplex | `PUSH` into an RX FIFO; `PUSH 2, 1` also ends the frame |
 | six of eight opcodes used | the ISA | one `SHIFT` opcode with an in bit, one `FIFO` opcode with a push bit, generic `CONFIG`, the side effect on every opcode, `SET` = `NOP` + side effect |
+| wait for an input level: the start bit | UART RX | `WAIT pin, level`: the stall PULL and PUSH already had, with a pin level as its third condition; `uart_rx.asm` is 11 words, `WAIT 0, 0 [11]` then eight mid-bit `SHIFT_IN`s |
 | compact repetition / bit count | SPI, 16 words per byte | open |
 | per-pin idle level | SPI, one `SET` for SCLK | open, not hurting yet |
 | configurable shift-output pin | SPI | open, fixed `gpio[0]` has not failed |

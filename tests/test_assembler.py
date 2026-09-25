@@ -42,6 +42,11 @@ def isa():
     (Instruction("SHIFT_IN", (3,), 3, side=(1, 1)), 0x23BE),  # 001 00011 10111110  flag, side pin 1, value 1, pin 3, in
     (Instruction("SHIFT_IN", (2,), 0, side=(0, 0)), 0x208A),  # 001 00000 10001010  side effect on gpio[0] allowed
     (Instruction("SHIFT_IN", (1,), 31, side=(3, 1)), 0x3FF6),  # 001 11111 11110110
+    (Instruction("WAIT", (0, 0), 0), 0xA000),  # 101 00000 00000000  pin in operand[3:2], level in operand[0]
+    (Instruction("WAIT", (3, 1), 0), 0xA00D),  # 101 00000 00001101
+    (Instruction("WAIT", (0, 0), 11), 0xAB00),  # 101 01011 00000000  the UART start bit wait
+    (Instruction("WAIT", (1, 1), 3, side=(2, 0)), 0xA3C5),  # 101 00011 11000101  release, and drop gpio[2] on that edge
+    (Instruction("WAIT", (2, 0), 31, side=(0, 1)), 0xBF98),  # 101 11111 10011000
 ])
 def test_encoding(isa, instr, word):
     assert encode(instr, isa) == word
@@ -49,7 +54,9 @@ def test_encoding(isa, instr, word):
 
 
 @pytest.mark.parametrize("line", ["SET 0, 2", "SET 0, 1 [32]", "HALT", "SET", "SET 1", "SET 4, 1", "SET 0, 1, 1",
-                                  "SET 0, 1 [7", "WAIT 1", "LOAD 0x55",
+                                  "SET 0, 1 [7", "LOAD 0x55",
+                                  "WAIT", "WAIT 1", "WAIT 4, 0", "WAIT 0, 2", "WAIT 0, 0, 1", "WAIT 0, 0, 4, 1",
+                                  "WAIT 0, 0, 1, 2", "WAIT 0, 0, 1, 0, 1", "WAIT_PIN 0, 0",
                                   "SHIFT_OUT 1", "SHIFT_OUT 0, 1", "SHIFT_OUT 4, 0", "SHIFT_OUT 1, 2",
                                   "SHIFT_OUT 1, 0, 1", "SET 1, 0, 1", "PULL 1", "PULL 4, 0", "PULL 1, 2", "PULL 1, 0, 1",
                                   "NOP 1", "NOP 1, 0", "JMP 0, 1, 0", "JMP 0, 1", "CONFIG shift_dir, 1, 4, 0",
@@ -102,19 +109,19 @@ def test_pull_and_push_are_one_opcode_with_a_push_bit(isa):
     assert assemble("PULL 2, 0 [3]")[0] ^ assemble("PUSH 2, 0 [3]")[0] == 0b1
 
 
-def test_three_opcodes_are_free(isa):
-    assert sorted({spec["opcode"] for spec in isa["instructions"].values()}) == [0b000, 0b001, 0b010, 0b011, 0b100]
+def test_two_opcodes_are_free(isa):
+    assert sorted({spec["opcode"] for spec in isa["instructions"].values()}) == [0b000, 0b001, 0b010, 0b011, 0b100, 0b101]
 
 
 def test_shift_out_and_shift_in_are_one_opcode_with_an_in_bit(isa):
     """One SHIFT opcode: operand[1] = 0 shifts out, 1 shifts in. The
-    mnemonics stay, the decoder has one term fewer and opcode 101 is free."""
+    mnemonics stay, the decoder has one term fewer and opcode 101 went to WAIT."""
     out, in_ = isa["instructions"]["SHIFT_OUT"], isa["instructions"]["SHIFT_IN"]
     assert out["opcode"] == in_["opcode"] == 0b001
     assert out["select"] == {"name": "in", "lsb": 1, "bits": 1, "value": 0}
     assert in_["select"] == {"name": "in", "lsb": 1, "bits": 1, "value": 1}
     assert assemble("SHIFT_OUT 1, 0 [3]")[0] ^ assemble("SHIFT_IN 0, 1, 0 [3]")[0] == 0b10
-    assert not any(spec["opcode"] == 0b101 for spec in isa["instructions"].values())
+    assert [op for op, spec in isa["instructions"].items() if spec["opcode"] == 0b101] == ["WAIT"]
 
 
 def test_the_side_effect_is_one_field_shared_by_every_instruction_but_jmp(isa):
@@ -129,11 +136,25 @@ def test_the_side_effect_is_one_field_shared_by_every_instruction_but_jmp(isa):
     assert isa["instructions"]["SET"]["select"] == {"name": "side", "lsb": 7, "bits": 1, "value": 1}
     allows = {op: bool(spec.get("side_effect")) for op, spec in isa["instructions"].items()}
     assert allows == {"NOP": False, "SET": False, "SHIFT_OUT": True, "SHIFT_IN": True,
-                      "PULL": True, "PUSH": True, "JMP": False, "CONFIG": True}
+                      "PULL": True, "PUSH": True, "WAIT": True, "JMP": False, "CONFIG": True}
     assert assemble("PULL 2, 0 [3]") == [0x43C0]
     assert assemble("CONFIG shift_dir, 1, 1, 0") == [0x80A1]
-    for line in ("SET 3, 1", "SHIFT_OUT 3, 1", "SHIFT_IN 0, 3, 1", "PULL 3, 1", "CONFIG shift_dir, 0, 3, 1"):
+    for line in ("SET 3, 1", "SHIFT_OUT 3, 1", "SHIFT_IN 0, 3, 1", "PULL 3, 1", "WAIT 0, 0, 3, 1",
+                 "CONFIG shift_dir, 0, 3, 1"):
         assert assemble(line)[0] & 0xF0 == 0xF0, line
+
+
+def test_wait_takes_an_input_pin_and_a_level_then_an_optional_side_effect(isa):
+    """WAIT's pin sits where SHIFT_IN's does, operand[3:2], so one mux picks
+    the input pin for both; the level is operand[0] and operand[1] is unused."""
+    assert assemble("WAIT 0, 0") == [0xA000]
+    assert assemble("WAIT 3, 1, 2, 0 [3]") == assemble("wait 3,1,2,0 [3]") == [0xA3CD]
+    assert decode(0xA3CD, isa) == Instruction("WAIT", (3, 1), 3, side=(2, 0))
+    assert decode(0xA000, isa).side is None
+    pin = next(o for o in isa["instructions"]["WAIT"]["operands"] if o["name"] == "pin")
+    assert pin == next(o for o in isa["instructions"]["SHIFT_IN"]["operands"] if o["name"] == "pin")
+    with pytest.raises(ValueError, match="not used"):
+        decode(0xA002, isa)  # operand[1] is unused
 
 
 def test_config_takes_a_field_by_name_or_number_then_a_value():
@@ -208,3 +229,13 @@ def test_loop_uart_program_jumps_back_to_its_pull():
     assert len(words) == 1 + 10 + 1  # idle, PULL as the start bit + 8 data + stop, JMP
     assert decode(words[1], isa) == Instruction("PULL", (), 7, side=(0, 0))
     assert decode(words[-1], isa) == Instruction("JMP", (1,), 0)
+
+
+def test_rx_uart_program_waits_for_the_start_bit_then_samples_each_bit_once():
+    words = load_program(PROGRAMS / "uart_rx.asm")
+    isa = load_isa()
+    assert len(words) == 1 + 8 + 1 + 1  # WAIT through the start bit, 8 samples, PUSH, JMP
+    assert decode(words[0], isa) == Instruction("WAIT", (0, 0), 11)
+    assert all(decode(w, isa) == Instruction("SHIFT_IN", (0,), 7) for w in words[1:9])
+    assert decode(words[9], isa) == Instruction("PUSH", (), 2)
+    assert decode(words[-1], isa) == Instruction("JMP", (0,), 0)

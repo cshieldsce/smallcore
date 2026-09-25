@@ -319,7 +319,9 @@ def test_decode_rejects_bad_words(isa):
     with pytest.raises(ValueError):
         decode(0x4002, isa)  # FIFO with operand bit 1 set: only bit 0, the push bit, lives in the low nibble
     with pytest.raises(ValueError):
-        decode(0xA000, isa)  # opcode 0b101 unassigned since SHIFT_IN joined SHIFT_OUT
+        decode(0xA002, isa)  # WAIT with operand bit 1 set: unused
+    with pytest.raises(ValueError):
+        decode(0xA010, isa)  # WAIT with the side value set but no side flag
     with pytest.raises(ValueError):
         decode(0xC000, isa)  # opcode 0b110 unassigned
     with pytest.raises(ValueError):
@@ -466,3 +468,114 @@ def test_shift_in_and_shift_out_share_shift_dir_but_not_a_register():
     assert cpu.halted
     assert (cpu.shift_reg, cpu.in_shift_reg) == (0x00, 0x5C)
     assert cpu.pin_trace(0)[2::2] == [(0xA3 >> i) & 1 for i in range(7, -1, -1)]
+
+
+# WAIT pin, level: the stall PULL and PUSH have, on an input level.
+
+
+def test_wait_stalls_while_the_pin_differs_and_issues_on_the_first_cycle_it_matches():
+    cpu = CPU(assemble("SET 1, 0\nWAIT 0, 0 [1]\nSET 1, 1"), gpio_in=1)
+    cpu.step()
+    for _ in range(3):  # stalled: pc and pins hold, cycles still tick
+        cpu.step()
+        assert (cpu.pc, cpu.gpio, cpu.stalled) == (1, [1, 0, 1, 1], True)
+    assert decode(cpu.program[cpu.pc], cpu.isa).op == "WAIT"
+    with pytest.raises(RuntimeError, match="stalled on WAIT"):
+        cpu.run(max_cycles=20)
+    cpu.gpio_in[0] = 0  # the level arrives
+    cpu.step()  # the WAIT issues on this cycle, then its delay
+    assert (cpu.pc, cpu.stalled) == (1, False)
+    cpu.step()
+    assert (cpu.pc, cpu.gpio) == (2, [1, 0, 1, 1])
+    cpu.run()
+    assert cpu.gpio == [1, 1, 1, 1] and cpu.halted
+
+
+def test_wait_with_the_level_already_there_does_not_stall():
+    cpu = CPU(assemble("WAIT 2, 1 [2]\nWAIT 3, 0"), gpio_in=1)
+    cpu.gpio_in[3] = 0
+    assert cpu.run() == [(1, 1, 1, 1)] * 4
+    assert not cpu.stalled and cpu.halted
+
+
+def test_wait_side_effect_lands_on_the_cycle_the_level_arrives():
+    """`WAIT 0, 0, 2, 0`: like PULL's, the pin write waits with the stall and
+    lands on the edge the WAIT issues, so an output can answer an input on
+    the cycle it is seen."""
+    cpu = CPU(assemble("WAIT 0, 0, 2, 0 [1]\nSET 3, 0"), gpio_in=1)
+    cpu.run_cycles(3)
+    assert cpu.stalled and cpu.gpio == [1, 1, 1, 1]
+    cpu.gpio_in[0] = 0
+    cpu.step()
+    assert not cpu.stalled and cpu.gpio == [1, 1, 0, 1]
+    cpu.step()
+    assert (cpu.pc, cpu.gpio) == (1, [1, 1, 0, 1])  # delay cycle: hold, then PC + 1
+    cpu.run()
+    assert cpu.gpio == [1, 1, 0, 0]
+
+
+def test_wait_is_a_level_not_an_edge():
+    """A level that came and went before the WAIT was up is not remembered,
+    and a pin already at the level releases the WAIT at once."""
+    cpu = CPU(assemble("NOP [3]\nWAIT 0, 0"), gpio_in=1)
+    cpu.step()
+    cpu.gpio_in[0] = 0  # low during the NOP
+    cpu.step()
+    cpu.gpio_in[0] = 1  # and high again before the WAIT
+    cpu.run_cycles(5)
+    assert cpu.stalled and cpu.pc == 1, "the earlier low is not an event the WAIT can consume"
+    cpu.gpio_in[0] = 0
+    cpu.step()
+    assert cpu.halted
+
+
+def test_wait_reads_the_level_present_as_the_cycle_executes():
+    """SHIFT_IN's timing contract, shared: the WAIT sees what the outside
+    world drove before the clock edge. A change after that edge is seen on
+    the next one."""
+    cpu = CPU(assemble("WAIT 1, 0\nSET 0, 0"), gpio_in=1)
+    cpu.step()
+    cpu.gpio_in[1] = 0
+    assert cpu.stalled, "the pin went low after the edge"
+    cpu.step()
+    assert not cpu.stalled and cpu.pc == 1
+    cpu.gpio_in[1] = 1
+    cpu.step()
+    assert cpu.gpio == [0, 1, 1, 1] and cpu.halted
+
+
+def test_wait_touches_nothing_but_the_pc_and_its_own_side_effect():
+    cpu = CPU(assemble("CONFIG shift_dir, 1\nPULL\nSHIFT_IN 3\nWAIT 0, 1 [1]\nWAIT 2, 0, 1, 0"), tx_data=[0xA5], gpio_in=1)
+    cpu.gpio_in[2] = 0
+    cpu.run()
+    assert (cpu.gpio, cpu.shift_reg, cpu.in_shift_reg, cpu.shift_dir) == ([1, 0, 1, 1], 0xA5, 0x01, 1)
+    assert (cpu.tx_fifo, cpu.rx_fifo, cpu.cycle) == ([], [], 6)
+
+
+def test_wait_watches_the_named_pin_only():
+    cpu = CPU(assemble("WAIT 3, 0"), gpio_in=0)
+    cpu.gpio_in[3] = 1
+    cpu.run_cycles(4)
+    assert cpu.stalled
+    cpu.gpio_in[0] = cpu.gpio_in[1] = cpu.gpio_in[2] = 1
+    cpu.run_cycles(4)
+    assert cpu.stalled, "the other pins are not watched"
+    cpu.gpio_in[3] = 0
+    cpu.step()
+    assert cpu.halted
+
+
+def test_two_waits_make_an_edge():
+    """`WAIT p, 1` then `WAIT p, 0` releases on the falling edge only, whatever
+    the pin did before."""
+    cpu = CPU(assemble("WAIT 0, 1\nWAIT 0, 0\nSET 1, 0"), gpio_in=0)
+    cpu.run_cycles(3)
+    assert cpu.stalled and cpu.pc == 0, "low from the start: not a falling edge"
+    cpu.gpio_in[0] = 1
+    cpu.step()
+    cpu.run_cycles(3)
+    assert cpu.stalled and cpu.pc == 1
+    cpu.gpio_in[0] = 0
+    cpu.step()
+    cpu.step()
+    assert cpu.gpio == [1, 0, 1, 1] and cpu.halted

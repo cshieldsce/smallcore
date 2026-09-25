@@ -1,5 +1,5 @@
 """Simulator and assembler for the ISA in isa.yaml: a PIO-style CPU stepped one clock cycle at a time, driving
-gpio[3:0] and sampling gpio_in[3:0]. isa.yaml is the reference for what each instruction does."""
+gpio[3:0] and sampling or waiting on gpio_in[3:0]. isa.yaml is the reference for what each instruction does."""
 
 import re
 import sys
@@ -46,7 +46,7 @@ def load_isa(path=ISA_PATH):
         if key in seen or any(o == spec["opcode"] and (v is None) != (select is None) for o, v in seen):
             raise ValueError(f"isa.yaml: {name} and {seen.get(key)} share opcode {spec['opcode']:#b}")
         seen[key] = name
-    for op, pins in ("SET", "gpio_out"), ("SHIFT_IN", "gpio_in"):
+    for op, pins in ("SET", "gpio_out"), ("SHIFT_IN", "gpio_in"), ("WAIT", "gpio_in"):
         pin = next(o for o in isa["instructions"][op]["operands"] if o["name"] == "pin")
         if 1 << pin["bits"] != isa[pins]:
             raise ValueError(f"isa.yaml: {op} pin doesn't address exactly {pins} pins")
@@ -241,7 +241,7 @@ class CPU:
         self.tx_fifo = list(tx_data)  # bytes waiting for PULL, oldest first (the outside world appends)
         self.rx_fifo = []  # bytes PUSHed, oldest first (the outside world pops from the front)
         self.rx_depth = rx_depth  # RX FIFO capacity: PUSH stalls while len(rx_fifo) == rx_depth
-        self.stalled = False  # True while a PULL waits on an empty TX FIFO or a PUSH on a full RX FIFO
+        self.stalled = False  # True while a PULL waits on an empty TX FIFO, a PUSH on a full RX FIFO or a WAIT on a pin level
         self.cycle = 0
         self.counter = 0  # cycles left in the current instruction
         self.halted = not self.program
@@ -258,8 +258,11 @@ class CPU:
 
         instr = decode(self.program[self.pc], self.isa)  # imem[pc], visible every cycle
         if self.counter == 0:
-            if (instr.op == "PULL" and not self.tx_fifo) or (instr.op == "PUSH" and len(self.rx_fifo) >= self.rx_depth):
-                # Block: stay on this PULL / PUSH, pins unchanged, until there is a byte / room.
+            if ((instr.op == "PULL" and not self.tx_fifo) or (instr.op == "PUSH" and len(self.rx_fifo) >= self.rx_depth)
+                    or (instr.op == "WAIT" and self.gpio_in[instr.args[0]] != instr.args[1])):
+                # Block: stay on this PULL / PUSH / WAIT, pins unchanged, until there is a
+                # byte / room / the level. The pin is read as SHIFT_IN samples it: what the
+                # outside world drove before this edge. One stall port, three conditions.
                 self.stalled = True
                 self.trace.append(tuple(self.gpio))
                 self.cycle += 1

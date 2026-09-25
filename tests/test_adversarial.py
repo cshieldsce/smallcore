@@ -87,7 +87,7 @@ def test_every_word_decodes_or_is_rejected_deliberately():
 
 
 def test_valid_word_count_per_instruction():
-    """The claim, in numbers: 11,008 of 65,536 words mean something."""
+    """The claim, in numbers: 13,312 of 65,536 words mean something."""
     counts = {op: sum(1 for i in VALID.values() if i.op == op) for op in OPS}
     assert counts == {
         "NOP": 32,          # delay only
@@ -98,8 +98,9 @@ def test_valid_word_count_per_instruction():
         "PUSH": 9 * 32,
         "JMP": 256 * 32,
         "CONFIG": 2 * 9 * 32,       # shift_dir 0 or 1 x side
+        "WAIT": 4 * 2 * 9 * 32,     # pin x level x side
     }
-    assert len(VALID) == 11008
+    assert len(VALID) == 13312
 
 
 def test_words_wider_than_16_bits_are_rejected():
@@ -154,9 +155,10 @@ def checked_step(cpu):
 
     stalling = before["counter"] == 0 and (
         (instr.op == "PULL" and not before["tx_fifo"]) or (instr.op == "PUSH" and len(before["rx_fifo"]) >= cpu.rx_depth)
+        or (instr.op == "WAIT" and gpio_in[instr.args[0]] != instr.args[1])
     )
     if stalling:
-        # Stall: nothing architectural moves, the pins hold, the pc stays on the PULL / PUSH.
+        # Stall: nothing architectural moves, the pins hold, the pc stays on the PULL / PUSH / WAIT.
         assert cpu.stalled
         assert changed == set(), f"stalled {instr.op} changed {changed}"
         return "stall"
@@ -266,7 +268,7 @@ def test_random_walk_reaches_every_kind_of_cycle():
             kinds.add((decode(program[cpu.pc], ISA).op, checked_step(cpu)))
     assert ops == set(OPS)
     assert {k for _, k in kinds} == {"stall", "issue", "hold"}
-    assert {op for op, k in kinds if k == "stall"} == {"PULL", "PUSH"}
+    assert {op for op, k in kinds if k == "stall"} == {"PULL", "PUSH", "WAIT"}
     assert {op for op, k in kinds if k == "hold"} == set(OPS)
     assert 50 < halted < 300
 
@@ -293,6 +295,9 @@ def fresh(word, rng, program=None):
     cpu.gpio_in = [rng.randrange(2) for _ in cpu.gpio_in]
     cpu.tx_fifo = [rng.randrange(256) for _ in range(rng.randrange(1, 4))]
     cpu.rx_fifo = [rng.randrange(256) for _ in range(rng.randrange(0, 4))]
+    if word is not None and VALID[word].op == "WAIT":
+        pin, level = VALID[word].args
+        cpu.gpio_in[pin] = level  # the level is already there: no stall
     return cpu
 
 
@@ -386,28 +391,35 @@ def test_shift_in_lsb_first_mirrors_msb_first_into_the_reversed_byte(byte):
     assert results == [byte, int(f"{byte:08b}"[::-1], 2)]
 
 
-@pytest.mark.parametrize("op", ("PULL", "PUSH"))
+@pytest.mark.parametrize("op", ("PULL", "PUSH", "WAIT"))
 @pytest.mark.parametrize("stall", (1, 3, 17))
 def test_a_stall_only_prepends_hold_cycles(op, stall):
     """A PULL whose byte arrives after k stall cycles ends in the same state,
     with the same trace after k copies of the held pins, as one whose byte was
-    there from the start. Same for PUSH and the room it waits for."""
-    program = assemble(f"SET 1, 0\n{op} 2, 0 [2]\nSHIFT_OUT 3, 1\nSHIFT_IN 0")
+    there from the start. Same for PUSH and the room it waits for, and for
+    WAIT and the level it waits for."""
+    line = {"PULL": "PULL 2, 0 [2]", "PUSH": "PUSH 2, 0 [2]", "WAIT": "WAIT 3, 1, 2, 0 [2]"}[op]
+    program = assemble(f"SET 1, 0\n{line}\nSHIFT_OUT 3, 1\nSHIFT_IN 0")
     prompt, late = CPU(program, rx_depth=1), CPU(program, rx_depth=1)
     for cpu in (prompt, late):
         cpu.in_shift_reg = 0x5C
         cpu.tx_fifo = [0xA3]
+        cpu.gpio_in[3] = 1
     if op == "PULL":
         late.tx_fifo = []  # the byte arrives after the stall
-    else:
+    elif op == "PUSH":
         late.rx_fifo = [0x11]  # the room appears after the stall
+    else:
+        late.gpio_in[3] = 0  # the level arrives after the stall
     prompt.run_cycles(1)
     late.run_cycles(1 + stall)
     assert late.stalled and late.pc == 1 and late.gpio == [1, 0, 1, 1]
     if op == "PULL":
         late.tx_fifo.append(0xA3)
-    else:
+    elif op == "PUSH":
         late.rx_fifo.pop(0)
+    else:
+        late.gpio_in[3] = 1
     prompt.run_cycles(3)
     late.run_cycles(3)
     assert not late.stalled and state(prompt) == state(late)
@@ -497,5 +509,42 @@ def test_shift_out_and_shift_in_never_see_each_others_register():
                 assert cpu.shift_reg == before["shift_reg"] >> 1
             if op == "SHIFT_OUT" and cpu.shift_dir == 1:
                 assert cpu.shift_reg == (before["shift_reg"] << 1) & 0xFF
-            if op in ("SET", "NOP", "CONFIG", "JMP"):
+            if op in ("SET", "NOP", "CONFIG", "JMP", "WAIT"):
                 assert (cpu.shift_reg, cpu.in_shift_reg) == (before["shift_reg"], before["in_shift_reg"])
+
+
+# --- What an input pin can reach ---------------------------------------------
+
+
+def control_trace(program, fifo_seed, pin_seed, cycles=400):
+    """(pc, counter, stalled, gpio) per cycle under FIFO traffic from one seed
+    and input levels from another: everything but the input side."""
+    fifo_rng, pin_rng = random.Random(fifo_seed), random.Random(pin_seed)
+    cpu = CPU(program, gpio=1)
+    trace = []
+    while not cpu.halted and cpu.cycle < cycles:
+        if len(cpu.tx_fifo) < 6 and fifo_rng.random() < 0.3:
+            cpu.tx_fifo.append(fifo_rng.randrange(256))
+        if cpu.rx_fifo and fifo_rng.random() < 0.3:
+            cpu.rx_fifo.pop(0)
+        cpu.gpio_in = [pin_rng.randrange(2) for _ in cpu.gpio_in]
+        cpu.step()
+        trace.append((cpu.pc, cpu.counter, cpu.stalled, tuple(cpu.gpio)))
+    return trace
+
+
+@pytest.mark.parametrize("seed", range(100))
+def test_only_wait_lets_an_input_reach_the_pc_the_counter_or_a_pin(seed):
+    """Without a WAIT, the same FIFO traffic under any two input histories
+    gives the same pc, counter, stalls and output pins, cycle for cycle: an
+    input reaches in_shift_reg and the RX FIFO, nothing else. A WAIT is the
+    one instruction that lets an input hold the machine."""
+    rng = random.Random(seed)
+    program = [w for w in random_program(rng) if VALID[w].op != "WAIT"] or [0x0000]
+    assert control_trace(program, seed, seed + 1) == control_trace(program, seed, seed + 2)
+    pin, level = rng.randrange(4), rng.randrange(2)
+    held, free = (CPU([encode(Instruction("WAIT", (pin, level), 0), ISA)] + program) for _ in range(2))
+    held.gpio_in[pin], free.gpio_in[pin] = 1 - level, level
+    held.step()
+    free.step()
+    assert held.stalled and not free.stalled
