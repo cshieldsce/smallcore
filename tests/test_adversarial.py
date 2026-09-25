@@ -60,7 +60,10 @@ def every_instruction():
                     yield Instruction(op, args, delay, side)
 
 
-VALID = {encode(i, ISA): i for i in every_instruction()}
+INSTRUCTIONS = list(every_instruction())
+WORDS = [encode(i, ISA) for i in INSTRUCTIONS]
+assert len(WORDS) == len(set(WORDS)), "two instructions encode to one word: the shared opcodes' select bits collide"
+VALID = dict(zip(WORDS, INSTRUCTIONS))
 
 
 # --- Exhaustive: every 16-bit word -------------------------------------------
@@ -418,17 +421,22 @@ def test_a_stall_only_prepends_hold_cycles(op, stall):
 
 @pytest.mark.parametrize("delay", (0, 1, 5, DELAY_MAX))
 def test_jmp_to_the_next_word_is_a_nop(delay):
+    """`JMP 1 [d]` at address 0 is `NOP [d]`: same pins, same state, same
+    cycle count, from any machine state. The instruction under test sits at
+    the known execution point; only the state around it is random."""
+    tail = [encode(Instruction("SET", (3, 0)), ISA), 0x0000]
     rng = random.Random(delay)
     for _ in range(20):
         seed = rng.random()
-        n = 4
-        head = [encode(random_instruction(random.Random(seed + i), n), ISA) for i in range(2)]
-        tail = [0x0000, encode(Instruction("SET", (3, 0)), ISA)]
-        nop = fresh(None, random.Random(seed), head + [encode(Instruction("NOP", (), delay), ISA)] + tail)
-        jmp = fresh(None, random.Random(seed), head + [encode(Instruction("JMP", (3,), delay), ISA)] + tail)
-        nop.run_cycles(60)
-        jmp.run_cycles(60)
-        assert nop.trace == jmp.trace and state(nop) == state(jmp)
+        nop = fresh(None, random.Random(seed), [encode(Instruction("NOP", (), delay), ISA)] + tail)
+        jmp = fresh(None, random.Random(seed), [encode(Instruction("JMP", (1,), delay), ISA)] + tail)
+        assert state(nop) == state(jmp)
+        nop.step()
+        jmp.step()
+        assert state(nop) == state(jmp) and (jmp.pc, jmp.halted) == ((1, False) if delay == 0 else (0, False))
+        nop.run()
+        jmp.run()
+        assert nop.trace == jmp.trace and state(nop) == state(jmp) and nop.cycle == jmp.cycle == delay + 3
 
 
 def test_delays_add_up():
