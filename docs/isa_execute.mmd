@@ -9,9 +9,10 @@ flowchart-elk LR
   OP -->|"000, side"| SET["<b>SET p, l [d]</b><br/>gpio[p] ← l<br/>other pins unchanged<br/>takes 1 + d cycles"]
   OP -->|"001, out"| SHIFT["<b>SHIFT_OUT [p, l] [d]</b><br/>gpio[0] ← next bit, then shift:<br/>shift_dir 0: shift_reg[0], >> 1<br/>shift_dir 1: shift_reg[7], << 1<br/>takes 1 + d cycles"]
   OP -->|"001, in"| SHIN["<b>SHIFT_IN i [p, l] [d]</b><br/>bit = gpio_in[i] at cycle start<br/>shift_dir 0: >> 1, then [7] ← bit<br/>shift_dir 1: << 1, then [0] ← bit<br/>(of in_shift_reg)<br/>takes 1 + d cycles"]
-  OP -->|100| CFG["<b>CONFIG f, v [p, l] [d]</b><br/>config[f] ← v<br/>(f = 0: shift_dir)<br/>takes 1 + d cycles"]
+  OP -->|100| CFG["<b>CONFIG f, v [p, l] [d]</b><br/>config[f] ← v<br/>f = 0: shift_dir<br/>f = 1: open_drain[1:0]<br/>f = 2: open_drain[3:2]<br/>takes 1 + d cycles"]
   OP -->|101| WAIT["<b>WAIT i, v [p, l] [d]</b><br/>stall while gpio_in[i] != v<br/>(read at cycle start, like SHIFT_IN)<br/>takes 1 + d cycles<br/>after any stall"]
   WAIT -->|"gpio_in[i] != v: stall,<br/>everything holds"| WAIT
+  OP -->|110| SKIP["<b>SKIP b, v [p, l] [d]</b><br/>reads in_shift_reg[b]<br/>pins, registers unchanged<br/>takes 1 + d cycles"]
   OP -->|011| JMP["<b>JMP target [d]</b><br/>pins, registers unchanged<br/>no side effect<br/>takes 1 + d cycles"]
   PULL --> NEXT["PC ← PC + 1"]
   PUSH --> NEXT
@@ -22,9 +23,11 @@ flowchart-elk LR
   CFG --> NEXT
   WAIT --> NEXT
   JMP --> JNEXT["PC ← target"]
+  SKIP --> SNEXT["in_shift_reg[b] == v ?<br/>PC ← PC + 2 : PC + 1"]
   HALT ~~~ SIDE["<b>side effect</b> [p, l]<br/>on every instruction but JMP:<br/>gpio[p] ← l on the first cycle,<br/>the same edge as the operation<br/>(after any stall)"]
   NEXT --> END{"PC past last<br/>instruction?"}
   JNEXT --> END
+  SNEXT --> END
   END -->|no| W
   END -->|yes| HALT(["halt<br/>pins keep their levels"])
   style SIDE fill:#fff4d6,stroke:#c49a2a

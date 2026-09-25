@@ -10,9 +10,10 @@ block-beta
   pull["010 = PULL"]:3 pulld["d"]:5 pullop["sppl 0000"]:8
   push["010 = PUSH"]:3 pushd["d"]:5 pushop["sppl 0001<br/>bit 0 = push"]:8
   jmp["011 = JMP"]:3 jmpd["d"]:5 jmpop["target<br/>program address 0–255, no side effect"]:8
-  cfg["100 = CONFIG"]:3 cfgd["d"]:5 cfgop["sppl ffvv<br/>f = field (0 = shift_dir), v = value"]:8
+  cfg["100 = CONFIG"]:3 cfgd["d"]:5 cfgop["sppl ffvv<br/>f = field: 0 = shift_dir, 1 = open_drain 1:0, 2 = open_drain 3:2; v = value"]:8
   wait["101 = WAIT"]:3 waitd["d"]:5 waitop["sppl ii0v<br/>i = input pin 0–3, v = level to wait for; bit 1 unused"]:8
-  free["110, 111"]:3 freed["free"]:13
+  skip["110 = SKIP"]:3 skipd["d"]:5 skipop["sppl bbbv<br/>b = bit of in_shift_reg 0–7, v = level: skip the next word if it matches"]:8
+  free["111"]:3 freed["free"]:13
 
   classDef hdr fill:#eee,stroke:#999,color:#555
   classDef field fill:#dbe8ff,stroke:#4a6fa5

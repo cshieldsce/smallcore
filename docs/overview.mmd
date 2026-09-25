@@ -7,15 +7,15 @@ flowchart LR
   HOST["Host / test bench"]:::ext
   HOST -->|"program (16-bit words)"| IMEM
   HOST -->|"bytes to send"| FIFO
-  LINEIN(["input lines<br/>UART: RX on gpio_in 0<br/>SPI: MISO on gpio_in 3"]):::ext --> GIN
+  LINEIN(["input lines<br/>UART: RX on gpio_in 0<br/>SPI: MISO on gpio_in 3<br/>I2C: SDA, SCL on gpio_in 0,&nbsp;1"]):::ext --> GIN
 
   subgraph core["core"]
     direction LR
     IMEM["Program memory"]:::core
-    EXEC["Execute<br/>one instruction at a time,<br/>each holds for 1 + delay cycles<br/>(JMP loops the program)"]:::core
+    EXEC["Execute<br/>one instruction at a time,<br/>each holds for 1 + delay cycles<br/>(JMP loops the program, SKIP bit, level<br/>steps over the next word on a bit<br/>of the input shift register)"]:::core
     FIFO["TX FIFO<br/>(PULL waits here<br/>while it is empty)"]:::core
     SR["Output shift register (8-bit)<br/>shift_dir: LSB or MSB first,<br/>set once by CONFIG shift_dir"]:::core
-    PIN["gpio[3:0]<br/>four output pins"]:::core
+    PIN["gpio[3:0]<br/>four output pins, each push-pull<br/>or open-drain (CONFIG open_drain01 / 23:<br/>a 1 then lets go of the line)"]:::core
     GIN["gpio_in[3:0]<br/>four input pins<br/>(WAIT pin, level waits here<br/>until the pin is at the level)"]:::core
     ISR["Input shift register (8-bit)<br/>fills from the end opposite the wire,<br/>same shift_dir"]:::core
     RXF["RX FIFO<br/>(PUSH waits here<br/>while it is full)"]:::core
@@ -27,6 +27,6 @@ flowchart LR
     ISR -->|"PUSH: the byte"| RXF
   end
 
-  PIN --> LINE(["output lines<br/>UART: TX on gpio 0<br/>SPI: MOSI, SCLK, CS on gpio 0, 1, 2"]):::out
+  PIN --> LINE(["output lines<br/>UART: TX on gpio 0<br/>SPI: MOSI, SCLK, CS on gpio 0, 1, 2<br/>I2C: SDA, SCL on gpio 0,&nbsp;1"]):::out
   RXF -->|"bytes received"| HOSTRX["Host / test bench"]:::ext
   style core fill:#f6f8fb,stroke:#9aa7b8

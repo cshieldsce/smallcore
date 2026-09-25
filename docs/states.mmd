@@ -1,12 +1,13 @@
 %% What the control block does each cycle. Not a separate state register:
-%% each state is read off counter, pc, tx_empty, rx_full and gpio_in.
+%% each state is read off counter, pc, tx_empty, rx_full, gpio_in and, for SKIP, in_shift_reg.
 stateDiagram-v2
   direction LR
   [*] --> Issue
 
   Issue : Issue (counter == 0)
   Issue : run imem[pc], counter ← delay
-  Issue : last cycle: pc ← JMP ? target : pc + 1
+  Issue : last cycle: pc ← JMP ? target : pc + 1 + skip
+  Issue : (skip = SKIP and in_shift_reg[bit] == level)
 
   Hold : Hold (counter > 0)
   Hold : counter ← counter − 1
