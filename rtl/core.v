@@ -4,6 +4,14 @@ module core(
     output [7:0]  imem_addr,
     output reg [3:0]  gpio
 );
+    // op codes
+    localparam OP_NOP_SET = 3'b000;
+    localparam OP_SHIFT   = 3'b001;
+    localparam OP_FIFO    = 3'b010;
+    localparam OP_JMP     = 3'b011;
+    localparam OP_CONFIG  = 3'b100;
+    localparam OP_WAIT    = 3'b101;
+    localparam OP_SKIP    = 3'b110;
 
     reg  [8:0] pc;
     reg  [4:0] delay_counter;
@@ -15,6 +23,17 @@ module core(
     assign opcode    = imem_word[15:13];
     assign delay     = imem_word[12:8];
     assign operand   = imem_word[7:0];
+
+    // operand fields
+    wire       side;
+    wire [1:0] side_pin;
+    wire       side_val;
+    wire [3:0] own;
+
+    assign side     = operand[7];
+    assign side_pin = operand[6:5];
+    assign side_val = operand[4];
+    assign own      = operand[3:0];
 
     assign imem_addr = pc[7:0];
 
