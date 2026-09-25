@@ -5,7 +5,8 @@ would: CS frames the transfer, MOSI is sampled on each rising edge of SCLK,
 and a slave model drives MISO for the master to sample on that same edge. The
 programs of one pair are the same words apart from their CONFIG shift_dir value, so the
 slave must see the same byte in opposite order; the duplex programs are the
-transmit programs with SHIFT_IN raising the clock instead of SET."""
+transmit programs with SHIFT_IN raising the clock instead of SET and PUSH
+raising CS instead of SET, so the received byte is in the RX FIFO."""
 
 from pathlib import Path
 from typing import NamedTuple
@@ -198,15 +199,18 @@ def test_program_is_two_instructions_per_bit(program):
 @pytest.mark.parametrize("tx, duplex", tuple(zip(TX, DUPLEX)), ids=("lsb", "msb"))
 def test_duplex_program_is_the_tx_program_with_shift_in_raising_the_clock(tx, duplex):
     """Receiving costs no instructions: the eight `SET 1, 1 [3]` become
-    `SHIFT_IN 3, 1, 1 [3]`, sampling MISO on the edge that already existed."""
+    `SHIFT_IN 3, 1, 1 [3]`, sampling MISO on the edge that already existed,
+    and the closing `SET 2, 1` becomes `PUSH 2, 1`, handing the byte to the
+    RX FIFO on the edge that raises CS."""
     isa = load_isa()
     tx, duplex = load_program(tx), load_program(duplex)
     assert len(tx) == len(duplex)
     changed = [(decode(a, isa), decode(b, isa)) for a, b in zip(tx, duplex) if a != b]
-    assert len(changed) == 8
-    for was, now in changed:
+    assert len(changed) == 9
+    for was, now in changed[:8]:
         assert was == Instruction("SET", (SCLK, 1), 3)
         assert now == Instruction("SHIFT_IN", (MISO,), 3, side=(SCLK, 1))
+    assert changed[8] == (Instruction("SET", (CS, 1), 0), Instruction("PUSH", (), 0, side=(CS, 1)))
 
 
 def test_bit_period_is_8_cycles_split_4_low_4_high(program):
@@ -265,6 +269,7 @@ def test_master_reads_the_slaves_byte_while_sending_its_own(duplex, tx, rx, wave
         labels[edge] = f"d{7 - i if msb_first else i}"
     wave.add("sample", labels)
 
+    assert r.cpu.rx_fifo == [rx], "the slave's byte, pushed as CS rose"
     assert r.cpu.in_shift_reg == rx, "master's input shift register"
     assert [r.miso[e] for e in rising_edges(r.sclk)] == wire_bits(rx, msb_first), "what was on MISO at each edge"
     assert sampled(r.mosi, r.sclk) == wire_bits(tx, msb_first), "transmit still works"
@@ -280,7 +285,7 @@ def test_miso_is_sampled_exactly_on_the_rising_edge_cycle(duplex, rx):
     edges = rising_edges(run(duplex, [0]).sclk)  # transmit does not depend on MISO
     assert len(edges) == 8
     r = run(duplex, [0], edge_only_slave(rx, is_msb(duplex), edges))
-    assert r.cpu.in_shift_reg == rx
+    assert r.cpu.rx_fifo == [rx]
     for e in edges:
         assert r.miso[e - 1] != r.miso[e] != r.miso[e + 1], "the slave really was wrong around the edge"
 
@@ -293,6 +298,23 @@ def test_duplex_timing_is_the_tx_timing(duplex):
         assert run(duplex, [byte], mode0_slave(0x96, is_msb(duplex)))[:3] == run(twin, [byte])[:3]
 
 
-def test_only_shift_in_fills_the_input_register(program):
+def test_only_shift_in_fills_the_input_register_and_only_push_the_rx_fifo(program):
     r = run(program, [0xA3], mode0_slave(0x5C, is_msb(program)))
-    assert r.cpu.in_shift_reg == (0x5C if program in DUPLEX else 0)
+    duplex = program in DUPLEX
+    assert r.cpu.in_shift_reg == (0x5C if duplex else 0)
+    assert r.cpu.rx_fifo == ([0x5C] if duplex else [])
+
+
+def test_byte_is_pushed_on_the_edge_cs_rises(duplex):
+    """Nothing is in the RX FIFO while CS is low; the byte lands on the cycle
+    CS goes high, which is the frame's last instruction."""
+    cpu = CPU(load_program(duplex), tx_data=[0xA3])
+    slave = mode0_slave(0x5C, is_msb(duplex))
+    seen = []
+    while not cpu.halted:
+        cpu.gpio_in[MISO] = slave(cpu)
+        cpu.step()
+        seen.append((cpu.gpio[CS], list(cpu.rx_fifo)))
+    (rise,) = rising_edges(cpu.pin_trace(CS))
+    assert all(fifo == [] for _, fifo in seen[:rise])
+    assert seen[rise] == (1, [0x5C]) and seen[-1] == (1, [0x5C])

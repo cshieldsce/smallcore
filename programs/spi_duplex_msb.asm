@@ -11,8 +11,9 @@
 # into the input shift register. Still two instructions and 8 cycles per bit,
 # 4 low, 4 high. After the frame in_shift_reg holds the slave's byte in
 # normal order: with shift_dir 1 each sample lands in bit 0 and the register
-# shifts left, so the first bit sampled ends up in bit 7. There is no PUSH
-# yet; the test bench reads the register directly.
+# shifts left, so the first bit sampled ends up in bit 7. PUSH then moves
+# it into the RX FIFO on the edge that raises CS: the byte leaves the core
+# as the frame ends, and receiving still costs no extra instruction.
 
         CONFIG shift_dir, 1 # MSB first, for SHIFT_OUT and SHIFT_IN alike
         SET 1, 0            # SCLK idle low
@@ -37,4 +38,4 @@
         SHIFT_IN 3, 1, 1 [3]
 
         SET 1, 0 [3]        # clock back to idle low
-        SET 2, 1            # CS high: end of frame
+        PUSH 2, 1           # rx_fifo <- in_shift_reg, and CS high on the same edge: end of frame

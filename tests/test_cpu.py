@@ -47,6 +47,30 @@ def test_pull_side_effect_lands_on_the_cycle_the_byte_is_pulled():
     assert (cpu.pc, cpu.gpio, cpu.shift_reg) == (2, [1, 1, 0, 1], 0x00)  # SHIFT_OUT: gpio[0] = bit 0
 
 
+def test_push_appends_the_input_register_to_the_rx_fifo_and_keeps_it():
+    cpu = CPU(assemble("SHIFT_IN 0\nPUSH\nSHIFT_IN 0\nPUSH [1]\nPUSH"), gpio_in=1)
+    cpu.run()
+    assert cpu.rx_fifo == [0x80, 0xC0, 0xC0]
+    assert cpu.in_shift_reg == 0xC0, "PUSH copies, it does not clear"
+    assert cpu.gpio == [1, 1, 1, 1]
+
+
+def test_push_stalls_on_a_full_rx_fifo_until_the_outside_world_takes_a_byte():
+    """The mirror of PULL on an empty TX FIFO: PUSH holds the pc, the pins and
+    the registers until there is room, and its side effect waits with it."""
+    cpu = CPU(assemble("PUSH\nPUSH\nPUSH 3, 0 [1]\nSET 1, 0"), rx_depth=2)
+    cpu.run_cycles(6)
+    assert cpu.stalled and (cpu.pc, cpu.rx_fifo, cpu.gpio) == (2, [0, 0], [1, 1, 1, 1])
+    assert decode(cpu.program[cpu.pc], cpu.isa).op == "PUSH"
+    with pytest.raises(RuntimeError, match="stalled on PUSH"):
+        cpu.run(max_cycles=20)
+    cpu.rx_fifo.pop(0)  # the outside world reads a byte
+    cpu.step()
+    assert not cpu.stalled and (cpu.rx_fifo, cpu.gpio) == ([0, 0], [1, 1, 1, 0])  # pushed and gpio[3] low, one edge
+    cpu.run()
+    assert (cpu.rx_fifo, cpu.gpio) == ([0, 0], [1, 0, 1, 0])
+
+
 def test_config_side_effect_writes_the_pin_and_the_field_together():
     cpu = CPU(assemble("CONFIG shift_dir, 1, 3, 0"))
     cpu.step()
@@ -292,6 +316,8 @@ def test_decode_rejects_bad_words(isa):
         decode(0x2042, isa)  # SHIFT_IN with a side pin but no side flag
     with pytest.raises(ValueError):
         decode(0x4010, isa)  # PULL with the side value set but no side flag
+    with pytest.raises(ValueError):
+        decode(0x4002, isa)  # FIFO with operand bit 1 set: only bit 0, the push bit, lives in the low nibble
     with pytest.raises(ValueError):
         decode(0xA000, isa)  # opcode 0b101 unassigned since SHIFT_IN joined SHIFT_OUT
     with pytest.raises(ValueError):

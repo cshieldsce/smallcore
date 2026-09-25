@@ -27,6 +27,9 @@ def isa():
     (Instruction("PULL", (), 0), 0x4000),  # 010 00000 00000000
     (Instruction("PULL", (), 7), 0x4700),
     (Instruction("PULL", (), 3, side=(2, 0)), 0x43C0),  # 010 00011 11000000  pull, then drop gpio[2] on the same edge
+    (Instruction("PUSH", (), 0), 0x4001),  # 010 00000 00000001  FIFO with push = 1 in operand[0]
+    (Instruction("PUSH", (), 7), 0x4701),
+    (Instruction("PUSH", (), 3, side=(2, 1)), 0x43D1),  # 010 00011 11010001  push and raise gpio[2]
     (Instruction("JMP", (0,), 0), 0x6000),  # 011 00000 00000000
     (Instruction("JMP", (1,), 0), 0x6001),
     (Instruction("JMP", (255,), 31), 0x7FFF),  # 011 11111 11111111
@@ -50,6 +53,7 @@ def test_encoding(isa, instr, word):
                                   "SHIFT_OUT 1", "SHIFT_OUT 0, 1", "SHIFT_OUT 4, 0", "SHIFT_OUT 1, 2",
                                   "SHIFT_OUT 1, 0, 1", "SET 1, 0, 1", "PULL 1", "PULL 4, 0", "PULL 1, 2", "PULL 1, 0, 1",
                                   "NOP 1", "NOP 1, 0", "JMP 0, 1, 0", "JMP 0, 1", "CONFIG shift_dir, 1, 4, 0",
+                                  "PUSH 1", "PUSH 0x55", "PUSH 4, 1", "PUSH 1, 0, 1",
                                   "PULL 0x55", "JMP", "JMP 256", "JMP nowhere",
                                   "CONFIG", "CONFIG shift_dir", "CONFIG shift_dir, 2", "CONFIG 0, 1, 0", "CONFIG 1, 0",
                                   "CONFIG 4, 0", "CONFIG nothing, 0", "CONFIG_SHIFT 1", "CONFIG 0, shift_dir",
@@ -88,6 +92,20 @@ def test_shift_in_takes_the_input_pin_then_an_optional_side_effect():
     assert decode(0x200E, load_isa()).side is None
 
 
+def test_pull_and_push_are_one_opcode_with_a_push_bit(isa):
+    """One FIFO opcode: operand[0] = 0 moves TX FIFO -> shift_reg, 1 moves
+    in_shift_reg -> RX FIFO. Each direction stalls on its own FIFO."""
+    pull, push = isa["instructions"]["PULL"], isa["instructions"]["PUSH"]
+    assert pull["opcode"] == push["opcode"] == 0b010
+    assert pull["select"] == {"name": "push", "lsb": 0, "bits": 1, "value": 0}
+    assert push["select"] == {"name": "push", "lsb": 0, "bits": 1, "value": 1}
+    assert assemble("PULL 2, 0 [3]")[0] ^ assemble("PUSH 2, 0 [3]")[0] == 0b1
+
+
+def test_three_opcodes_are_free(isa):
+    assert sorted({spec["opcode"] for spec in isa["instructions"].values()}) == [0b000, 0b001, 0b010, 0b011, 0b100]
+
+
 def test_shift_out_and_shift_in_are_one_opcode_with_an_in_bit(isa):
     """One SHIFT opcode: operand[1] = 0 shifts out, 1 shifts in. The
     mnemonics stay, the decoder has one term fewer and opcode 101 is free."""
@@ -111,7 +129,7 @@ def test_the_side_effect_is_one_field_shared_by_every_instruction_but_jmp(isa):
     assert isa["instructions"]["SET"]["select"] == {"name": "side", "lsb": 7, "bits": 1, "value": 1}
     allows = {op: bool(spec.get("side_effect")) for op, spec in isa["instructions"].items()}
     assert allows == {"NOP": False, "SET": False, "SHIFT_OUT": True, "SHIFT_IN": True,
-                      "PULL": True, "JMP": False, "CONFIG": True}
+                      "PULL": True, "PUSH": True, "JMP": False, "CONFIG": True}
     assert assemble("PULL 2, 0 [3]") == [0x43C0]
     assert assemble("CONFIG shift_dir, 1, 1, 0") == [0x80A1]
     for line in ("SET 3, 1", "SHIFT_OUT 3, 1", "SHIFT_IN 0, 3, 1", "PULL 3, 1", "CONFIG shift_dir, 0, 3, 1"):

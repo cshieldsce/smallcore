@@ -11,8 +11,9 @@
 # into the input shift register. Still two instructions and 8 cycles per bit,
 # 4 low, 4 high. After the frame in_shift_reg holds the slave's byte in
 # normal order: with shift_dir 0 each sample lands in bit 7 and the register
-# shifts right, so the first bit sampled ends up in bit 0. There is no PUSH
-# yet; the test bench reads the register directly.
+# shifts right, so the first bit sampled ends up in bit 0. PUSH then moves
+# it into the RX FIFO on the edge that raises CS: the byte leaves the core
+# as the frame ends, and receiving still costs no extra instruction.
 # spi_duplex_msb.asm is this same program with CONFIG shift_dir, 1.
 
         CONFIG shift_dir, 0 # LSB first (also the reset value), for SHIFT_OUT and SHIFT_IN alike
@@ -38,4 +39,4 @@
         SHIFT_IN 3, 1, 1 [3]
 
         SET 1, 0 [3]        # clock back to idle low
-        SET 2, 1            # CS high: end of frame
+        PUSH 2, 1           # rx_fifo <- in_shift_reg, and CS high on the same edge: end of frame

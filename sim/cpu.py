@@ -1,9 +1,10 @@
 """Mini PIO-style CPU that runs 16-bit NOP / SET / SHIFT_OUT / SHIFT_IN / PULL / JMP / CONFIG instructions one clock
 cycle at a time, driving gpio[3:0] and sampling gpio_in[3:0]. SHIFT_OUT always drives gpio[0], SHIFT_IN samples the pin it
-names into the input shift register, PULL fills the output shift register from the TX FIFO, and every instruction but JMP
-can drive one more pin as a GPIO side effect through the one pin-write port; SET is that side effect on its own (opcode
-000, NOP, with the side flag set). SHIFT_OUT and SHIFT_IN are one opcode, SHIFT, told apart by an in/out bit in the
-operand. CONFIG field, value writes the configuration registers, so far only shift_dir: which end of the shift registers
+names into the input shift register, PULL fills the output shift register from the TX FIFO, PUSH empties the input shift
+register into the RX FIFO, and every instruction but JMP can drive one more pin as a GPIO side effect through the one
+pin-write port; SET is that side effect on its own (opcode 000, NOP, with the side flag set). SHIFT_OUT and SHIFT_IN are
+one opcode, SHIFT, told apart by an in/out bit in the operand, and PULL and PUSH are one opcode, FIFO, told apart by a
+push bit. CONFIG field, value writes the configuration registers, so far only shift_dir: which end of the shift registers
 is the wire."""
 
 import re
@@ -241,7 +242,7 @@ def cycles(instr):
 
 
 class CPU:
-    def __init__(self, program, gpio=1, gpio_in=0, tx_data=(), isa=None):
+    def __init__(self, program, gpio=1, gpio_in=0, tx_data=(), rx_depth=4, isa=None):
         self.isa = isa or load_isa()
         self.program = list(program)  # instruction words
         self.pc = 0
@@ -250,8 +251,10 @@ class CPU:
         self.shift_reg = 0  # 8-bit, emptied one bit at a time by SHIFT_OUT from the end shift_dir picks
         self.in_shift_reg = 0  # 8-bit, filled one bit at a time by SHIFT_IN from the end opposite shift_dir
         self.shift_dir = 0  # configuration: 0 = wire end is bit 0, registers shift right (LSB first), 1 = bit 7, left (MSB first)
-        self.tx_fifo = list(tx_data)  # bytes waiting for PULL, oldest first
-        self.stalled = False  # True while a PULL is waiting on an empty FIFO
+        self.tx_fifo = list(tx_data)  # bytes waiting for PULL, oldest first (the outside world appends)
+        self.rx_fifo = []  # bytes PUSHed, oldest first (the outside world pops from the front)
+        self.rx_depth = rx_depth  # RX FIFO capacity: PUSH stalls while len(rx_fifo) == rx_depth
+        self.stalled = False  # True while a PULL waits on an empty TX FIFO or a PUSH on a full RX FIFO
         self.cycle = 0
         self.counter = 0  # cycles left in the current instruction
         self.halted = not self.program
@@ -268,8 +271,8 @@ class CPU:
 
         instr = decode(self.program[self.pc], self.isa)  # imem[pc], visible every cycle
         if self.counter == 0:
-            if instr.op == "PULL" and not self.tx_fifo:
-                # Block: stay on this PULL, pins unchanged, until a byte arrives.
+            if (instr.op == "PULL" and not self.tx_fifo) or (instr.op == "PUSH" and len(self.rx_fifo) >= self.rx_depth):
+                # Block: stay on this PULL / PUSH, pins unchanged, until there is a byte / room.
                 self.stalled = True
                 self.trace.append(tuple(self.gpio))
                 self.cycle += 1
@@ -295,6 +298,8 @@ class CPU:
                     self.in_shift_reg = ((self.in_shift_reg << 1) & 0xFF) | bit
             elif instr.op == "PULL":
                 self.shift_reg = self.tx_fifo.pop(0)
+            elif instr.op == "PUSH":
+                self.rx_fifo.append(self.in_shift_reg)  # the register keeps its value
             elif instr.op == "CONFIG":
                 # One write port into the configuration registers, field-decoded.
                 field, value = instr.args
@@ -328,7 +333,7 @@ class CPU:
     def run(self, max_cycles=100_000):
         while not self.halted:
             if self.cycle >= max_cycles:
-                why = "stalled on PULL with an empty TX FIFO" if self.stalled else "did not halt"
+                why = f"stalled on {decode(self.program[self.pc], self.isa).op}" if self.stalled else "did not halt"
                 raise RuntimeError(f"{why} within {max_cycles} cycles")
             self.step()
         return self.trace
@@ -347,8 +352,9 @@ if __name__ == "__main__":
     cpu = CPU(program, tx_data=tx_data, isa=isa)
     while not cpu.halted and not cpu.stalled and cpu.cycle < 100_000:
         cpu.step()
-    print(f"{cpu.cycle} cycles, {'stalled on PULL' if cpu.stalled else 'halted' if cpu.halted else 'still running'}, "
-          f"shift_dir {cpu.shift_dir} ({'MSB' if cpu.shift_dir else 'LSB'} first), "
-          f"in_shift_reg {cpu.in_shift_reg:#04x} (gpio_in held at {cpu.gpio_in[0]})")
+    state = f"stalled on {decode(program[cpu.pc], isa).op}" if cpu.stalled else "halted" if cpu.halted else "still running"
+    print(f"{cpu.cycle} cycles, {state}, shift_dir {cpu.shift_dir} ({'MSB' if cpu.shift_dir else 'LSB'} first), "
+          f"in_shift_reg {cpu.in_shift_reg:#04x} (gpio_in held at {cpu.gpio_in[0]}), "
+          f"rx_fifo [{', '.join(f'{b:#04x}' for b in cpu.rx_fifo)}]")
     for pin in range(len(cpu.gpio)):
         print(f"gpio{pin} " + "".join(str(level) for level in cpu.pin_trace(pin)))

@@ -2,7 +2,7 @@
 #
 # Four output pins gpio[3:0] and four input pins gpio_in[3:0], one 8-bit
 # output shift register fed from a TX FIFO, one 8-bit input shift register
-# filled from a pin, 16-bit instructions:
+# filled from a pin and emptied into an RX FIFO, 16-bit instructions:
 #
 #   15 14 13 | 12 11 10 9 8 | 7 6 5 4 | 3 2 1 0
 #    opcode  |     delay    |  side   |  own
@@ -30,8 +30,11 @@
 # operand bit 1 saying which way the data goes (0 = out, 1 = in). They already
 # shared shift_dir, the delay and the side effect; the decoder sees one SHIFT
 # opcode with an in/out bit and drives one of two shift enables from it. NOP
-# and SET are opcode 000 selected by the side flag itself. Experiment: the
-# first opcode compressions, opcode 101 is free again.
+# and SET are opcode 000 selected by the side flag itself, and PULL and PUSH
+# are opcode 010, FIFO, with operand bit 0 saying which way the byte goes
+# (0 = TX FIFO -> shift_reg, 1 = in_shift_reg -> RX FIFO), each stalling on
+# its own FIFO's empty or full flag. Experiment: the first opcode
+# compressions; opcodes 101, 110 and 111 are free.
 #
 # One bit of persistent configuration, shift_dir, picks which end of the
 # shift registers the wire is: 0 = right / LSB first (reset value), 1 = left
@@ -125,7 +128,8 @@ instructions:
     side_effect: true
 
   PULL:
-    opcode: 0b010
+    opcode: 0b010   # FIFO with push = 0
+    select: {name: push, lsb: 0, bits: 1, value: 0}
     description: >
       Move the next byte out of the TX FIFO into the 8-bit shift register.
       The pins are unchanged. If the FIFO is empty, block (see above): the
@@ -133,6 +137,20 @@ instructions:
       `PULL pin, value [d]` also drives gpio[pin] to `value` on the cycle the
       byte is pulled, i.e. after any stall: e.g. drop CS, or start a UART
       frame, the moment there is a byte to send.
+    cycles: 1 + delay
+    operands: []
+    side_effect: true
+
+  PUSH:
+    opcode: 0b010   # FIFO with push = 1
+    select: {name: push, lsb: 0, bits: 1, value: 1}
+    description: >
+      Append the 8-bit input shift register to the RX FIFO; the register
+      keeps its value. The mirror of PULL: if the FIFO is full, block until
+      the outside world takes a byte, and the delay starts counting only once
+      the byte has been pushed. The pins are unchanged.
+      `PUSH pin, value [d]` also drives gpio[pin] to `value` on the cycle the
+      byte is pushed, e.g. raise CS as the received byte leaves the core.
     cycles: 1 + delay
     operands: []
     side_effect: true
