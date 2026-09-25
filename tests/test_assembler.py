@@ -30,11 +30,11 @@ def isa():
     (Instruction("CONFIG_SHIFT", (0,), 0), 0x8000),  # 100 00000 00000000
     (Instruction("CONFIG_SHIFT", (1,), 0), 0x8001),  # 100 00000 00000001
     (Instruction("CONFIG_SHIFT", (1,), 7), 0x8701),  # 100 00111 00000001
-    (Instruction("SHIFT_IN", (0,), 0), 0xA000),  # 101 00000 00000000
-    (Instruction("SHIFT_IN", (3,), 0), 0xA00C),  # 101 00000 00001100  pin in operand[3:2]
-    (Instruction("SHIFT_IN", (3,), 3, side=(1, 1)), 0xA39D),  # 101 00011 10011101  flag, side pin 1, pin 3, value 1
-    (Instruction("SHIFT_IN", (2,), 0, side=(0, 0)), 0xA088),  # 101 00000 10001000  side effect on gpio[0] allowed
-    (Instruction("SHIFT_IN", (1,), 31, side=(3, 1)), 0xBFB5),  # 101 11111 10110101
+    (Instruction("SHIFT_IN", (0,), 0), 0x2002),  # 001 00000 00000010  SHIFT with in = 1 in operand[1]
+    (Instruction("SHIFT_IN", (3,), 0), 0x200E),  # 001 00000 00001110  pin in operand[3:2]
+    (Instruction("SHIFT_IN", (3,), 3, side=(1, 1)), 0x239F),  # 001 00011 10011111  flag, side pin 1, pin 3, in, value 1
+    (Instruction("SHIFT_IN", (2,), 0, side=(0, 0)), 0x208A),  # 001 00000 10001010  side effect on gpio[0] allowed
+    (Instruction("SHIFT_IN", (1,), 31, side=(3, 1)), 0x3FB7),  # 001 11111 10110111
 ])
 def test_encoding(isa, instr, word):
     assert encode(instr, isa) == word
@@ -68,10 +68,21 @@ def test_shift_out_side_effect_is_optional():
 
 
 def test_shift_in_takes_the_input_pin_then_an_optional_side_effect():
-    assert assemble("SHIFT_IN 3") == [0xA00C]
-    assert assemble("SHIFT_IN 3, 1, 1 [3]") == assemble("shift_in 3,1,1 [3]") == [0xA39D]
-    assert decode(0xA39D, load_isa()) == Instruction("SHIFT_IN", (3,), 3, side=(1, 1))
-    assert decode(0xA00C, load_isa()).side is None
+    assert assemble("SHIFT_IN 3") == [0x200E]
+    assert assemble("SHIFT_IN 3, 1, 1 [3]") == assemble("shift_in 3,1,1 [3]") == [0x239F]
+    assert decode(0x239F, load_isa()) == Instruction("SHIFT_IN", (3,), 3, side=(1, 1))
+    assert decode(0x200E, load_isa()).side is None
+
+
+def test_shift_out_and_shift_in_are_one_opcode_with_an_in_bit(isa):
+    """One SHIFT opcode: operand[1] = 0 shifts out, 1 shifts in. The
+    mnemonics stay, the decoder has one term fewer and opcode 101 is free."""
+    out, in_ = isa["instructions"]["SHIFT_OUT"], isa["instructions"]["SHIFT_IN"]
+    assert out["opcode"] == in_["opcode"] == 0b001
+    assert out["select"] == {"name": "in", "lsb": 1, "bits": 1, "value": 0}
+    assert in_["select"] == {"name": "in", "lsb": 1, "bits": 1, "value": 1}
+    assert assemble("SHIFT_OUT 1, 0 [3]")[0] ^ assemble("SHIFT_IN 0, 1, 0 [3]")[0] == 0b10
+    assert not any(spec["opcode"] == 0b101 for spec in isa["instructions"].values())
 
 
 def test_side_effect_pin_and_value_sit_in_sets_operand_bits(isa):

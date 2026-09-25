@@ -254,11 +254,15 @@ def test_decode_rejects_bad_words(isa):
     with pytest.raises(ValueError):
         decode(0x2001, isa)  # SHIFT_OUT takes no operand
     with pytest.raises(ValueError):
+        decode(0x2004, isa)  # SHIFT_OUT with an input pin: bits 3:2 are SHIFT_IN's
+    with pytest.raises(ValueError):
         decode(0x8002, isa)  # CONFIG_SHIFT with operand bit 1 set: only bit 0 is dir
     with pytest.raises(ValueError):
-        decode(0xA001, isa)  # SHIFT_IN with the side value set but no side flag
+        decode(0x2003, isa)  # SHIFT_IN with the side value set but no side flag
     with pytest.raises(ValueError):
-        decode(0xA002, isa)  # SHIFT_IN with operand bit 1 set: nothing lives there
+        decode(0x2042, isa)  # SHIFT_IN with operand bit 6 set: nothing lives there
+    with pytest.raises(ValueError):
+        decode(0xA000, isa)  # opcode 0b101 unassigned since SHIFT_IN joined SHIFT_OUT
     with pytest.raises(ValueError):
         decode(0xC000, isa)  # opcode 0b110 unassigned
     with pytest.raises(ValueError):

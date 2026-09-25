@@ -1,7 +1,8 @@
 """Mini PIO-style CPU that runs 16-bit SET / SHIFT_OUT / PULL / JMP / CONFIG_SHIFT / SHIFT_IN instructions one clock
 cycle at a time, driving gpio[3:0] and sampling gpio_in[3:0]: SET picks a pin, SHIFT_OUT always drives gpio[0], SHIFT_IN
-samples the pin it names into the input shift register, and both can drive one more pin as a side effect. CONFIG_SHIFT
-sets shift_dir, the one bit of persistent configuration: which end of the shift registers is the wire."""
+samples the pin it names into the input shift register, and both can drive one more pin as a side effect. SHIFT_OUT and
+SHIFT_IN are one opcode, SHIFT, told apart by an in/out bit in the operand. CONFIG_SHIFT sets shift_dir, the one bit of
+persistent configuration: which end of the shift registers is the wire."""
 
 import re
 import sys
@@ -33,14 +34,21 @@ def load_isa(path=ISA_PATH):
     fields = isa["fields"]
     if sum(f["bits"] for f in fields.values()) != isa["word_bits"]:
         raise ValueError("isa.yaml: field widths don't add up to word_bits")
+    seen = {}  # (opcode, select value) -> instruction name
     for name, spec in isa["instructions"].items():
         used = 0
         side = spec.get("side_effect")
-        for operand in spec["operands"] + ([side["flag"]] + side["operands"] if side else []):
+        select = spec.get("select")
+        operands = spec["operands"] + ([select] if select else []) + ([side["flag"]] + side["operands"] if side else [])
+        for operand in operands:
             mask = operand_mask(operand)
             if mask >> fields["operand"]["bits"] or used & mask:
                 raise ValueError(f"isa.yaml: {name} {operand.get('name', 'flag')} doesn't fit the operand field")
             used |= mask
+        key = (spec["opcode"], select["value"] if select else None)
+        if key in seen or any(o == spec["opcode"] and (v is None) != (select is None) for o, v in seen):
+            raise ValueError(f"isa.yaml: {name} and {seen.get(key)} share opcode {spec['opcode']:#b}")
+        seen[key] = name
     for op, pins in ("SET", "gpio_out"), ("SHIFT_IN", "gpio_in"):
         pin = next(o for o in isa["instructions"][op]["operands"] if o["name"] == "pin")
         if 1 << pin["bits"] != isa[pins]:
@@ -87,6 +95,8 @@ def encode(instr, isa):
     operand = 0
     for value, o in zip(instr.args, spec["operands"]):
         operand |= value << o["lsb"]
+    if "select" in spec:
+        operand |= spec["select"]["value"] << spec["select"]["lsb"]
     if instr.side is not None:
         side = spec["side_effect"]
         operand |= 1 << side["flag"]["lsb"]
@@ -109,14 +119,17 @@ def decode(word, isa):
     if not 0 <= word < (1 << isa["word_bits"]):
         raise ValueError(f"word {word:#x} wider than {isa['word_bits']} bits")
     opcode = field("opcode")
+    operand = field("operand")
     for op, spec in isa["instructions"].items():
-        if spec["opcode"] == opcode:
-            operand = field("operand")
+        select = spec.get("select")
+        if spec["opcode"] == opcode and (
+            not select or (operand & operand_mask(select)) >> select["lsb"] == select["value"]
+        ):
 
             def unpack(operands):
                 return tuple((operand & operand_mask(o)) >> o["lsb"] for o in operands)
 
-            used = 0
+            used = operand_mask(select) if select else 0
             for o in spec["operands"]:
                 used |= operand_mask(o)
             side_spec, side = spec.get("side_effect"), None
