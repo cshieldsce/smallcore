@@ -37,7 +37,7 @@ What the protocols have asked of the core so far, in the order they came up. Sol
 | selectable shift direction (MSB first) | SPI | done: `shift_dir` configuration bit set by `CONFIG shift_dir, d`, `SHIFT_OUT` sends bit 7 and shifts left when it is 1 |
 | read a pin on the same edge that raises the clock (MISO) | SPI full duplex | done: `gpio_in[3:0]`, an input shift register, `SHIFT_IN pin, out_pin, value`; obeys `shift_dir`; RX costs no instructions and no cycles on top of TX |
 | get the received byte out of the core | SPI full duplex | open, next: `PUSH` into an RX FIFO, the mirror of `PULL` |
-| six of eight opcodes used before `PUSH` | the ISA itself | in progress: `SHIFT_OUT` + `SHIFT_IN` are one `SHIFT` opcode with an in/out bit, `CONFIG_SHIFT` became `CONFIG field, value`, the GPIO side effect is one field on every opcode but `JMP` and `SET` is `NOP` + side effect; a `PULL`/`PUSH` bit is next |
+| six of eight opcodes used before `PUSH` | the ISA itself | in progress: `SHIFT_OUT` + `SHIFT_IN` are one `SHIFT` opcode with an in/out bit, `CONFIG_SHIFT` became `CONFIG field, value`, the GPIO side effect is one field on every opcode but `JMP` and `SET` is `NOP` + side effect (`PULL pin, value` made every SPI and FIFO UART program one word shorter); a `PULL`/`PUSH` bit is next |
 | compact repetition / bit count | SPI, 16 unrolled words per byte | open, later |
 | per-pin reset or idle level | SPI, one `SET` to take SCLK low | open, maybe: not hurting enough yet |
 | configurable shift-output pin | SPI | open, not yet justified: fixed `gpio[0]` has not caused a failure |

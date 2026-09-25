@@ -192,7 +192,7 @@ def test_programs_differ_only_in_the_config_shift_dir_value(pair):
 
 def test_program_is_two_instructions_per_bit(program):
     words = load_program(program)
-    assert len(words) == 4 + 8 * 2 + 2  # config + setup, 8 x (shift + clock low, clock high), teardown
+    assert len(words) == 3 + 8 * 2 + 2  # config, clock low, pull + CS low; 8 x (shift + clock low, clock high); teardown
 
 
 @pytest.mark.parametrize("tx, duplex", tuple(zip(TX, DUPLEX)), ids=("lsb", "msb"))

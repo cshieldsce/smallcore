@@ -4,13 +4,14 @@
 # on the empty FIFO with the line still high from the stop bit, and the next
 # byte pushed in starts the next frame. The program never halts.
 #
-# JMP and a successful PULL each take one cycle, so there are two extra
-# idle-high cycles between frames. UART allows any idle time between frames.
+# The PULL is the start bit: its side effect drops TX on the edge the byte
+# arrives. JMP takes one cycle, so there is one extra idle-high cycle between
+# frames. UART allows any idle time between frames.
 
         SET 0, 1        # idle (line high)
 loop:
-        PULL            # shift_reg = next FIFO byte (stalls here while empty)
-        SET 0, 0 [7]    # start bit
+        PULL 0, 0 [7]   # start bit: shift_reg = next FIFO byte (stalls here while
+                        # empty, line high), TX low on the edge it arrives
         SHIFT_OUT [7]   # d0
         SHIFT_OUT [7]   # d1
         SHIFT_OUT [7]   # d2

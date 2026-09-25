@@ -178,13 +178,15 @@ def test_uart_program_is_one_instruction_per_bit():
     assert all(decode(w, load_isa()).args[0] == 0 for w in words), "UART only drives gpio 0"
 
 
-def test_pull_uart_program_is_pull_plus_one_instruction_per_bit():
-    assert len(load_program(PROGRAMS / "uart_tx_pull.asm")) == 1 + 11
+def test_pull_uart_program_is_one_instruction_per_bit_with_the_pull_as_the_start_bit():
+    words = load_program(PROGRAMS / "uart_tx_pull.asm")
+    assert len(words) == 11
+    assert decode(words[1], load_isa()) == Instruction("PULL", (), 7, side=(0, 0))
 
 
 def test_loop_uart_program_jumps_back_to_its_pull():
     words = load_program(PROGRAMS / "uart_tx_loop.asm")
     isa = load_isa()
-    assert len(words) == 1 + 1 + 10 + 1  # idle, PULL, start + 8 data + stop, JMP
-    assert decode(words[1], isa).op == "PULL"
+    assert len(words) == 1 + 10 + 1  # idle, PULL as the start bit + 8 data + stop, JMP
+    assert decode(words[1], isa) == Instruction("PULL", (), 7, side=(0, 0))
     assert decode(words[-1], isa) == Instruction("JMP", (1,), 0)

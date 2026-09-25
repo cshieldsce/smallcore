@@ -16,8 +16,8 @@
 
         CONFIG shift_dir, 1 # MSB first
         SET 1, 0            # SCLK idle low
-        PULL                # shift_reg = byte to send (stalls here while the FIFO is empty)
-        SET 2, 0 [3]        # CS low: start of frame
+        PULL 2, 0 [3]       # shift_reg = byte to send (stalls here while the FIFO is empty)
+                            # and CS low on the edge the byte arrives: start of frame
 
         SHIFT_OUT 1, 0 [3]  # bit 7: MOSI = next bit, SCLK low
         SET 1, 1 [3]        #        SCLK high, slave samples

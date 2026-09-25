@@ -1,12 +1,12 @@
 # UART 8N1 transmit of one byte from the TX FIFO at 8 CPU cycles per bit. TX is gpio 0.
 #
 # Same frame as uart_tx_0x55.asm, but the data comes from outside the
-# program: PULL moves the next FIFO byte into the shift register, so this one
+# program: PULL moves the next FIFO byte into the shift register and, as its
+# GPIO side effect, drops TX for the start bit on that same edge, so this one
 # program sends whatever byte the FIFO holds (CPU(program, tx_data=[0xA3])).
 
-        PULL            # shift_reg = next FIFO byte, d0 in bit 0 (pins unchanged)
         SET 0, 1 [7]    # idle (line high)
-        SET 0, 0 [7]    # start bit
+        PULL 0, 0 [7]   # start bit: shift_reg = the FIFO byte, d0 in bit 0, TX low
         SHIFT_OUT [7]   # d0
         SHIFT_OUT [7]   # d1
         SHIFT_OUT [7]   # d2
