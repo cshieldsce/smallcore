@@ -1,6 +1,7 @@
-"""Mini PIO-style CPU that runs 16-bit SET / SHIFT_OUT / PULL / JMP / CONFIG_SHIFT instructions one clock cycle
-at a time, driving gpio[3:0]: SET picks a pin, SHIFT_OUT always drives gpio[0] and can drive one more pin as a side
-effect. CONFIG_SHIFT sets shift_dir, the one bit of persistent configuration: which end of the shift register goes out."""
+"""Mini PIO-style CPU that runs 16-bit SET / SHIFT_OUT / PULL / JMP / CONFIG_SHIFT / SHIFT_IN instructions one clock
+cycle at a time, driving gpio[3:0] and sampling gpio_in[3:0]: SET picks a pin, SHIFT_OUT always drives gpio[0], SHIFT_IN
+samples the pin it names into the input shift register, and both can drive one more pin as a side effect. CONFIG_SHIFT
+sets shift_dir, the one bit of persistent configuration: which end of the shift registers is the wire."""
 
 import re
 import sys
@@ -12,7 +13,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 ISA_PATH = ROOT / "isa.yaml"
 
-# e.g. "SET 0, 1 [7]", "SHIFT_OUT [7]", "SHIFT_OUT 1, 0 [3]", "set 1 0", "loop:", "loop: PULL", "JMP loop"
+# e.g. "SET 0, 1 [7]", "SHIFT_OUT [7]", "SHIFT_OUT 1, 0 [3]", "SHIFT_IN 3, 1, 1 [3]", "set 1 0", "loop:", "JMP loop"
 LINE_RE = re.compile(
     r"^(?:(?P<label>[A-Za-z_]\w*):)?\s*"
     r"(?:(?P<op>\w+)(?P<args>[^\[]*?)\s*(?:\[\s*(?P<delay>\w+)\s*\])?)?$"
@@ -40,9 +41,10 @@ def load_isa(path=ISA_PATH):
             if mask >> fields["operand"]["bits"] or used & mask:
                 raise ValueError(f"isa.yaml: {name} {operand.get('name', 'flag')} doesn't fit the operand field")
             used |= mask
-    pin = next(o for o in isa["instructions"]["SET"]["operands"] if o["name"] == "pin")
-    if 1 << pin["bits"] != isa["gpio_out"]:
-        raise ValueError("isa.yaml: SET pin doesn't address exactly gpio_out pins")
+    for op, pins in ("SET", "gpio_out"), ("SHIFT_IN", "gpio_in"):
+        pin = next(o for o in isa["instructions"][op]["operands"] if o["name"] == "pin")
+        if 1 << pin["bits"] != isa[pins]:
+            raise ValueError(f"isa.yaml: {op} pin doesn't address exactly {pins} pins")
     return isa
 
 
@@ -140,7 +142,8 @@ def assemble(source, isa=None):
     are purely an assembler feature: the words only contain addresses.
 
     Operands written after an instruction's own are its GPIO side effect,
-    e.g. `SHIFT_OUT 1, 0 [3]` shifts and drives gpio[1] low.
+    e.g. `SHIFT_OUT 1, 0 [3]` shifts and drives gpio[1] low, and
+    `SHIFT_IN 3, 1, 1 [3]` samples gpio_in[3] and drives gpio[1] high.
     """
     isa = isa or load_isa()
     labels = {}
@@ -192,13 +195,15 @@ def cycles(instr):
 
 
 class CPU:
-    def __init__(self, program, gpio=1, tx_data=(), isa=None):
+    def __init__(self, program, gpio=1, gpio_in=0, tx_data=(), isa=None):
         self.isa = isa or load_isa()
         self.program = list(program)  # instruction words
         self.pc = 0
         self.gpio = [gpio] * self.isa["gpio_out"]  # output pins, all reset to `gpio`
+        self.gpio_in = [gpio_in] * self.isa["gpio_in"]  # input pins: the outside world sets these before each step
         self.shift_reg = 0  # 8-bit, emptied one bit at a time by SHIFT_OUT from the end shift_dir picks
-        self.shift_dir = 0  # configuration: 0 = SHIFT_OUT sends bit 0 and shifts right (LSB first), 1 = bit 7, left (MSB first)
+        self.in_shift_reg = 0  # 8-bit, filled one bit at a time by SHIFT_IN from the end opposite shift_dir
+        self.shift_dir = 0  # configuration: 0 = wire end is bit 0, registers shift right (LSB first), 1 = bit 7, left (MSB first)
         self.tx_fifo = list(tx_data)  # bytes waiting for PULL, oldest first
         self.stalled = False  # True while a PULL is waiting on an empty FIFO
         self.cycle = 0
@@ -236,6 +241,15 @@ class CPU:
                 else:  # MSB first
                     self.gpio[0] = self.shift_reg >> 7
                     self.shift_reg = (self.shift_reg << 1) & 0xFF
+            elif instr.op == "SHIFT_IN":
+                # Sample the pin as it stands when this cycle executes: what the
+                # outside world drove before this clock edge. The side effect
+                # below lands on the same edge, so it cannot reach this sample.
+                bit = self.gpio_in[instr.args[0]]
+                if self.shift_dir == 0:  # LSB first: the sample enters at bit 7 and walks right
+                    self.in_shift_reg = (self.in_shift_reg >> 1) | (bit << 7)
+                else:  # MSB first: the sample enters at bit 0 and walks left
+                    self.in_shift_reg = ((self.in_shift_reg << 1) & 0xFF) | bit
             elif instr.op == "PULL":
                 self.shift_reg = self.tx_fifo.pop(0)
             elif instr.op == "CONFIG_SHIFT":
@@ -286,6 +300,7 @@ if __name__ == "__main__":
     while not cpu.halted and not cpu.stalled and cpu.cycle < 100_000:
         cpu.step()
     print(f"{cpu.cycle} cycles, {'stalled on PULL' if cpu.stalled else 'halted' if cpu.halted else 'still running'}, "
-          f"shift_dir {cpu.shift_dir} ({'MSB' if cpu.shift_dir else 'LSB'} first)")
+          f"shift_dir {cpu.shift_dir} ({'MSB' if cpu.shift_dir else 'LSB'} first), "
+          f"in_shift_reg {cpu.in_shift_reg:#04x} (gpio_in held at {cpu.gpio_in[0]})")
     for pin in range(len(cpu.gpio)):
         print(f"gpio{pin} " + "".join(str(level) for level in cpu.pin_trace(pin)))

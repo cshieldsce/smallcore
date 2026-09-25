@@ -256,6 +256,152 @@ def test_decode_rejects_bad_words(isa):
     with pytest.raises(ValueError):
         decode(0x8002, isa)  # CONFIG_SHIFT with operand bit 1 set: only bit 0 is dir
     with pytest.raises(ValueError):
-        decode(0xA000, isa)  # opcode 0b101 unassigned
+        decode(0xA001, isa)  # SHIFT_IN with the side value set but no side flag
+    with pytest.raises(ValueError):
+        decode(0xA002, isa)  # SHIFT_IN with operand bit 1 set: nothing lives there
+    with pytest.raises(ValueError):
+        decode(0xC000, isa)  # opcode 0b110 unassigned
     with pytest.raises(ValueError):
         decode(0xE000, isa)  # opcode 0b111 unassigned
+
+
+# SHIFT_IN: gpio_in[pin] -> input shift register, obeying shift_dir.
+
+
+def test_inputs_start_at_the_constructor_level_and_the_input_register_empty():
+    cpu = CPU(assemble("PULL"), tx_data=[0])
+    assert (cpu.gpio_in, cpu.in_shift_reg) == ([0, 0, 0, 0], 0)
+    assert CPU(assemble("PULL"), gpio_in=1, tx_data=[0]).gpio_in == [1, 1, 1, 1]
+
+
+def test_shift_in_lsb_first_enters_at_bit_7_and_shifts_right():
+    """The RTL contract: on SHIFT_IN's first cycle in_shift_reg <= {gpio_in[pin], in_shift_reg[7:1]}."""
+    cpu = CPU(assemble("SHIFT_IN 2\nSHIFT_IN 2\nSHIFT_IN 2"))
+    cpu.gpio_in[2] = 1
+    cpu.step()
+    assert cpu.in_shift_reg == 0b1000_0000
+    cpu.gpio_in[2] = 0
+    cpu.step()
+    assert cpu.in_shift_reg == 0b0100_0000
+    cpu.gpio_in[2] = 1
+    cpu.step()
+    assert cpu.in_shift_reg == 0b1010_0000
+    assert cpu.halted
+
+
+def test_shift_in_msb_first_enters_at_bit_0_and_shifts_left():
+    """With shift_dir 1: in_shift_reg <= {in_shift_reg[6:0], gpio_in[pin]}."""
+    cpu = CPU(assemble("CONFIG_SHIFT 1\nSHIFT_IN 2\nSHIFT_IN 2\nSHIFT_IN 2"))
+    cpu.step()
+    cpu.gpio_in[2] = 1
+    cpu.step()
+    assert cpu.in_shift_reg == 0b0000_0001
+    cpu.gpio_in[2] = 0
+    cpu.step()
+    assert cpu.in_shift_reg == 0b0000_0010
+    cpu.gpio_in[2] = 1
+    cpu.step()
+    assert cpu.in_shift_reg == 0b0000_0101
+    assert cpu.halted
+
+
+@pytest.mark.parametrize("byte", (0x00, 0x01, 0x80, 0xA3, 0x5C, 0xFF), ids=lambda b: f"{b:#04x}")
+@pytest.mark.parametrize("shift_dir", (0, 1), ids=("lsb_first", "msb_first"))
+def test_eight_shift_ins_rebuild_a_byte_in_normal_order(byte, shift_dir):
+    """The bits arrive in wire order (LSB or MSB first, as shift_dir says)
+    and land in the register in byte order, so the same one bit of
+    configuration serves both directions of a protocol."""
+    bits = [(byte >> i) & 1 for i in range(8)]
+    wire = bits[::-1] if shift_dir else bits
+    cpu = CPU(assemble(f"CONFIG_SHIFT {shift_dir}\n" + "SHIFT_IN 1 [2]\n" * 8))
+    cpu.step()
+    for bit in wire:
+        cpu.gpio_in[1] = bit
+        cpu.run_cycles(3)
+    assert cpu.halted
+    assert cpu.in_shift_reg == byte
+
+
+def test_shift_in_samples_the_named_pin_only():
+    cpu = CPU(assemble("SHIFT_IN 3"), gpio_in=1)
+    cpu.gpio_in[3] = 0
+    cpu.step()
+    assert cpu.in_shift_reg == 0
+
+
+def test_shift_in_samples_on_its_first_cycle_only():
+    """Delay cycles hold: the pin may change during them without being seen."""
+    cpu = CPU(assemble("SHIFT_IN 0 [2]\nSHIFT_IN 0"))
+    cpu.gpio_in[0] = 1
+    cpu.step()
+    assert (cpu.in_shift_reg, cpu.pc) == (0x80, 0)
+    cpu.gpio_in[0] = 0
+    cpu.step()
+    assert (cpu.in_shift_reg, cpu.pc) == (0x80, 0)
+    cpu.gpio_in[0] = 1
+    cpu.step()
+    assert (cpu.in_shift_reg, cpu.pc) == (0x80, 1)
+    cpu.gpio_in[0] = 0
+    cpu.step()
+    assert cpu.in_shift_reg == 0x40
+    assert cpu.halted
+
+
+def test_shift_in_samples_the_level_present_as_the_cycle_executes():
+    """The timing contract: the sample is what the outside world drove before
+    the clock edge that executes SHIFT_IN. Changing the pin after that edge
+    (before the next step) is too late for this SHIFT_IN and lands in the next."""
+    cpu = CPU(assemble("SHIFT_IN 0\nSHIFT_IN 0"))
+    cpu.gpio_in[0] = 1
+    cpu.step()
+    cpu.gpio_in[0] = 0
+    assert cpu.in_shift_reg == 0x80
+    cpu.step()
+    assert cpu.in_shift_reg == 0x40
+
+
+def test_shift_in_touches_no_output_pin_nor_the_output_side():
+    cpu = CPU(assemble("CONFIG_SHIFT 1\nPULL\nSHIFT_IN 3 [1]"), tx_data=[0xA5])
+    cpu.gpio_in[3] = 1
+    cpu.run()
+    assert (cpu.gpio, cpu.shift_reg, cpu.shift_dir, cpu.tx_fifo) == ([1, 1, 1, 1], 0xA5, 1, [])
+    assert cpu.in_shift_reg == 0x01
+
+
+def test_shift_in_side_effect_drives_a_pin_on_the_sampling_edge():
+    """`SHIFT_IN 3, 1, 1`: gpio_in[3] is sampled and gpio[1] rises on one
+    edge, which is SPI mode 0's rising clock edge. The sample cannot see the
+    side effect: gpio_in is what the outside world drove before the edge."""
+    cpu = CPU(assemble("SET 1, 0\nSHIFT_IN 3, 1, 1 [1]\nSHIFT_IN 3, 1, 0"))
+    cpu.step()
+    cpu.gpio_in[3] = 1
+    cpu.step()
+    assert (cpu.gpio, cpu.in_shift_reg) == ([1, 1, 1, 1], 0x80)  # sampled and clock up, one edge
+    cpu.gpio_in[3] = 0
+    cpu.step()
+    assert (cpu.gpio, cpu.in_shift_reg) == ([1, 1, 1, 1], 0x80)  # delay cycle: everything holds
+    cpu.step()
+    assert (cpu.gpio, cpu.in_shift_reg) == ([1, 0, 1, 1], 0x40)
+    assert cpu.halted
+
+
+def test_shift_in_side_effect_may_drive_gpio0():
+    # Unlike SHIFT_OUT, SHIFT_IN drives no pin of its own, so gpio[0] is free.
+    cpu = CPU(assemble("SHIFT_IN 0, 0, 0"))
+    cpu.run()
+    assert cpu.gpio == [0, 1, 1, 1]
+
+
+def test_shift_in_and_shift_out_share_shift_dir_but_not_a_register():
+    """Full duplex in the small: the output register drains while the input
+    register fills, each from its own end, both under one shift_dir."""
+    cpu = CPU(assemble("CONFIG_SHIFT 1\nPULL\n" + "SHIFT_OUT\nSHIFT_IN 0\n" * 8), tx_data=[0xA3])
+    cpu.step()
+    cpu.step()
+    for bit in [(0x5C >> i) & 1 for i in range(7, -1, -1)]:  # MSB first on the wire
+        cpu.step()  # SHIFT_OUT
+        cpu.gpio_in[0] = bit
+        cpu.step()  # SHIFT_IN
+    assert cpu.halted
+    assert (cpu.shift_reg, cpu.in_shift_reg) == (0x00, 0x5C)
+    assert cpu.pin_trace(0)[2::2] == [(0xA3 >> i) & 1 for i in range(7, -1, -1)]

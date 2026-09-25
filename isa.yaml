@@ -1,7 +1,8 @@
 # Mini ISA.
 #
-# Four output pins gpio[3:0], one 8-bit shift register fed from a TX FIFO,
-# 16-bit instructions:
+# Four output pins gpio[3:0] and four input pins gpio_in[3:0], one 8-bit
+# output shift register fed from a TX FIFO, one 8-bit input shift register
+# filled from a pin, 16-bit instructions:
 #
 #   15 14 13 | 12 11 10 9 8 | 7 6 5 4 3 2 1 0
 #    opcode  |     delay    |     operand
@@ -15,18 +16,23 @@
 #
 # An instruction may also allow a GPIO side effect: extra `pin, value`
 # operands that drive one more pin on the same edge as the primary operation,
-# marked present by a flag bit in the operand field. Experiment: only
-# SHIFT_OUT has one so far.
+# marked present by a flag bit in the operand field. Experiment: SHIFT_OUT and
+# SHIFT_IN have one. Its pin and value sit in the same operand bits as SET's,
+# so every pin write decodes from the same place.
 #
 # One bit of persistent configuration, shift_dir, picks which end of the
-# shift register SHIFT_OUT sends: 0 = right / LSB first (reset value),
-# 1 = left / MSB first. CONFIG_SHIFT sets it and it holds until the next
-# CONFIG_SHIFT, so a program states its bit order once per protocol, not once
-# per bit. Experiment: the first piece of protocol configuration.
+# shift registers the wire is: 0 = right / LSB first (reset value), 1 = left
+# / MSB first. SHIFT_OUT sends that end of the output register, SHIFT_IN
+# samples into the opposite end of the input register and shifts towards the
+# wire end, so eight samples rebuild the byte in normal order either way.
+# CONFIG_SHIFT sets it and it holds until the next CONFIG_SHIFT, so a program
+# states its bit order once per protocol, not once per bit. Experiment: the
+# first piece of protocol configuration.
 #
 
 word_bits: 16
 gpio_out: 4
+gpio_in: 4
 
 fields:
   opcode:  {lsb: 13, bits: 3}
@@ -92,3 +98,28 @@ instructions:
     cycles: 1 + delay
     operands:
       - {name: dir, lsb: 0, bits: 1}
+
+  SHIFT_IN:
+    opcode: 0b101
+    description: >
+      On the first cycle, sample gpio_in[pin] into the 8-bit input shift
+      register: with shift_dir 0 the register shifts right and the sample
+      fills in_shift_reg[7], with shift_dir 1 it shifts left and the sample
+      fills in_shift_reg[0]. The sample is the level the pin holds as that
+      cycle executes, i.e. what the outside world drove before the clock
+      edge: a side effect on the same edge cannot feed back into it. Hold for
+      `delay` extra cycles; nothing is sampled again.
+      The output pins and output shift register are unchanged. Eight SHIFT_INs
+      rebuild a byte sent LSB first (shift_dir 0) or MSB first (shift_dir 1).
+    cycles: 1 + delay
+    operands:
+      - {name: pin, lsb: 2, bits: 2}   # bits 7, 5:4 and 0 are the side effect's
+    side_effect:
+      description: >
+        `SHIFT_IN pin, out_pin, value [d]` also drives gpio[out_pin] to
+        `value` on that same first cycle, e.g. raise a clock as the bit is
+        sampled. `out_pin` is 0..3: SHIFT_IN drives no pin of its own.
+      flag: {lsb: 7, bits: 1}
+      operands:
+        - {name: pin,   lsb: 4, bits: 2}
+        - {name: value, lsb: 0, bits: 1}

@@ -30,6 +30,11 @@ def isa():
     (Instruction("CONFIG_SHIFT", (0,), 0), 0x8000),  # 100 00000 00000000
     (Instruction("CONFIG_SHIFT", (1,), 0), 0x8001),  # 100 00000 00000001
     (Instruction("CONFIG_SHIFT", (1,), 7), 0x8701),  # 100 00111 00000001
+    (Instruction("SHIFT_IN", (0,), 0), 0xA000),  # 101 00000 00000000
+    (Instruction("SHIFT_IN", (3,), 0), 0xA00C),  # 101 00000 00001100  pin in operand[3:2]
+    (Instruction("SHIFT_IN", (3,), 3, side=(1, 1)), 0xA39D),  # 101 00011 10011101  flag, side pin 1, pin 3, value 1
+    (Instruction("SHIFT_IN", (2,), 0, side=(0, 0)), 0xA088),  # 101 00000 10001000  side effect on gpio[0] allowed
+    (Instruction("SHIFT_IN", (1,), 31, side=(3, 1)), 0xBFB5),  # 101 11111 10110101
 ])
 def test_encoding(isa, instr, word):
     assert encode(instr, isa) == word
@@ -42,6 +47,8 @@ def test_encoding(isa, instr, word):
                                   "SHIFT_OUT 1, 0, 1", "SET 1, 0, 1", "PULL 1, 0", "JMP 0, 1, 0",
                                   "PULL 0x55", "JMP", "JMP 256", "JMP nowhere",
                                   "CONFIG_SHIFT", "CONFIG_SHIFT 2", "CONFIG_SHIFT 0, 1", "CONFIG_SHIFT 1, 0",
+                                  "SHIFT_IN", "SHIFT_IN 4", "SHIFT_IN 3, 1", "SHIFT_IN 3, 4, 1", "SHIFT_IN 3, 1, 2",
+                                  "SHIFT_IN 3, 1, 1, 0",
                                   "1: SET 0, 0", "loop:: SET 0, 0"])
 def test_assembler_rejects_bad_lines(line):
     with pytest.raises(SyntaxError):
@@ -58,6 +65,26 @@ def test_shift_out_side_effect_is_optional():
     assert assemble("SHIFT_OUT 1, 0 [3]") == assemble("shift_out 1,0 [3]") == [0x2390]
     assert decode(0x2390, load_isa()) == Instruction("SHIFT_OUT", (), 3, side=(1, 0))
     assert decode(0x2700, load_isa()).side is None
+
+
+def test_shift_in_takes_the_input_pin_then_an_optional_side_effect():
+    assert assemble("SHIFT_IN 3") == [0xA00C]
+    assert assemble("SHIFT_IN 3, 1, 1 [3]") == assemble("shift_in 3,1,1 [3]") == [0xA39D]
+    assert decode(0xA39D, load_isa()) == Instruction("SHIFT_IN", (3,), 3, side=(1, 1))
+    assert decode(0xA00C, load_isa()).side is None
+
+
+def test_side_effect_pin_and_value_sit_in_sets_operand_bits(isa):
+    """One pin-write decoder: SET, SHIFT_OUT's side effect and SHIFT_IN's side
+    effect all read `pin` from operand[5:4] and `value` from operand[0]."""
+    def where(operands):
+        return {o["name"]: (o["lsb"], o["bits"]) for o in operands}
+
+    expected = where(isa["instructions"]["SET"]["operands"])
+    for op in ("SHIFT_OUT", "SHIFT_IN"):
+        side = isa["instructions"][op]["side_effect"]
+        assert where(side["operands"]) == expected
+        assert side["flag"] == {"lsb": 7, "bits": 1}
 
 
 def test_config_shift_takes_the_direction_bit():
