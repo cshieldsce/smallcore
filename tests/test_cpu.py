@@ -372,7 +372,7 @@ def test_decode_rejects_bad_words(isa):
     with pytest.raises(ValueError):
         decode(0xA010, isa)  # WAIT with the side value set but no side flag
     with pytest.raises(ValueError):
-        decode(0xC000, isa)  # opcode 0b110 unassigned
+        decode(0xC010, isa)  # SKIP with the side value set but no side flag
     with pytest.raises(ValueError):
         decode(0xE000, isa)  # opcode 0b111 unassigned
 
@@ -628,3 +628,99 @@ def test_two_waits_make_an_edge():
     cpu.step()
     cpu.step()
     assert cpu.gpio == [1, 0, 1, 1] and cpu.halted
+
+
+# SKIP bit, level: pc + 2 instead of pc + 1 when in_shift_reg[bit] == level.
+
+
+def test_skip_steps_over_the_next_word_when_the_bit_holds_the_level():
+    cpu = CPU(assemble("SHIFT_IN 0\nSKIP 7, 1\nSET 0, 0\nSET 1, 0"), gpio_in=1)
+    cpu.step()  # in_shift_reg = 0x80
+    cpu.step()  # SKIP: bit 7 is 1, pc <- 3
+    assert (cpu.pc, cpu.gpio, cpu.in_shift_reg) == (3, [1, 1, 1, 1], 0x80)
+    cpu.run()
+    assert cpu.gpio == [1, 0, 1, 1] and cpu.cycle == 3, "SET 0, 0 never ran and took no cycle"
+
+
+def test_skip_falls_through_when_the_bit_differs():
+    cpu = CPU(assemble("SHIFT_IN 0\nSKIP 7, 0\nSET 0, 0\nSET 1, 0"), gpio_in=1)
+    cpu.run()
+    assert cpu.gpio == [0, 0, 1, 1] and cpu.cycle == 4
+
+
+@pytest.mark.parametrize("level", (0, 1))
+@pytest.mark.parametrize("bit", range(8))
+def test_skip_reads_the_named_bit_of_the_input_register_either_polarity(bit, level):
+    for value in (0x00, 0xFF, 0xA5, 0x5A, 1 << bit, 0xFF ^ (1 << bit)):
+        cpu = CPU(assemble(f"SKIP {bit}, {level}\nSET 0, 0\nSET 1, 0"))
+        cpu.in_shift_reg = value
+        cpu.run()
+        skipped = (value >> bit) & 1 == level
+        assert cpu.gpio == [1 if skipped else 0, 0, 1, 1]
+        assert cpu.cycle == (2 if skipped else 3)
+        assert cpu.in_shift_reg == value, "reading the bit does not move it"
+
+
+def test_skip_decides_on_the_register_not_the_pin():
+    """The I2C case: the sample was taken while the line held the answer; by
+    the time the SKIP is up the line has moved on. The SKIP reads the
+    register, so the decision is the sample's."""
+    cpu = CPU(assemble("CONFIG shift_dir, 1\nSHIFT_IN 0\nSKIP 0, 0\nSET 1, 0\nSET 2, 0"), gpio_in=0)
+    cpu.step()
+    cpu.step()  # samples 0: an ACK, at bit 0 MSB first
+    cpu.gpio_in[0] = 1  # the line is let go
+    cpu.run()
+    assert cpu.gpio == [1, 1, 0, 1], "SET 1, 0 skipped on the sampled 0, whatever the pin holds now"
+
+
+def test_skip_delay_holds_then_the_pc_moves_by_two():
+    cpu = CPU(assemble("SKIP 3, 1 [2]\nSET 0, 0\nSET 1, 0"))
+    cpu.in_shift_reg = 0x08
+    cpu.step()
+    assert cpu.pc == 0
+    cpu.step()
+    assert cpu.pc == 0
+    cpu.step()
+    assert cpu.pc == 2
+    cpu.run()
+    assert cpu.gpio == [1, 0, 1, 1] and cpu.cycle == 4
+
+
+def test_skip_side_effect_lands_on_its_first_cycle_whichever_way_it_decides():
+    for value, pins in ((0x01, [1, 0, 0, 1]), (0x00, [0, 0, 0, 1])):
+        cpu = CPU(assemble("SKIP 0, 1, 1, 0 [1]\nSET 0, 0\nSET 2, 0"))
+        cpu.in_shift_reg = value
+        cpu.step()
+        assert (cpu.gpio, cpu.pc) == ([1, 0, 1, 1], 0)  # gpio[1] dropped, the delay holds
+        cpu.run()
+        assert cpu.gpio == pins
+
+
+def test_skip_over_a_jmp_is_the_branch():
+    """`SKIP b, l` then `JMP there`: fall into the JMP and go, or step over
+    it and stay. The JMP keeps its whole 8-bit target."""
+    source = "SHIFT_IN 0\nSKIP 7, 0\nJMP there\nSET 0, 0\nthere: SET 1, 0"
+    low = CPU(assemble(source), gpio_in=0)  # sample 0: over the JMP, SET 0, 0 runs
+    low.run()
+    high = CPU(assemble(source), gpio_in=1)  # sample 1: into the JMP
+    high.run()
+    assert (low.gpio, low.cycle) == ([0, 0, 1, 1], 4)
+    assert (high.gpio, high.cycle) == ([1, 0, 1, 1], 4)
+
+
+def test_skip_past_the_end_halts():
+    cpu = CPU(assemble("SKIP 0, 0\nSET 0, 0"))
+    cpu.run()
+    assert cpu.halted and cpu.gpio == [1, 1, 1, 1] and cpu.cycle == 1
+    cpu = CPU(assemble("SET 1, 0\nSKIP 0, 0"))
+    cpu.run()
+    assert cpu.halted and cpu.gpio == [1, 0, 1, 1] and cpu.cycle == 2
+
+
+def test_skip_touches_nothing_but_the_pc_and_its_own_side_effect():
+    cpu = CPU(assemble("CONFIG shift_dir, 1\nPULL\nSHIFT_IN 3\nSKIP 0, 1 [1]\nSKIP 0, 0, 1, 0\nSET 2, 0"),
+              tx_data=[0xA5], gpio_in=1)
+    cpu.run()
+    # the sample is 1: the first SKIP steps over the second, whose side effect never lands
+    assert (cpu.gpio, cpu.shift_reg, cpu.in_shift_reg, cpu.shift_dir) == ([1, 1, 0, 1], 0xA5, 0x01, 1)
+    assert (cpu.tx_fifo, cpu.rx_fifo, cpu.cycle) == ([], [], 6)

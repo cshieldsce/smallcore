@@ -17,6 +17,7 @@
 # own:   the instruction's own operands (`lsb` counts from operand bit 0).
 #        A `select` bit here lets two mnemonics share an opcode: SHIFT_OUT /
 #        SHIFT_IN (bit 1), PULL / PUSH (bit 0). Unused bits must be 0.
+#        Opcode 111 is free.
 #
 # shift_dir picks which end of both shift registers is the wire: 0 = bit 0,
 # LSB first (reset), 1 = bit 7, MSB first. SHIFT_OUT sends that end and
@@ -108,6 +109,20 @@ instructions:
       effect lands on that edge and the delay follows. Bit 1 is unused.
     operands:
       - {name: pin,   lsb: 2, bits: 2}
+      - {name: level, lsb: 0, bits: 1}
+    side_effect: true
+
+  SKIP:
+    opcode: 0b110
+    description: >
+      Step over the next word if in_shift_reg[bit] == level: pc <- pc + 2 on
+      the last cycle instead of pc + 1, so the word after is not run at all.
+      The bit is read as the SKIP ends, which is as it stood when it issued.
+      A decision on a sampled bit, wherever the sample has moved to since:
+      `SKIP 0, 0` then `JMP stop` after an I2C ACK clock, MSB first, goes on
+      only on an ACK. The side effect lands on the first cycle either way.
+    operands:
+      - {name: bit,   lsb: 1, bits: 3}
       - {name: level, lsb: 0, bits: 1}
     side_effect: true
 

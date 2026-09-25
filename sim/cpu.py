@@ -317,8 +317,14 @@ class CPU:
 
         self.counter -= 1
         if self.counter == 0:
-            # Last cycle of the instruction: JMP loads its target, everything else PC + 1.
-            self.pc = instr.args[0] if instr.op == "JMP" else self.pc + 1
+            # Last cycle of the instruction: JMP loads its target, SKIP steps over the next word
+            # (pc + 2) when the bit of in_shift_reg it names holds the level, everything else pc + 1.
+            if instr.op == "JMP":
+                self.pc = instr.args[0]
+            elif instr.op == "SKIP" and (self.in_shift_reg >> instr.args[0]) & 1 == instr.args[1]:
+                self.pc += 2
+            else:
+                self.pc += 1
             self.halted = self.pc >= len(self.program)
 
         self.trace.append(tuple(self.gpio))

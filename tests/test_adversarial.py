@@ -87,7 +87,7 @@ def test_every_word_decodes_or_is_rejected_deliberately():
 
 
 def test_valid_word_count_per_instruction():
-    """The claim, in numbers: 13,312 of 65,536 words mean something."""
+    """The claim, in numbers: 17,920 of 65,536 words mean something."""
     counts = {op: sum(1 for i in VALID.values() if i.op == op) for op in OPS}
     assert counts == {
         "NOP": 32,          # delay only
@@ -99,8 +99,9 @@ def test_valid_word_count_per_instruction():
         "JMP": 256 * 32,
         "CONFIG": 2 * 9 * 32,       # shift_dir 0 or 1 x side
         "WAIT": 4 * 2 * 9 * 32,     # pin x level x side
+        "SKIP": 8 * 2 * 9 * 32,     # bit x level x side
     }
-    assert len(VALID) == 13312
+    assert len(VALID) == 17920
 
 
 def test_words_wider_than_16_bits_are_rejected():
@@ -200,8 +201,14 @@ def checked_step(cpu):
         assert changed <= {"counter", "pc", "halted"}, f"hold cycle of {instr.op} changed {changed}"
         kind = "hold"
     if expected["counter"] == 0:
-        # Last cycle: the pc moves, JMP to its target and everything else to the next word.
-        expected["pc"] = instr.args[0] if instr.op == "JMP" else before["pc"] + 1
+        # Last cycle: the pc moves, JMP to its target, SKIP over the next word if its bit holds
+        # the level, everything else to the next word.
+        if instr.op == "JMP":
+            expected["pc"] = instr.args[0]
+        elif instr.op == "SKIP" and (before["in_shift_reg"] >> instr.args[0]) & 1 == instr.args[1]:
+            expected["pc"] = before["pc"] + 2
+        else:
+            expected["pc"] = before["pc"] + 1
         expected["halted"] = expected["pc"] >= len(cpu.program)
     assert after == expected, f"{kind} cycle of {to_asm(instr)}: {after} != {expected}"
     assert cpu.counter == expected["counter"]
@@ -459,6 +466,30 @@ def test_jmp_to_the_next_word_is_a_nop(delay):
         assert nop.trace == jmp.trace and state(nop) == state(jmp) and nop.cycle == jmp.cycle == delay + 3
 
 
+@pytest.mark.parametrize("delay", (0, 1, 5, DELAY_MAX))
+def test_skip_is_a_nop_when_it_falls_through_and_a_jmp_over_the_next_word_when_it_does_not(delay):
+    """`SKIP b, l [d]` at address 0 is `NOP [d]` when in_shift_reg[b] != l and
+    `JMP 2 [d]` when it is: same pins, state and cycles either way, from
+    any machine state, for every bit and level."""
+    tail = [encode(Instruction("SET", (3, 0)), ISA), encode(Instruction("SET", (2, 0)), ISA), 0x0000]
+    rng = random.Random(delay)
+    seen = set()
+    for bit in range(8):
+        for level in (0, 1):
+            for _ in range(4):
+                seed = rng.random()
+                skip = fresh(None, random.Random(seed), [encode(Instruction("SKIP", (bit, level), delay), ISA)] + tail)
+                holds = (skip.in_shift_reg >> bit) & 1 == level
+                twin = Instruction("JMP", (2,), delay) if holds else Instruction("NOP", (), delay)
+                ref = fresh(None, random.Random(seed), [encode(twin, ISA)] + tail)
+                assert state(skip) == state(ref)
+                skip.run()
+                ref.run()
+                assert skip.trace == ref.trace and state(skip) == state(ref) and skip.cycle == ref.cycle
+                seen.add(holds)
+    assert seen == {True, False}
+
+
 def test_delays_add_up():
     """`NOP [a]; NOP [b]` is `NOP [a + b + 1]`, and a delayed SET holds like a SET then NOPs."""
     for a, b in ((0, 0), (0, 5), (3, 4), (15, 15)):
@@ -517,7 +548,7 @@ def test_shift_out_and_shift_in_never_see_each_others_register():
                 assert cpu.shift_reg == before["shift_reg"] >> 1
             if op == "SHIFT_OUT" and cpu.shift_dir == 1:
                 assert cpu.shift_reg == (before["shift_reg"] << 1) & 0xFF
-            if op in ("SET", "NOP", "CONFIG", "JMP", "WAIT"):
+            if op in ("SET", "NOP", "CONFIG", "JMP", "WAIT", "SKIP"):
                 assert (cpu.shift_reg, cpu.in_shift_reg) == (before["shift_reg"], before["in_shift_reg"])
 
 
@@ -542,13 +573,14 @@ def control_trace(program, fifo_seed, pin_seed, cycles=400):
 
 
 @pytest.mark.parametrize("seed", range(100))
-def test_only_wait_lets_an_input_reach_the_pc_the_counter_or_a_pin(seed):
-    """Without a WAIT, the same FIFO traffic under any two input histories
-    gives the same pc, counter, stalls and output pins, cycle for cycle: an
-    input reaches in_shift_reg and the RX FIFO, nothing else. A WAIT is the
-    one instruction that lets an input hold the machine."""
+def test_only_wait_and_skip_let_an_input_reach_the_pc_the_counter_or_a_pin(seed):
+    """Without a WAIT or a SKIP, the same FIFO traffic under any two input
+    histories gives the same pc, counter, stalls and output pins, cycle for
+    cycle: an input reaches in_shift_reg and the RX FIFO, nothing else. A
+    WAIT lets an input hold the machine; a SKIP lets a sampled input, from
+    the register, move the pc."""
     rng = random.Random(seed)
-    program = [w for w in random_program(rng) if VALID[w].op != "WAIT"] or [0x0000]
+    program = [w for w in random_program(rng) if VALID[w].op not in ("WAIT", "SKIP")] or [0x0000]
     assert control_trace(program, seed, seed + 1) == control_trace(program, seed, seed + 2)
     pin, level = rng.randrange(4), rng.randrange(2)
     held, free = (CPU([encode(Instruction("WAIT", (pin, level), 0), ISA)] + program) for _ in range(2))
@@ -556,3 +588,10 @@ def test_only_wait_lets_an_input_reach_the_pc_the_counter_or_a_pin(seed):
     held.step()
     free.step()
     assert held.stalled and not free.stalled
+    sample = [encode(Instruction("SHIFT_IN", (pin,), 0), ISA), encode(Instruction("SKIP", (7, level), 0), ISA)]
+    over, through = (CPU(sample + program) for _ in range(2))  # LSB first: the sample lands in bit 7
+    over.gpio_in[pin], through.gpio_in[pin] = level, 1 - level
+    for cpu in (over, through):
+        cpu.step()
+        cpu.step()
+    assert (over.pc, through.pc) == (3, 2)

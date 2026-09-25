@@ -1,6 +1,6 @@
 # core
 
-A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay, four output pins `gpio[3:0]`, each push-pull or open-drain, four input pins `gpio_in[3:0]`, an 8-bit output shift register fed by a TX FIFO, an 8-bit input shift register drained into an RX FIFO, a wait on an input level, and two pieces of configuration, `shift_dir` and `open_drain`. Nine mnemonics in six opcodes, two free. The encoding is in `isa.yaml`.
+A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay, four output pins `gpio[3:0]`, each push-pull or open-drain, four input pins `gpio_in[3:0]`, an 8-bit output shift register fed by a TX FIFO, an 8-bit input shift register drained into an RX FIFO, a wait on an input level, a skip on a bit of the input shift register, and two pieces of configuration, `shift_dir` and `open_drain`. Ten mnemonics in seven opcodes, one free. The encoding is in `isa.yaml`.
 
 | instruction | does |
 |---|---|
@@ -11,6 +11,7 @@ A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay
 | `PULL [d]` | output shift register <- next TX FIFO byte; stalls while the FIFO is empty |
 | `PUSH [d]` | RX FIFO <- input shift register; stalls while the FIFO is full |
 | `WAIT pin, level [d]` | stalls while gpio_in[pin] != level, a level not an edge |
+| `SKIP bit, level [d]` | steps over the next word if in_shift_reg[bit] == level: pc <- pc + 2 |
 | `JMP label [d]` | continue at label |
 | `CONFIG shift_dir, 0 or 1 [d]` | LSB first (reset) or MSB first, for both shift registers |
 

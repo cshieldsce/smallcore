@@ -47,6 +47,10 @@ def isa():
     (Instruction("WAIT", (0, 0), 11), 0xAB00),  # 101 01011 00000000  the UART start bit wait
     (Instruction("WAIT", (1, 1), 3, side=(2, 0)), 0xA3C5),  # 101 00011 11000101  release, and drop gpio[2] on that edge
     (Instruction("WAIT", (2, 0), 31, side=(0, 1)), 0xBF98),  # 101 11111 10011000
+    (Instruction("SKIP", (0, 0), 0), 0xC000),  # 110 00000 00000000  bit in operand[3:1], level in operand[0]
+    (Instruction("SKIP", (7, 1), 0), 0xC00F),  # 110 00000 00001111
+    (Instruction("SKIP", (0, 0), 3, side=(1, 0)), 0xC3A0),  # 110 00011 10100000  decide, and drop gpio[1] on the same edge
+    (Instruction("SKIP", (5, 1), 31, side=(3, 1)), 0xDFFB),  # 110 11111 11111011
 ])
 def test_encoding(isa, instr, word):
     assert encode(instr, isa) == word
@@ -57,6 +61,8 @@ def test_encoding(isa, instr, word):
                                   "SET 0, 1 [7", "LOAD 0x55",
                                   "WAIT", "WAIT 1", "WAIT 4, 0", "WAIT 0, 2", "WAIT 0, 0, 1", "WAIT 0, 0, 4, 1",
                                   "WAIT 0, 0, 1, 2", "WAIT 0, 0, 1, 0, 1", "WAIT_PIN 0, 0",
+                                  "SKIP", "SKIP 0", "SKIP 8, 0", "SKIP 0, 2", "SKIP 0, 0, 1", "SKIP 0, 0, 4, 0",
+                                  "SKIP 0, 0, 1, 2", "SKIP 0, 0, 1, 0, 1", "SKIP_IF 0, 0",
                                   "SHIFT_OUT 1", "SHIFT_OUT 0, 1", "SHIFT_OUT 4, 0", "SHIFT_OUT 1, 2",
                                   "SHIFT_OUT 1, 0, 1", "SET 1, 0, 1", "PULL 1", "PULL 4, 0", "PULL 1, 2", "PULL 1, 0, 1",
                                   "NOP 1", "NOP 1, 0", "JMP 0, 1, 0", "JMP 0, 1", "CONFIG shift_dir, 1, 4, 0",
@@ -109,8 +115,8 @@ def test_pull_and_push_are_one_opcode_with_a_push_bit(isa):
     assert assemble("PULL 2, 0 [3]")[0] ^ assemble("PUSH 2, 0 [3]")[0] == 0b1
 
 
-def test_two_opcodes_are_free(isa):
-    assert sorted({spec["opcode"] for spec in isa["instructions"].values()}) == [0b000, 0b001, 0b010, 0b011, 0b100, 0b101]
+def test_one_opcode_is_free(isa):
+    assert sorted({spec["opcode"] for spec in isa["instructions"].values()}) == [0b000, 0b001, 0b010, 0b011, 0b100, 0b101, 0b110]
 
 
 def test_shift_out_and_shift_in_are_one_opcode_with_an_in_bit(isa):
@@ -136,11 +142,11 @@ def test_the_side_effect_is_one_field_shared_by_every_instruction_but_jmp(isa):
     assert isa["instructions"]["SET"]["select"] == {"name": "side", "lsb": 7, "bits": 1, "value": 1}
     allows = {op: bool(spec.get("side_effect")) for op, spec in isa["instructions"].items()}
     assert allows == {"NOP": False, "SET": False, "SHIFT_OUT": True, "SHIFT_IN": True,
-                      "PULL": True, "PUSH": True, "WAIT": True, "JMP": False, "CONFIG": True}
+                      "PULL": True, "PUSH": True, "WAIT": True, "SKIP": True, "JMP": False, "CONFIG": True}
     assert assemble("PULL 2, 0 [3]") == [0x43C0]
     assert assemble("CONFIG shift_dir, 1, 1, 0") == [0x80A1]
     for line in ("SET 3, 1", "SHIFT_OUT 3, 1", "SHIFT_IN 0, 3, 1", "PULL 3, 1", "WAIT 0, 0, 3, 1",
-                 "CONFIG shift_dir, 0, 3, 1"):
+                 "SKIP 0, 0, 3, 1", "CONFIG shift_dir, 0, 3, 1"):
         assert assemble(line)[0] & 0xF0 == 0xF0, line
 
 
@@ -155,6 +161,21 @@ def test_wait_takes_an_input_pin_and_a_level_then_an_optional_side_effect(isa):
     assert pin == next(o for o in isa["instructions"]["SHIFT_IN"]["operands"] if o["name"] == "pin")
     with pytest.raises(ValueError, match="not used"):
         decode(0xA002, isa)  # operand[1] is unused
+
+
+def test_skip_takes_a_register_bit_and_a_level_then_an_optional_side_effect(isa):
+    """SKIP's level sits where WAIT's does, operand[0]; the bit it tests fills
+    operand[3:1], so every own bit is used and there is no unused bit to
+    reject."""
+    assert assemble("SKIP 0, 0") == [0xC000]
+    assert assemble("SKIP 3, 1, 2, 0 [3]") == assemble("skip 3,1,2,0 [3]") == [0xC3C7]
+    assert decode(0xC3C7, isa) == Instruction("SKIP", (3, 1), 3, side=(2, 0))
+    assert decode(0xC00F, isa) == Instruction("SKIP", (7, 1), 0)
+    bit, level = (next(o for o in isa["instructions"]["SKIP"]["operands"] if o["name"] == n) for n in ("bit", "level"))
+    assert (bit["lsb"], bit["bits"]) == (1, 3)
+    assert level == next(o for o in isa["instructions"]["WAIT"]["operands"] if o["name"] == "level")
+    with pytest.raises(ValueError, match="no side flag|not used"):
+        decode(0xC010, isa)  # the side value without the flag
 
 
 def test_config_takes_a_field_by_name_or_number_then_a_value():
