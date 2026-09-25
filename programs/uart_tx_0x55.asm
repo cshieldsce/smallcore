@@ -1,8 +1,6 @@
-# UART 8N1 transmit of 0x55 at 8 CPU cycles per bit. TX is gpio 0.
-#
-# Each bit is one SET of pin 0 with a delay of 7: 1 + 7 = 8 cycles.
-# 0x55 = 0b01010101, sent LSB first: 1 0 1 0 1 0 1 0
-# The program ends after the stop bit, which halts the CPU with the line high.
+# UART 8N1, 0x55 bit-banged with SET, 8 cycles per bit. TX is gpio 0.
+# 0x55 = 0b01010101, LSB first: 1 0 1 0 1 0 1 0. Halts after the stop bit
+# with the line high.
 
         SET 0, 1 [7]   # idle (line high)
         SET 0, 0 [7]   # start bit

@@ -1,25 +1,13 @@
-# SPI mode 0 master full-duplex transfer of one byte, LSB first, 8 CPU cycles per bit.
-#
-# Pins: gpio 0 = MOSI (SHIFT_OUT always drives gpio 0), gpio 1 = SCLK, gpio 2 = CS,
-# gpio_in 3 = MISO.
-# Mode 0: SCLK idles low, both sides change their data line while SCLK is
-# low and sample the other's on the rising edge. CS is active low and frames
-# the eight clocks.
-#
-# This is spi_tx_lsb.asm with every `SET 1, 1 [3]` replaced by
-# `SHIFT_IN 3, 1, 1 [3]`: the same rising edge of SCLK now also samples MISO
-# into the input shift register. Still two instructions and 8 cycles per bit,
-# 4 low, 4 high. After the frame in_shift_reg holds the slave's byte in
-# normal order: with shift_dir 0 each sample lands in bit 7 and the register
-# shifts right, so the first bit sampled ends up in bit 0. PUSH then moves
-# it into the RX FIFO on the edge that raises CS: the byte leaves the core
-# as the frame ends, and receiving still costs no extra instruction.
-# spi_duplex_msb.asm is this same program with CONFIG shift_dir, 1.
+# SPI mode 0 master full duplex, one byte each way, LSB first, 8 cycles per bit.
+# gpio 0 = MOSI, 1 = SCLK, 2 = CS, gpio_in 3 = MISO.
+# spi_tx_lsb.asm with SHIFT_IN 3, 1, 1 raising SCLK and sampling MISO on the same
+# edge instead of SET 1, 1, and PUSH 2, 1 moving the byte to the RX FIFO on
+# the edge that raises CS. Receiving costs no instructions and no cycles.
 
-        CONFIG shift_dir, 0 # LSB first (also the reset value), for SHIFT_OUT and SHIFT_IN alike
+        CONFIG shift_dir, 0 # LSB first, for both shift registers
         SET 1, 0            # SCLK idle low
-        PULL 2, 0 [3]       # shift_reg = byte to send (stalls here while the FIFO is empty)
-                            # and CS low on the edge the byte arrives: start of frame
+        PULL 2, 0 [3]       # shift_reg = the byte (stalls while the FIFO is empty),
+                            # CS low on the edge it arrives: start of frame
 
         SHIFT_OUT 1, 0 [3]      # bit 0: MOSI = next bit, SCLK low
         SHIFT_IN 3, 1, 1 [3]    #        SCLK high, both sides sample
@@ -39,4 +27,4 @@
         SHIFT_IN 3, 1, 1 [3]
 
         SET 1, 0 [3]        # clock back to idle low
-        PUSH 2, 1           # rx_fifo <- in_shift_reg, and CS high on the same edge: end of frame
+        PUSH 2, 1           # rx_fifo <- in_shift_reg, CS high: end of frame

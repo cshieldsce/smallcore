@@ -2,11 +2,7 @@
 transmit-only and the full-duplex programs. The `run` helper is the only place
 that knows which pin is which; every check watches the pins like a slave
 would: CS frames the transfer, MOSI is sampled on each rising edge of SCLK,
-and a slave model drives MISO for the master to sample on that same edge. The
-programs of one pair are the same words apart from their CONFIG shift_dir value, so the
-slave must see the same byte in opposite order; the duplex programs are the
-transmit programs with SHIFT_IN raising the clock instead of SET and PUSH
-raising CS instead of SET, so the received byte is in the RX FIFO."""
+and a slave model drives MISO for the master to sample on that same edge."""
 
 from pathlib import Path
 from typing import NamedTuple

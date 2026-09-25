@@ -1,11 +1,5 @@
-"""Mini PIO-style CPU that runs 16-bit NOP / SET / SHIFT_OUT / SHIFT_IN / PULL / JMP / CONFIG instructions one clock
-cycle at a time, driving gpio[3:0] and sampling gpio_in[3:0]. SHIFT_OUT always drives gpio[0], SHIFT_IN samples the pin it
-names into the input shift register, PULL fills the output shift register from the TX FIFO, PUSH empties the input shift
-register into the RX FIFO, and every instruction but JMP can drive one more pin as a GPIO side effect through the one
-pin-write port; SET is that side effect on its own (opcode 000, NOP, with the side flag set). SHIFT_OUT and SHIFT_IN are
-one opcode, SHIFT, told apart by an in/out bit in the operand, and PULL and PUSH are one opcode, FIFO, told apart by a
-push bit. CONFIG field, value writes the configuration registers, so far only shift_dir: which end of the shift registers
-is the wire."""
+"""Simulator and assembler for the ISA in isa.yaml: a PIO-style CPU stepped one clock cycle at a time, driving
+gpio[3:0] and sampling gpio_in[3:0]. isa.yaml is the reference for what each instruction does."""
 
 import re
 import sys
@@ -178,17 +172,10 @@ def decode(word, isa):
 def assemble(source, isa=None):
     """Turn assembly text into a list of instruction words.
 
-    Labels (`loop:`, alone or before an instruction) name the address of the
-    next instruction and can stand in for any operand, e.g. `JMP loop`. They
-    are purely an assembler feature: the words only contain addresses.
-
-    Operands written after an instruction's own are its GPIO side effect,
-    e.g. `SHIFT_OUT 1, 0 [3]` shifts and drives gpio[1] low, `SHIFT_IN 3, 1, 1 [3]`
-    samples gpio_in[3] and drives gpio[1] high, and `PULL 2, 0` pulls a byte
-    and drives gpio[2] low. `SET pin, value` is the side effect by itself.
-
-    CONFIG takes its field by name or number: `CONFIG shift_dir, 1` is
-    `CONFIG 0, 1`. Like labels, the names never reach the words.
+    `label:` names the address of the next instruction, for `JMP label`.
+    Operands after an instruction's own are its GPIO side effect: `SHIFT_OUT
+    1, 0 [3]`. CONFIG takes its field by name: `CONFIG shift_dir, 1`. Labels
+    and names never reach the words.
     """
     isa = isa or load_isa()
     labels = {}

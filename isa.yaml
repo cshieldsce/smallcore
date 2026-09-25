@@ -1,72 +1,41 @@
-# Mini ISA.
-#
-# Four output pins gpio[3:0] and four input pins gpio_in[3:0], one 8-bit
-# output shift register fed from a TX FIFO, one 8-bit input shift register
-# filled from a pin and emptied into an RX FIFO, 16-bit instructions:
+# Mini ISA: four output pins gpio[3:0], four input pins gpio_in[3:0], an 8-bit
+# output shift register fed from a TX FIFO, an 8-bit input shift register
+# emptied into an RX FIFO, one configuration bit (shift_dir), 16-bit words:
 #
 #   15 14 13 | 12 11 10 9 8 | 7 6 5 4 | 3 2 1 0
 #    opcode  |     delay    |  side   |  own
 #
-# Every instruction can take an optional delay, written `[n]` after its
-# operands, which holds for n extra cycles before the next instruction runs.
-# E.g. `SET 0, 1 [7]` takes 8 cycles.
+# delay: `[n]` after the operands holds for n extra cycles, `SET 0, 1 [7]`
+#        takes 8. Every instruction takes 1 + delay cycles, after any stall.
+# side:  the GPIO side effect, `pin, value` written after the instruction's
+#        own operands: gpio[pin] <- value on the instruction's first cycle,
+#        the same edge as the operation itself. Bit 7 is the flag, 6:5 the
+#        pin, 4 the value. Every opcode but JMP allows it; SET is nothing
+#        but it (opcode 000 with the flag, NOP is the same opcode without).
+#        One pin-write port serves them all.
+# own:   the instruction's own operands (`lsb` counts from operand bit 0).
+#        A `select` bit here lets two mnemonics share an opcode: SHIFT_OUT /
+#        SHIFT_IN (bit 1), PULL / PUSH (bit 0). Unused bits must be 0.
 #
-# The operand field has two halves. The high nibble is the GPIO side effect,
-# the same for every instruction that allows one: a flag bit, a pin and a
-# value, written as extra `pin, value` operands after the instruction's own,
-# that drive one more pin on the same edge as the primary operation. The low
-# nibble is the instruction's own operands (`lsb` counts from operand bit 0).
-# Operand bits no operand uses must be 0. JMP is the exception: its target
-# needs all eight bits, so it has no side effect.
-#
-# SET is the degenerate case: opcode 000 does nothing of its own, so with the
-# side effect it is `SET pin, value` and without it plain `NOP`. One pin-write
-# port, enabled by operand[7] on every opcode but JMP, serves SET and every
-# side effect alike. Experiment: the side effect started on SHIFT_OUT alone,
-# then SHIFT_IN, and became universal once SET turned out to be the same write.
-#
-# Two instructions may share an opcode and be told apart by a `select` bit in
-# the operand field: SHIFT_OUT and SHIFT_IN are both opcode 001, SHIFT, with
-# operand bit 1 saying which way the data goes (0 = out, 1 = in). They already
-# shared shift_dir, the delay and the side effect; the decoder sees one SHIFT
-# opcode with an in/out bit and drives one of two shift enables from it. NOP
-# and SET are opcode 000 selected by the side flag itself, and PULL and PUSH
-# are opcode 010, FIFO, with operand bit 0 saying which way the byte goes
-# (0 = TX FIFO -> shift_reg, 1 = in_shift_reg -> RX FIFO), each stalling on
-# its own FIFO's empty or full flag. Experiment: the first opcode
-# compressions; opcodes 101, 110 and 111 are free.
-#
-# One bit of persistent configuration, shift_dir, picks which end of the
-# shift registers the wire is: 0 = right / LSB first (reset value), 1 = left
-# / MSB first. SHIFT_OUT sends that end of the output register, SHIFT_IN
-# samples into the opposite end of the input register and shifts towards the
-# wire end, so eight samples rebuild the byte in normal order either way.
-# `CONFIG shift_dir, d` sets it and it holds until the next CONFIG, so a
-# program states its bit order once per protocol, not once per bit. CONFIG
-# takes a field number and a value, and `config` below names the fields:
-# shift_dir is field 0 and so far the only one, so a shift pin, an input pin
-# or an idle level can join later without costing an opcode each.
-# Experiment: the first piece of protocol configuration.
-#
+# shift_dir picks which end of both shift registers is the wire: 0 = bit 0,
+# LSB first (reset), 1 = bit 7, MSB first. SHIFT_OUT sends that end and
+# shifts away from it, SHIFT_IN samples into the opposite end and shifts
+# towards it, so eight of either move a byte in normal order. `CONFIG
+# shift_dir, d` sets it once per protocol.
 
 word_bits: 16
 gpio_out: 4
 gpio_in: 4
 
 config:   # CONFIG field, value: the configuration registers, by field number
-  shift_dir: {field: 0, bits: 1}   # 0 = LSB first (reset), 1 = MSB first
+  shift_dir: {field: 0, bits: 1}
 
 fields:
   opcode:  {lsb: 13, bits: 3}
-  delay:   {lsb: 8,  bits: 5}   # 0..31, default 0
+  delay:   {lsb: 8,  bits: 5}
   operand: {lsb: 0,  bits: 8}
 
-# The GPIO side effect, one shape for every instruction that lists
-# `side_effect: true`: `OP own..., pin, value [d]` also drives gpio[pin] to
-# `value` on the instruction's first cycle. SET's own operands sit in these
-# same bits, so every pin write decodes from operand[6:5] and operand[4] and
-# is enabled by operand[7].
-side_effect:
+side_effect:   # one shape for every instruction with `side_effect: true`
   flag: {lsb: 7, bits: 1}
   operands:
     - {name: pin,   lsb: 5, bits: 2}
@@ -74,110 +43,69 @@ side_effect:
 
 instructions:
   NOP:
-    opcode: 0b000   # side flag 0
+    opcode: 0b000
     select: {name: side, lsb: 7, bits: 1, value: 0}
-    description: Do nothing for 1 + delay cycles. Pins and registers unchanged.
-    cycles: 1 + delay
+    description: Nothing changes.
     operands: []
 
   SET:
-    opcode: 0b000   # side flag 1: NOP plus the side effect, spelt as its own instruction
+    opcode: 0b000
     select: {name: side, lsb: 7, bits: 1, value: 1}
-    description: Drive gpio[pin] to `value`. The other pins are unchanged.
-    cycles: 1 + delay
+    description: gpio[pin] <- value, the side effect alone. Its operands are the side effect's bits.
     operands:
       - {name: pin,   lsb: 5, bits: 2}
       - {name: value, lsb: 4, bits: 1}
 
   SHIFT_OUT:
-    opcode: 0b001   # SHIFT with in = 0
+    opcode: 0b001
     select: {name: in, lsb: 1, bits: 1, value: 0}
     description: >
-      On the first cycle, drive gpio[0] to the next bit of the shift register
-      and shift that bit out (zero fill): with shift_dir 0 the next bit is
-      shift_reg[0] and the register shifts right, with shift_dir 1 it is
-      shift_reg[7] and the register shifts left. Hold for `delay` extra
-      cycles. Other pins are unchanged. Eight SHIFT_OUTs after a PULL send
-      the byte LSB first (shift_dir 0) or MSB first (shift_dir 1).
-      `SHIFT_OUT pin, value [d]` also drives gpio[pin] to `value` on that
-      same first cycle, e.g. drop a clock while the next bit lands on gpio[0].
-      `pin` is 1..3: gpio[0] is the shift pin.
-    cycles: 1 + delay
+      gpio[0] <- the wire end of shift_reg, then shift (zero fill). The side
+      pin is 1..3: gpio[0] is the shift pin.
     operands: []
     side_effect: true
 
   SHIFT_IN:
-    opcode: 0b001   # SHIFT with in = 1
+    opcode: 0b001
     select: {name: in, lsb: 1, bits: 1, value: 1}
     description: >
-      On the first cycle, sample gpio_in[pin] into the 8-bit input shift
-      register: with shift_dir 0 the register shifts right and the sample
-      fills in_shift_reg[7], with shift_dir 1 it shifts left and the sample
-      fills in_shift_reg[0]. The sample is the level the pin holds as that
-      cycle executes, i.e. what the outside world drove before the clock
-      edge: a side effect on the same edge cannot feed back into it. Hold for
-      `delay` extra cycles; nothing is sampled again.
-      The output pins and output shift register are unchanged. Eight SHIFT_INs
-      rebuild a byte sent LSB first (shift_dir 0) or MSB first (shift_dir 1).
-      `SHIFT_IN pin, out_pin, value [d]` also drives gpio[out_pin] to `value`
-      on that same first cycle, e.g. raise a clock as the bit is sampled.
-      `out_pin` is 0..3: SHIFT_IN drives no pin of its own.
-    cycles: 1 + delay
+      Sample gpio_in[pin] into the end of in_shift_reg opposite the wire,
+      then shift towards it. The sample is the level the pin holds as the
+      cycle executes: a side effect on the same edge cannot feed back into it.
     operands:
-      - {name: pin, lsb: 2, bits: 2}   # bit 1 is the select
+      - {name: pin, lsb: 2, bits: 2}
     side_effect: true
 
   PULL:
-    opcode: 0b010   # FIFO with push = 0
+    opcode: 0b010
     select: {name: push, lsb: 0, bits: 1, value: 0}
     description: >
-      Move the next byte out of the TX FIFO into the 8-bit shift register.
-      The pins are unchanged. If the FIFO is empty, block (see above): the
-      delay starts counting only once the byte has been pulled.
-      `PULL pin, value [d]` also drives gpio[pin] to `value` on the cycle the
-      byte is pulled, i.e. after any stall: e.g. drop CS, or start a UART
-      frame, the moment there is a byte to send.
-    cycles: 1 + delay
+      shift_reg <- next TX FIFO byte. Stalls while the FIFO is empty; the
+      side effect and the delay wait with it.
     operands: []
     side_effect: true
 
   PUSH:
-    opcode: 0b010   # FIFO with push = 1
+    opcode: 0b010
     select: {name: push, lsb: 0, bits: 1, value: 1}
     description: >
-      Append the 8-bit input shift register to the RX FIFO; the register
-      keeps its value. The mirror of PULL: if the FIFO is full, block until
-      the outside world takes a byte, and the delay starts counting only once
-      the byte has been pushed. The pins are unchanged.
-      `PUSH pin, value [d]` also drives gpio[pin] to `value` on the cycle the
-      byte is pushed, e.g. raise CS as the received byte leaves the core.
-    cycles: 1 + delay
+      Append in_shift_reg to the RX FIFO; the register keeps its value.
+      Stalls while the FIFO is full; the side effect and the delay wait.
     operands: []
     side_effect: true
 
   JMP:
     opcode: 0b011
-    description: >
-      Continue at program address `target` instead of the next instruction.
-      The pins and shift register are unchanged. The jump takes effect after
-      the delay, like PC + 1 does for every other instruction. No side
-      effect: the target takes the whole operand field.
-    cycles: 1 + delay
+    description: pc <- target after the delay. No side effect, the target takes the whole operand.
     operands:
       - {name: target, lsb: 0, bits: 8}
 
   CONFIG:
     opcode: 0b100
     description: >
-      Set configuration register `field` to `value`; the assembler takes the
-      field by name. Field 0 is shift_dir: 0 = LSB first (SHIFT_OUT sends
-      shift_reg[0] and shifts right), 1 = MSB first (sends shift_reg[7] and
-      shifts left). Every field resets to 0 and holds until the next CONFIG
-      of it. The pins and shift registers are unchanged. Fields 1..3 are
-      unassigned and a `value` wider than the field is an error.
-      `CONFIG field, value, pin, level [d]` also drives gpio[pin] to `level`.
-      Experiment: opcode and shape not final.
-    cycles: 1 + delay
+      config[field] <- value. The assembler takes the field by name
+      (`CONFIG shift_dir, 1`). Fields 1..3 are unassigned; a value wider
+      than the field is an error.
     operands:
       - {name: field, lsb: 2, bits: 2}
       - {name: value, lsb: 0, bits: 2}
