@@ -112,7 +112,7 @@ module core(
             end
 
             // pc 
-            if (pc_en AND is_nop_set) begin
+            if (pc_en && is_nop_set) begin
                 pc <= pc + 1;
             end
         end
