@@ -72,6 +72,7 @@ def rtl_state(dut):
         "pc": int(dut.pc.value),
         "counter": int(dut.delay_counter.value),
         "gpio": gpio_bits(dut.gpio_out.value),
+        "halted": bool(dut.halted.value),
     }
 
 
@@ -80,4 +81,5 @@ def model_state(cpu):
         "pc": cpu.pc,
         "counter": cpu.counter,
         "gpio": list(cpu.gpio),
+        "halted": cpu.halted,
     }

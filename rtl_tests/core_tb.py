@@ -3,15 +3,16 @@
 module, and `await` hands control back to the simulator until the trigger
 (a clock edge, a time step) happens.
 
-The core implements reset only, so that is all these check.
+The core runs NOP and its delay counter, so the tests check reset and then
+step the RTL and the model together, one cycle at a time, comparing state.
 """
 
 from pathlib import Path
 
 import cocotb
-from cocotb.triggers import ClockCycles, ReadOnly
+from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge
 
-from cpu import CPU, load_program  # sim/cpu.py, the golden model
+from cpu import CPU, assemble, load_program  # sim/cpu.py, the golden model
 from tb import Imem, drive_inputs, model_state, reset, rtl_state, start_clock
 
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
@@ -48,3 +49,31 @@ async def reset_matches_model(dut):
 
     assert rtl_state(dut) == model_state(cpu)
     assert int(dut.imem_word.value) == program[0]
+
+
+@cocotb.test()
+async def nop_timing_matches_model(dut):
+    """Step the RTL and the model one cycle at a time until the model halts;
+    the architectural state must match after every edge. NOP [3] exercises
+    the delay counter, and running off the end exercises halted."""
+    program = assemble("""
+        NOP
+        NOP [3]
+        NOP
+    """)
+    cpu = CPU(program)
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program))
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+    while not cpu.halted:
+        cpu.step()  # model: one architectural cycle
+        await RisingEdge(dut.clk)  # RTL: one hardware cycle
+        await ReadOnly()  # let the nonblocking assignments settle
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
