@@ -26,6 +26,7 @@ rtl/          the Verilog core (core.v), Verilog-2001
 rtl_tests/    cocotb benches for rtl/ under Verilator, checked against sim/cpu.py
 docs/         Mermaid diagrams (.mmd) and rendered .svg, see Docs below
 tools/        wavetrace.py (waveform helper), render_docs.py (docs/*.mmd -> .svg)
+tapeout/      janestreet/: Tiny Tapeout IHP CMOS5L packaging, 6x4 tiles; src/core.v is staged from rtl/ by make tapeout-sync
 build/        generated: test waveforms, caches (safe to delete)
 ```
 
@@ -83,5 +84,6 @@ From the big picture down to what the Verilog will look like:
 | `docs/core.svg` | datapath at register level, named as in the Verilog |
 | `docs/control.svg` | the control block: inputs, equations, counter, enables |
 | `docs/states.svg` | the same block as per-cycle states: Issue, Hold, Stall, Halt |
+| `docs/physical-results.md` | cells, area, utilization and timing per RTL milestone from the Tiny Tapeout CMOS5L flow in `tapeout/janestreet/` |
 
 Diagrams show only hardware that exists in `sim/cpu.py` and passes the tests.
