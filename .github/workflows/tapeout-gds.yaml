@@ -1,0 +1,59 @@
+# Tiny Tapeout IHP CMOS5L build of tapeout/janestreet/, manual only: Actions tab -> "tapeout gds" -> Run workflow.
+# Same jobs as the official ttihp-verilog-template (cmos5l branch). The Tiny Tapeout action expects info.yaml,
+# src/, docs/ and test/ at the repository root, so the first step copies the staging directory up.
+# The viewer job needs GitHub Pages enabled with source "GitHub Actions" (repo Settings -> Pages).
+name: tapeout gds
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gds:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: stage tapeout/janestreet at the repository root
+        run: |
+          diff -q rtl/core.v tapeout/janestreet/src/core.v   # fail if src/ drifted from rtl/: run make tapeout-sync
+          cp -r tapeout/janestreet/info.yaml tapeout/janestreet/src tapeout/janestreet/test tapeout/janestreet/LICENSE .
+          cp tapeout/janestreet/docs/info.md docs/
+
+      - name: Build GDS
+        uses: TinyTapeout/tt-gds-action@ihp-cmos5l
+        with:
+          pdk: ihp-sg13cmos5l
+
+  precheck:
+    needs: gds
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Run Tiny Tapeout Precheck
+        uses: TinyTapeout/tt-gds-action/precheck@ihp-cmos5l
+
+  gl_test:
+    needs: gds
+    runs-on: ubuntu-24.04
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: stage the testbench at the repository root
+        run: cp -r tapeout/janestreet/src tapeout/janestreet/test .
+
+      - name: GL test
+        uses: TinyTapeout/tt-gds-action/gl_test@ihp-cmos5l
+
+  viewer:
+    needs: gds
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write # to deploy to Pages
+      id-token: write # to verify the deployment originates from an appropriate source
+    steps:
+      - uses: TinyTapeout/tt-gds-action/viewer@ihp-cmos5l
