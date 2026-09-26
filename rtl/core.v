@@ -89,7 +89,7 @@ module core(
             (is_wait && (gpio_in[input_pin] != level))
         );
 
-    assign last = issue ? (delay == 0) : (delay_counter == 1);
+    assign last = issue ? (delay == 5'd0) : (delay_counter == 5'd1);
 
     always @(posedge clk) begin
         if (reset) begin            
@@ -97,6 +97,12 @@ module core(
             pc            <= 9'd0;
             delay_counter <= 5'd0;
             gpio_out      <= 4'b1111;
+        end
+        else if (issue && ~stall) begin
+            delay_counter = delay;
+        end
+        else if (delay_counter > 0) begin
+            delay_counter = delay_counter - 1; 
         end
     end
 
