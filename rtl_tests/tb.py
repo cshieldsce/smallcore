@@ -26,6 +26,16 @@ async def reset(dut, cycles=2):
     dut.reset.value = 0
 
 
+def drive_inputs(dut, program_words, tx_empty=0, rx_full=0, gpio_in=0):
+    """Drive every input besides clk, reset and imem_word so none is X. The
+    defaults are a non-blocking environment: nothing waits on a FIFO flag or a
+    pin. A WAIT or FIFO test passes its own values."""
+    dut.program_words.value = program_words
+    dut.tx_empty.value = tx_empty
+    dut.rx_full.value = rx_full
+    dut.gpio_in.value = gpio_in
+
+
 class Imem:
     """Combinational instruction memory: imem_word follows imem_addr in the
     same time step, like the model's `self.program[self.pc]`. A background task
@@ -69,5 +79,5 @@ def model_state(cpu):
     return {
         "pc": cpu.pc,
         "counter": cpu.counter,
-        "gpio": list(cpu.gpio_out),
+        "gpio": list(cpu.gpio),
     }

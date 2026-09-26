@@ -12,7 +12,7 @@ import cocotb
 from cocotb.triggers import ClockCycles, ReadOnly
 
 from cpu import CPU, load_program  # sim/cpu.py, the golden model
-from tb import Imem, model_state, reset, rtl_state, start_clock
+from tb import Imem, drive_inputs, model_state, reset, rtl_state, start_clock
 
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
 
@@ -21,6 +21,7 @@ PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
 async def reset_state(dut):
     """Hold reset over a few edges: pc and the counter clear, every pin high."""
     dut.imem_word.value = 0
+    drive_inputs(dut, program_words=0)
     start_clock(dut)
     dut.reset.value = 1
     await ClockCycles(dut.clk, 2)
@@ -39,6 +40,7 @@ async def reset_matches_model(dut):
     program = load_program(PROGRAMS / "uart_tx_0x55.asm")
     cpu = CPU(program)
     dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program))
     start_clock(dut)
     await reset(dut)
     Imem(dut, program)  # after reset: imem_addr is a known 0, not X, when Imem first reads it
