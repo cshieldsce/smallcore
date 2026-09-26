@@ -107,13 +107,13 @@ module core(
             if (issue && !stall) begin
                 delay_counter <= delay;
             end
-            else if (delay_counter > 0) begin
-                delay_counter <= delay_counter - 1; 
+            else if (delay_counter > 5'd0) begin
+                delay_counter <= delay_counter - 5'd1;
             end
 
             // pc 
             if (pc_en && is_nop_set) begin
-                pc <= pc + 1;
+                pc <= pc + 9'd1;
             end
         end
     end
