@@ -113,7 +113,7 @@ module core(
 
             // pc 
             if (pc_en && is_nop_set) begin
-                pc <= pc + 9'd1;
+                pc <= pc + 1;
             end
         end
     end
