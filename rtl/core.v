@@ -91,6 +91,10 @@ module core(
 
     assign last = issue ? (delay == 5'd0) : (delay_counter == 5'd1);
 
+    wire pc_en;
+
+    assign pc_en = last && !stall;
+
     always @(posedge clk) begin
         if (reset) begin            
             // Reset sets PC=0, Counter=0, GPIO=1111 
@@ -98,11 +102,19 @@ module core(
             delay_counter <= 5'd0;
             gpio_out      <= 4'b1111;
         end
-        else if (issue && ~stall) begin
-            delay_counter = delay;
-        end
-        else if (delay_counter > 0) begin
-            delay_counter = delay_counter - 1; 
+        else begin
+            // Counter
+            else if (issue && !stall) begin
+                delay_counter <= delay;
+            end
+            else if (delay_counter > 0) begin
+                delay_counter <= delay_counter - 1; 
+            end
+
+            // pc 
+            if (pc_en AND is_nop_set) begin
+                pc <= pc + 1;
+            end
         end
     end
 
