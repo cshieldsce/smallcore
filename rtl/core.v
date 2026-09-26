@@ -104,7 +104,7 @@ module core(
         end
         else begin
             // Counter
-            else if (issue && !stall) begin
+            if (issue && !stall) begin
                 delay_counter <= delay;
             end
             else if (delay_counter > 0) begin
