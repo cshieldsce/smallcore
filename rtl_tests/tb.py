@@ -77,6 +77,7 @@ def rtl_state(dut):
         "open_drain": gpio_bits(dut.open_drain.value),
         "gpio_oe": gpio_bits(dut.gpio_oe.value),
         "shift_reg": int(dut.shift_reg.value),
+        "in_shift_reg": int(dut.in_shift_reg.value),
     }
 
 
@@ -90,4 +91,5 @@ def model_state(cpu):
         "open_drain": list(cpu.open_drain),
         "gpio_oe": list(cpu.gpio_oe),
         "shift_reg": cpu.shift_reg,
+        "in_shift_reg": cpu.in_shift_reg,
     }

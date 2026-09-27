@@ -13,7 +13,7 @@ import cocotb
 from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge
 
 from cpu import CPU, assemble, load_program  # sim/cpu.py, the golden model
-from tb import Imem, drive_inputs, model_state, reset, rtl_state, start_clock
+from tb import Imem, drive_inputs, gpio_bits, model_state, reset, rtl_state, start_clock
 
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
 
@@ -163,6 +163,41 @@ async def shift_out_matches_model(dut):
     seed = 0b10110001
     cpu.shift_reg = seed
     dut.shift_reg.value = seed
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+    while not cpu.halted:
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+
+@cocotb.test()
+async def shift_in_matches_model(dut):
+    """SHIFT_IN against the model, cycle by cycle, with gpio_in held at 1010 so
+    each pin reads differently. With shift_dir 0 each sample enters at bit 7
+    and shifts right; the [2] holds everything through the delay. CONFIG
+    shift_dir, 1 moves the entry to bit 0, so the last two shift left. Running
+    off the end checks halted."""
+    program = assemble("""
+        SHIFT_IN 1
+        SHIFT_IN 0
+        SHIFT_IN 3 [2]
+        CONFIG shift_dir, 1
+        SHIFT_IN 2
+        SHIFT_IN 1
+    """)
+    gpio_in = 0b1010
+    cpu = CPU(program)
+    cpu.gpio_in = gpio_bits(gpio_in)  # CPU(gpio_in=) sets every pin to one level; this is per pin
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program), gpio_in=gpio_in)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
     await ReadOnly()
     assert rtl_state(dut) == model_state(cpu)
 
