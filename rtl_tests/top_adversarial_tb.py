@@ -548,6 +548,19 @@ async def random_programs_under_host_pressure_match_the_model(dut):
     assert pushed > 0 and popped > 0 and 0 < halted < SEEDS, (pushed, popped, halted)
 
 
+async def matched(dut, imem, program, tx=(), gpio_in=0, limit=400):
+    """Run `program` to its halt in lockstep with the model, the host idle and
+    the pins held at `gpio_in`, and return top_state after each edge."""
+    await begin(dut, imem, program, tx, gpio_in)
+    ls = Lockstep(dut, CPU(program, tx_data=tx, rx_depth=DEPTH))
+    ls.pins(gpio_in)
+    states = []
+    while not ls.cpu.halted:
+        states.append(await ls.edge())
+        assert len(states) <= limit, f"still running after {limit} clocks"
+    return states
+
+
 # --- Stalls against delays ---------------------------------------------------------
 
 # A word that stalls, with a side effect and a delay, and what releases it.
@@ -712,3 +725,44 @@ async def a_skip_right_after_a_sample_decides_on_that_sample(dut):
             state = await ls.edge()
         assert state["in_shift_reg"] == (b << 7) | (a << 6), (a, b)
         assert state["gpio"] == [a, 1, b, 0], (a, b)  # each SET skipped on its own sample
+
+
+@cocotb.test()
+async def a_branch_moves_the_pc_on_its_last_edge_only(dut):
+    """For d in 0, 1, 5 and 31. `JMP 2 [d]` over a SET keeps the pc on the
+    JMP through the delay and the SET never runs. `JMP 1 [d]` to the next
+    word runs edge for edge like `NOP [d]`. After a SHIFT_IN that put a 1 in
+    bit 7, `SKIP 7, 1 [d]` runs like `JMP 3 [d]`; after a 0, like `NOP [d]`.
+    `JMP 0 [d]` at address 0 loops with period d + 1 and never halts. A JMP
+    to the halt address halts after its delay, a SKIP over the last word
+    halts and that word never runs."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    tail = "SET 3, 0\nSET 2, 0"
+    for d in (0, 1, 5, DELAY_MAX):
+        states = await matched(dut, imem, assemble(f"JMP 2 [{d}]\n{tail}"))
+        assert [s["pc"] for s in states] == [0] * d + [2, 3], d
+        assert all(s["gpio"][3] == 1 for s in states) and states[-1]["gpio"] == [1, 1, 0, 1], d
+
+        nop = await matched(dut, imem, assemble(f"NOP [{d}]\n{tail}"))
+        assert await matched(dut, imem, assemble(f"JMP 1 [{d}]\n{tail}")) == nop, d
+
+        one = await matched(dut, imem, assemble(f"SHIFT_IN 0\nSKIP 7, 1 [{d}]\n{tail}"), gpio_in=1)
+        assert one == await matched(dut, imem, assemble(f"SHIFT_IN 0\nJMP 3 [{d}]\n{tail}"), gpio_in=1), d
+        assert one[-1]["gpio"] == [1, 1, 0, 1] and len(one) == d + 3, d
+        zero = await matched(dut, imem, assemble(f"SHIFT_IN 0\nSKIP 7, 1 [{d}]\n{tail}"), gpio_in=0)
+        assert zero == await matched(dut, imem, assemble(f"SHIFT_IN 0\nNOP [{d}]\n{tail}"), gpio_in=0), d
+        assert zero[-1]["gpio"] == [1, 1, 0, 0] and len(zero) == d + 4, d
+
+        program = assemble(f"JMP 0 [{d}]\nSET 3, 0")
+        await begin(dut, imem, program)
+        ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+        for _ in range(3 * (d + 1)):
+            state = await ls.edge()
+            assert (state["pc"], state["gpio"][3], state["halted"]) == (0, 1, False), d
+            assert state["counter"] == d - (ls.edges - 1) % (d + 1), (d, ls.edges)
+
+        states = await matched(dut, imem, assemble(f"JMP 1 [{d}]"))
+        assert len(states) == d + 1 and states[-1]["pc"] == 1, d
+        states = await matched(dut, imem, assemble(f"SHIFT_IN 0\nSKIP 7, 1 [{d}]\nSET 3, 0"), gpio_in=1)
+        assert len(states) == d + 2 and (states[-1]["pc"], states[-1]["gpio"][3]) == (3, 1), d
