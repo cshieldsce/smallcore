@@ -766,3 +766,58 @@ async def a_branch_moves_the_pc_on_its_last_edge_only(dut):
         assert len(states) == d + 1 and states[-1]["pc"] == 1, d
         states = await matched(dut, imem, assemble(f"SHIFT_IN 0\nSKIP 7, 1 [{d}]\nSET 3, 0"), gpio_in=1)
         assert len(states) == d + 2 and (states[-1]["pc"], states[-1]["gpio"][3]) == (3, 1), d
+
+
+# --- Configuration next to the pins ---------------------------------------------------
+
+
+def oe(gpio, open_drain):
+    return [0 if od and level else 1 for od, level in zip(open_drain, gpio)]
+
+
+@cocotb.test()
+async def a_config_next_to_a_pin_write_settles_the_pad_on_that_edge(dut):
+    """gpio_oe follows open_drain and the level together, on the edge either
+    lands. Each CONFIG mask bit reaches its own pin and no other. `CONFIG
+    open_drain01, 1, 0, 1` makes pin 0 open-drain and writes it 1 on one
+    edge: released at once; with `0, 0` it drives its 0. A 0 then open-drain
+    keeps driving, a 1 then releases, push-pull again while 1 drives high,
+    and push-pull with a 0 written on the same edge drives low at once. A
+    shift_dir change with a side effect between two SHIFT_OUTs, or two
+    SHIFT_INs, turns the byte around mid-way: the bits then come from, or
+    go to, the other end."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    for pin in range(4):
+        field, mask = ("open_drain01", "open_drain23")[pin // 2], 1 << (pin % 2)
+        states = await matched(dut, imem, assemble(f"CONFIG {field}, {mask}"))
+        assert states[-1]["gpio_oe"] == [0 if k == pin else 1 for k in range(4)], pin
+        assert states[-1]["open_drain"] == [1 if k == pin else 0 for k in range(4)], pin
+
+    for value, gpio_oe in ((1, [0, 1, 1, 1]), (0, [1, 1, 1, 1])):
+        states = await matched(dut, imem, assemble(f"CONFIG open_drain01, 1, 0, {value}"))
+        assert (states[-1]["gpio"], states[-1]["gpio_oe"]) == ([value, 1, 1, 1], gpio_oe), value
+
+    states = await matched(dut, imem, assemble("SET 0, 0\nCONFIG open_drain01, 1\nSET 0, 1\nCONFIG open_drain01, 0\nSET 0, 0"))
+    assert [(s["gpio"][0], s["gpio_oe"][0]) for s in states] == [(0, 1), (0, 1), (1, 0), (1, 1), (0, 1)]
+
+    states = await matched(dut, imem, assemble("CONFIG open_drain23, 2\nSET 3, 0\nSET 3, 1\nCONFIG open_drain23, 0, 3, 0"))
+    assert [(s["gpio"][3], s["gpio_oe"][3]) for s in states] == [(1, 0), (0, 1), (1, 0), (0, 1)]
+    assert all(s["gpio_oe"][:3] == [1, 1, 1] for s in states)
+    assert all(s["gpio_oe"] == oe(s["gpio"], s["open_drain"]) for s in states)
+
+    # 0x96 LSB first: bit 0 out, then the register turned around MSB first: bit 7 of 0x4B, then of 0x96.
+    states = await matched(dut, imem, assemble("PULL\nSHIFT_OUT 1, 0\nCONFIG shift_dir, 1, 1, 1\nSHIFT_OUT 1, 0\nSHIFT_OUT"), tx=(0x96,))
+    assert [s["gpio"][0] for s in states] == [1, 0, 0, 0, 1]
+    assert [s["gpio"][1] for s in states] == [1, 0, 1, 0, 0]
+    assert [s["shift_reg"] for s in states] == [0x96, 0x4B, 0x4B, 0x96, 0x2C]
+
+    # Two 1s in at bit 7 LSB first, then a 1 and a 0 in at bit 0 MSB first.
+    program = assemble("SHIFT_IN 2\nSHIFT_IN 2\nCONFIG shift_dir, 1, 2, 0\nSHIFT_IN 2\nSHIFT_IN 2")
+    await begin(dut, imem, program, gpio_in=0b0100)
+    ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+    regs = []
+    for level in (1, 1, 1, 1, 0):
+        ls.pins(level << 2)
+        regs.append((await ls.edge())["in_shift_reg"])
+    assert ls.cpu.halted and regs == [0x80, 0xC0, 0xC0, 0x81, 0x02]
