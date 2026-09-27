@@ -1,9 +1,9 @@
 # Short names for the commands in the README. Each one is a plain command you can run by hand.
 PYTHON ?= python3
 
-.PHONY: test test-model test-rtl lint clean tapeout-sync tapeout-check
+.PHONY: test test-model test-rtl lint rom rom-check clean tapeout-sync tapeout-check
 
-test: test-model test-rtl
+test: rom-check test-model test-rtl
 
 test-model:  # the golden Python model and assembler, tests/
 	$(PYTHON) -m pytest tests
@@ -14,6 +14,14 @@ test-rtl:  # rtl/core.v under Verilator + cocotb, rtl_tests/; WAVES=1 also write
 lint:  # Verilator static checks, no simulation; -Wno-fatal prints warnings without failing while the core is incomplete
 	verilator --lint-only -Wall -Wno-fatal rtl/core.v
 	verilator --lint-only -Wall -Wno-fatal rtl/fifo.v
+	verilator --lint-only -Wall -Wno-fatal rtl/top.v rtl/core.v rtl/fifo.v --top-module top
+	verilator --lint-only -Wall -Wno-fatal rtl/rom.v
+
+rom:  # regenerate rtl/rom.v from programs/manifest.txt and the assembler
+	$(PYTHON) tools/gen_rom.py
+
+rom-check:  # fail if rtl/rom.v is not what `make rom` would write
+	$(PYTHON) tools/gen_rom.py --check
 
 clean:
 	rm -rf build
