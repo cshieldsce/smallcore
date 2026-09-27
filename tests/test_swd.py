@@ -13,11 +13,14 @@ The programs grew one stage at a time:
      FAULT take a turnaround back first, so the host owns the line again;
   5. the read data: on OK the target keeps the line and drives 32 data bits
      and a parity bit, the host samples them and PUSHes a byte per eight, then
-     the parity in a fifth byte, then takes the line back.
+     the parity in a fifth byte, then takes the line back;
+  6. the write data: on OK, after the turnaround back, the host clocks out
+     32 data bits and the parity from five more TX FIFO bytes, the parity
+     the host's to compute.
 
-programs/swd_request.asm is stages 1 to 4, OK ending at the end (it will grow
-the write data phase). programs/swd_read.asm is stages 1 to 5. The two are
-word for word the same through the third ACK sample.
+programs/swd_read.asm is stages 1 to 5, programs/swd_write.asm 1 to 4 and 6:
+the core cannot tell a read request from a write one, so they are two
+programs, word for word the same through the third ACK sample.
 
 The bench is the wire and the target. The wire is SWDIO resolved every cycle
 from the pad (gpio and gpio_oe), the target and a pull-up. The target samples
@@ -27,7 +30,9 @@ the ninth, the turnaround's, with ACK[0], moves to ACK[1] and ACK[2] on the
 next two, and then either lets go on the twelfth and listens again after the
 thirteenth, the host's turnaround, or, for a read it said OK to, drives the
 data bits from the twelfth, the parity from the forty-fourth, lets go on the
-forty-fifth and listens again after the forty-sixth."""
+forty-fifth and listens again after the forty-sixth. For a write it said OK
+to it lets go on the twelfth and samples the host's data bits on rises
+fourteen to forty-five and the parity on the forty-sixth."""
 
 from pathlib import Path
 from typing import NamedTuple
@@ -37,7 +42,7 @@ import pytest
 from cpu import CPU, decode, load_isa, load_program
 
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
-REQUEST = PROGRAMS / "swd_request.asm"
+WRITE = PROGRAMS / "swd_write.asm"
 READ = PROGRAMS / "swd_read.asm"
 SWDIO, SWCLK = 0, 1  # the same pin numbers on gpio (the pad) and gpio_in (the wire): SWDIO is the shift pin
 HIGH = 4  # cycles SWCLK is high per bit, and low
@@ -49,7 +54,8 @@ ACK_SHIFT = 5  # where three LSB-first samples land in an 8-bit register: bits 7
 DP_WRITE = 0xA9  # request(0, 0, 0b01): a DP write to A[3:2] = 01
 DP_READ = 0x8D  # request(0, 1, 0b01): a DP read of A[3:2] = 01
 DATA = 0xE31D5396  # bytes 0x96, 0x53, 0x1D, 0xE3 from bit 0 up, none a palindrome, 17 ones: parity 1
-REQ = {REQUEST: DP_WRITE, READ: DP_READ}  # the request each program is for: a write with the read program would clock data the target never sends
+WRITE_CLOCKS = 8 + 1 + 3 + 1 + 32 + 1  # in a write the target says OK to: the turnaround back, then the data and the parity from the host
+REQ = {WRITE: DP_WRITE, READ: DP_READ}  # the request each program is for: a write with the read program would clock data the target never sends
 
 
 def request(apndp, rnw, a):
@@ -76,6 +82,14 @@ def read_bytes(ack, data, parity=None):
     a fifth byte over data[31:25], in_shift_reg having shifted once more."""
     parity = parity_of(data) if parity is None else parity
     return [ack << ACK_SHIFT] + [(data >> (8 * i)) & 0xFF for i in range(4)] + [parity << 7 | data >> 25]
+
+
+def write_bytes(data, parity=None):
+    """What the host queues after the request for a write: the four data bytes
+    from bit 0 up and a fifth byte whose bit 0 is the parity, computed by the
+    host because the core cannot."""
+    parity = parity_of(data) if parity is None else parity
+    return [(data >> (8 * i)) & 0xFF for i in range(4)] + [parity]
 
 
 class Packet(NamedTuple):
@@ -113,9 +127,12 @@ class Target:
     it drives `data` bit 0 up from the twelfth rise, one bit per rise, the
     parity (or `parity`, to inject a wrong one) from the forty-fourth, lets go
     on the forty-fifth and is ready for the next request after the
-    forty-sixth, the host's turnaround. Otherwise it lets go on the twelfth
-    and is ready after the thirteenth. `drive` is what it puts on the wire:
-    0, 1 or None."""
+    forty-sixth, the host's turnaround. For a write it said OK to it lets go
+    on the twelfth, the thirteenth is the host's turnaround, and it samples
+    the host's data bits on the next 32 rises and the parity on the
+    forty-sixth, appending (word, parity ok) to `written`. Otherwise it lets
+    go on the twelfth and is ready after the thirteenth. `drive` is what it
+    puts on the wire: 0, 1 or None."""
 
     def __init__(self, acks=(OK,), data=0, parity=None):
         self.acks = list(acks)
@@ -125,6 +142,7 @@ class Target:
         self.rises = 0  # in this transaction
         self.samples = []
         self.seen = []
+        self.written = []
         self.drive = None
 
     def update(self, swdio, swclk):
@@ -139,6 +157,7 @@ class Target:
             else:
                 ack = self.acks[min(len(self.seen) - 1, len(self.acks) - 1)]
                 reading = self.seen[-1].rnw == 1 and ack == OK
+                writing = self.seen[-1].rnw == 0 and ack == OK
                 if n <= 11:
                     self.drive = (ack >> (n - 9)) & 1
                 elif reading and n <= 43:
@@ -147,6 +166,15 @@ class Target:
                     self.drive = self.parity
                 elif n == (45 if reading else 12):
                     self.drive = None
+                elif writing and n == 13:
+                    pass  # the host's turnaround back: it takes the line as this clock falls
+                elif writing and n <= 46:
+                    self.samples.append(swdio)  # data bits 0..31 on rises 14..45, the parity on 46
+                    if n == 46:
+                        bits = self.samples[8:]
+                        word = sum(bit << i for i, bit in enumerate(bits[:32]))
+                        self.written.append((word, bits[32] == parity_of(word)))
+                        self.rises, self.samples = 0, []
                 else:  # the host's turnaround: whatever comes next is a new request
                     self.rises, self.samples = 0, []
         self.swclk = swclk
@@ -163,19 +191,22 @@ class Run(NamedTuple):
     cpu: CPU
 
 
-def run(program, tx_data, target=None, cycles=2000, drain=True):
+def run(program, tx_data, target=None, cycles=2000, drain=True, host=None):
     """Run `program` with `tx_data` waiting in the TX FIFO until it halts or
     `cycles` pass, the wire resolved after every cycle from the pad, the
     target and the pull-up, and fed back to gpio_in for the next. The host
     pops the RX FIFO as soon as a byte is there (`drain`), as a host reading
-    a word must. A pad driving against the target is a fight, which no
-    working host ever has: it fails here."""
+    a word must, and `host(cpu, received)`, if given, runs every cycle to
+    push what it decides to. A pad driving against the target is a fight,
+    which no working host ever has: it fails here."""
     target = target or Target()
     tx_data = [tx_data] if isinstance(tx_data, int) else list(tx_data)
     cpu = CPU(load_program(program), gpio_in=1, tx_data=tx_data)
     swdio, owned, driven, received = [], [], [], []
     line = 1
     while not cpu.halted and cpu.cycle < cycles:
+        if host:
+            host(cpu, received)
         cpu.step()
         drive = target.update(line, cpu.gpio[SWCLK])
         driving = cpu.gpio_oe[SWDIO] == 1
@@ -218,7 +249,7 @@ def show(wave, r):
     wave.add("rise", labels)
 
 
-@pytest.fixture(params=(REQUEST, READ), ids=lambda p: p.stem.removeprefix("swd_"))
+@pytest.fixture(params=(WRITE, READ), ids=lambda p: p.stem.removeprefix("swd_"))
 def program(request):
     return request.param
 
@@ -259,7 +290,7 @@ def test_dp_write_to_a01_is_0xa9_and_dp_read_of_a01_0x8d_on_the_wire():
     and the parity: 1 0 1 1 0 0 0 1, 0x8D."""
     assert request(0, 0, 0b01) == DP_WRITE
     assert request(0, 1, 0b01) == DP_READ
-    assert sampled(*run(REQUEST, DP_WRITE)[:2])[:8] == [1, 0, 0, 1, 0, 1, 0, 1]
+    assert sampled(*run(WRITE, DP_WRITE)[:2])[:8] == [1, 0, 0, 1, 0, 1, 0, 1]
     assert sampled(*run(READ, DP_READ)[:2])[:8] == [1, 0, 1, 1, 0, 0, 0, 1]
 
 
@@ -424,25 +455,6 @@ def test_turnaround_back_gives_the_host_the_line_after_wait_or_fault(program):
         assert set(r.swdio[retake:retake + BIT]) == {1} and set(r.swclk[retake:retake + HIGH]) == {0}
 
 
-def test_wait_sends_the_request_again_when_the_host_supplies_it_again(wave):
-    """WAIT: the target was not ready, the host asks again. The core cannot
-    keep a copy of the request (SHIFT_OUT empties shift_reg and nothing
-    reloads it but PULL), so the retry is a JMP back to the PULL and the host
-    pushes the request again; here it queued it twice up front. The target
-    sees the same request twice and answers WAIT then OK; the host reads
-    0x40 then 0x28: OK in bits 7:5 with the WAIT's bit walked down to bit 3,
-    since in_shift_reg keeps shifting. A write request, so OK ends it: two
-    transactions, 26 clocks. The read program's version is below."""
-    r = run(REQUEST, [DP_WRITE, DP_WRITE], Target([WAIT, OK]))
-    show(wave, r)
-    assert r.cpu.halted
-    assert r.target.seen == [Packet(0, 0, 0b01)] * 2
-    assert r.received == [WAIT << ACK_SHIFT, OK << ACK_SHIFT | WAIT << (ACK_SHIFT - 3)]
-    assert [b >> ACK_SHIFT for b in r.received] == [WAIT, OK], "the host reads the ACK as the byte >> 5 either way"
-    assert len(rising_edges(r.swclk)) == 2 * CLOCKS
-    assert r.cpu.tx_fifo == [], "both requests were consumed"
-
-
 def test_wait_with_no_second_request_holds_the_line_idle_on_the_pull(program):
     """WAIT with nothing more from the host: the program is back on its PULL,
     not halted, SWDIO driven high and SWCLK low, and stays there. A host that
@@ -493,7 +505,7 @@ def test_the_three_answers_take_three_paths(program):
     ISA, on record."""
     isa = load_isa()
     words = [decode(w, isa) for w in load_program(program)]
-    (pull,) = [i for i, w in enumerate(words) if w.op == "PULL"]
+    pull = [i for i, w in enumerate(words) if w.op == "PULL"][0]  # the request's; the write program has five more
     skips = [i for i, w in enumerate(words) if w.op == "SKIP"]
     jmps = [i for i, w in enumerate(words) if w.op == "JMP"]
     assert len(skips) == 2 and len(jmps) == 3
@@ -515,61 +527,184 @@ def test_the_three_answers_take_three_paths(program):
 
 
 def test_the_two_programs_agree_through_the_third_ack_sample():
-    """swd_read.asm is swd_request.asm with a data phase: word for word the
-    same up to and including the third SHIFT_IN. From there the request
-    program takes the turnaround back before it decides, the read program
-    decides first, because on OK the target keeps the line for the data."""
+    """swd_write.asm and swd_read.asm are word for word the same up to and
+    including the third SHIFT_IN. From there the write program takes the
+    turnaround back before it decides, the read program decides first,
+    because on OK the target keeps the line for the data."""
     isa = load_isa()
-    a, b = load_program(REQUEST), load_program(READ)
+    a, b = load_program(WRITE), load_program(READ)
     third = [i for i, w in enumerate(a) if decode(w, isa).op == "SHIFT_IN"][2]
     assert a[:third + 1] == b[:third + 1]
     assert decode(a[third + 1], isa).op == "PUSH" and decode(b[third + 1], isa).op == "SKIP"
 
 
-# --- stage 4, the request program alone: OK ends it -------------------------------------
+# --- stage 6: the write data, swd_write.asm ----------------------------------------------
 
 
-def test_request_program_ok_ends_the_transaction_with_the_host_owning_the_line(wave):
-    """OK: the program goes on to where the data phase will be, which for now
-    is the end. Thirteen clocks, one ACK byte, halted with SWDIO driven high
-    and SWCLK low, ready for the next request."""
-    r = run(REQUEST, DP_WRITE, Target([OK]))
+def test_write_ok_clocks_the_hosts_word_and_parity_out_after_the_turnaround_back(wave):
+    """A DP write the target says OK to, with 0xE31D5396 to send. The host
+    queues the request, then the four data bytes from bit 0 up and a fifth
+    whose bit 0 is the parity it computed: the core has no XOR. After the ACK
+    and the turnaround back the host owns the line and clocks the 33 bits
+    out, each PULL in the last high cycle of the byte before so the beat
+    holds. The target sees the request, then the word with a good parity.
+    One ACK byte to the host, 46 clocks, halted owning the line."""
+    r = run(WRITE, [DP_WRITE] + write_bytes(DATA), Target([OK]))
     show(wave, r)
     assert r.cpu.halted
     assert r.target.seen == [Packet(0, 0, 0b01)]
+    assert r.target.written == [(DATA, True)]
     assert r.received == [OK << ACK_SHIFT]
-    assert len(rising_edges(r.swclk)) == CLOCKS
-    assert r.cpu.gpio_oe[SWDIO] == 1 and r.cpu.gpio[SWDIO] == 1 and r.cpu.gpio[SWCLK] == 0
+    assert len(rising_edges(r.swclk)) == WRITE_CLOCKS
+    assert r.cpu.tx_fifo == [], "all six bytes consumed"
+    assert r.cpu.gpio_oe[SWDIO] == 1 and r.cpu.gpio[SWCLK] == 0
 
 
-def test_request_program_keeps_the_beat_through_the_turnaround_back():
-    """In the request program the turnaround back comes before the decision,
-    so all thirteen clocks are 8 cycles apart, 4 low and 4 high."""
-    r = run(REQUEST, DP_WRITE, Target([OK]))
+@pytest.mark.parametrize("data", (0, 0xFFFFFFFF, 0x80000001, 0x00000001, 0x80000000, 0x5A3C9670, 0x0F0F0F0F), ids=lambda d: f"{d:#010x}")
+def test_write_data_arrives_whole_whatever_it_is(data):
+    """Every bit of the word lands where it belongs at the target, for words
+    with ones at the ends, in the middle and nowhere, with the parity the
+    host sent judged good."""
+    r = run(WRITE, [DP_WRITE] + write_bytes(data), Target([OK]))
+    assert r.target.written == [(data, True)]
+
+
+def test_write_data_and_parity_are_on_the_rises_after_the_turnaround_back():
+    """The thirteenth rise is the turnaround back; data bit 0 is taken on the
+    fourteenth, bit i on the one after that, the parity on the forty-sixth.
+    Each data bit is on the line through the low half before its rise."""
+    r = run(WRITE, [DP_WRITE] + write_bytes(DATA), Target([OK]))
+    ups = rising_edges(r.swclk)
+    taken = sampled(r.swdio, r.swclk)
+    assert len(taken) == WRITE_CLOCKS
+    assert taken[12] == 1, "the turnaround back's edge finds the pull-up"
+    assert taken[13:45] == wire_bits(DATA, 32)
+    assert taken[45] == parity_of(DATA)
+    for i, up in enumerate(ups[13:46]):
+        assert r.swdio[up - HIGH:up + 1] == [taken[13 + i]] * (HIGH + 1), f"write bit {i} on the wire"
+
+
+def test_write_keeps_the_beat_with_a_prompt_host():
+    """With every byte already queued, a PULL in a clock's last high cycle
+    costs nothing: all 33 data clocks are 8 cycles apart, 4 low and 4 high,
+    after the two-word stretch of the branch and the first PULL."""
+    r = run(WRITE, [DP_WRITE] + write_bytes(DATA), Target([OK]))
     ups, downs = rising_edges(r.swclk), falling_edges(r.swclk)
-    assert [b - a for a, b in zip(ups, ups[1:])] == [BIT] * (CLOCKS - 1)
-    assert [d - u for u, d in zip(ups, downs)] == [HIGH] * CLOCKS
+    gaps = [b - a for a, b in zip(ups, ups[1:])]
+    assert gaps[:12] == [BIT] * 12
+    assert gaps[12] == BIT + 4 + 3, "the turnaround back's rise to data bit 0's: the take-back word's low half, two SKIPs, the JMP and the PULL"
+    assert gaps[13:] == [BIT] * 32
+    assert [d - u for u, d in zip(ups, downs)] == [HIGH] * WRITE_CLOCKS
     assert set(r.swclk[downs[-1]:]) == {0}, "SWCLK idle low after the transaction"
 
 
-def test_request_program_is_two_words_per_bit_plus_the_turnarounds_the_push_and_the_branch():
-    """Two words per bit, out or in, SPI's and I2C's shape: SHIFT_OUT with the
-    clock low and SET with it high for the request, SET with the clock low
-    and SHIFT_IN raising it for the ACK. No CONFIG shift_dir, because the
-    reset configuration, LSB first, is SWD's. Each turnaround is two words,
-    let go or take back and a clock; the PUSH drops the last ACK clock; the
-    branch is five."""
+def test_host_owns_swdio_from_the_turnaround_back_to_the_end_of_the_write():
+    r = run(WRITE, [DP_WRITE] + write_bytes(DATA), Target([OK]))
+    ups, downs = rising_edges(r.swclk), falling_edges(r.swclk)
+    retake = downs[12]
+    assert not any(r.owned[ups[7] + HIGH:retake]) and all(r.owned[retake:])
+    assert set(r.driven[ups[11]:]) == {None}, "the target drove after ACK[2]"
+
+
+def test_write_without_data_from_the_host_stops_the_clock_low_on_the_pull():
+    """The host queued only the request: the ACK is OK, the turnaround back
+    done, and the first data PULL stalls with SWCLK low and the host owning
+    the line. The transaction goes on when the bytes arrive: SWD allows a
+    stopped clock. On record: request, four data bytes and the parity are
+    six bytes through a 4-deep TX FIFO, so the host feeds the write."""
+    r = run(WRITE, DP_WRITE, Target([OK]), cycles=400)
+    assert not r.cpu.halted and r.cpu.stalled
+    assert decode(r.cpu.program[r.cpu.pc], r.cpu.isa).op == "PULL"
+    assert len(rising_edges(r.swclk)) == CLOCKS
+    assert r.cpu.gpio[SWCLK] == 0 and r.cpu.gpio_oe[SWDIO] == 1 and r.cpu.gpio[SWDIO] == 1
+    assert r.received == [OK << ACK_SHIFT]
+    r.cpu.tx_fifo.extend(write_bytes(DATA))
+    line = r.swdio[-1]
+    while not r.cpu.halted and r.cpu.cycle < 1000:
+        r.cpu.step()
+        drive = r.target.update(line, r.cpu.gpio[SWCLK])
+        line = r.cpu.gpio[SWDIO] if r.cpu.gpio_oe[SWDIO] else drive if drive is not None else 1
+        r.cpu.gpio_in[SWDIO] = line
+    assert r.cpu.halted and r.target.written == [(DATA, True)]
+
+
+class WriteHost:
+    """A host doing one write the way the FIFOs ask: the request first and
+    nothing else, because a WAIT would make the retry PULL a data byte as
+    the request; on WAIT the request again; on OK the data and the parity."""
+
+    def __init__(self, request, data, parity=None):
+        self.request = request
+        self.bytes = write_bytes(data, parity)
+        self.acks = 0
+
+    def __call__(self, cpu, received):
+        if len(received) > self.acks:
+            self.acks = len(received)
+            ack = received[-1] >> ACK_SHIFT
+            if ack == WAIT:
+                cpu.tx_fifo.append(self.request)
+            elif ack == OK:
+                cpu.tx_fifo.extend(self.bytes)
+
+
+def test_write_wait_then_ok_writes_the_word_on_the_second_try():
+    """WAIT on a write: the host must not have queued the data, or the retry
+    PULL would send data byte 0 as the request (no way to discard a queued
+    byte but PULLing it, on record). It pushes the request again on the
+    WAIT, and the data on the OK; the target gets the word once, with a good
+    parity. 13 + 46 clocks, two ACK bytes."""
+    r = run(WRITE, DP_WRITE, Target([WAIT, OK]), host=WriteHost(DP_WRITE, DATA))
+    assert r.cpu.halted
+    assert r.target.seen == [Packet(0, 0, 0b01)] * 2
+    assert r.target.written == [(DATA, True)]
+    assert [b >> ACK_SHIFT for b in r.received] == [WAIT, OK]
+    assert len(rising_edges(r.swclk)) == CLOCKS + WRITE_CLOCKS
+
+
+def test_write_fault_sends_no_data():
+    """FAULT on a write: the turnaround back and the exit; a host that had
+    queued data finds it still in the FIFO, unsent."""
+    r = run(WRITE, [DP_WRITE] + write_bytes(DATA), Target([FAULT]))
+    assert r.cpu.halted
+    assert r.received == [FAULT << ACK_SHIFT]
+    assert r.target.written == []
+    assert r.cpu.tx_fifo == write_bytes(DATA), "the data stayed queued"
+    assert len(rising_edges(r.swclk)) == CLOCKS
+
+
+def test_a_wrong_parity_from_the_host_goes_out_unjudged():
+    """The core sends bit 0 of the fifth byte as the parity, whatever it is:
+    the target judges it, the core cannot."""
+    r = run(WRITE, [DP_WRITE] + write_bytes(DATA, parity=1 - parity_of(DATA)), Target([OK]))
+    assert r.cpu.halted
+    assert r.target.written == [(DATA, False)]
+
+
+def test_write_program_is_the_read_programs_shape_with_the_data_going_out():
+    """Two words per bit, out or in, SPI's and I2C's shape: SHIFT_OUT with
+    the clock low and SET with it high for the request and the data, SET with
+    the clock low and SHIFT_IN raising it for the ACK. No CONFIG shift_dir,
+    because the reset configuration, LSB first, is SWD's. Each turnaround is
+    two words; the PUSH drops the last ACK clock; the branch is five; a PULL
+    per data byte and one for the parity, each in a clock's last high cycle
+    but the first, which follows the branch; 106 words."""
     isa = load_isa()
-    words = [decode(w, isa) for w in load_program(REQUEST)]
-    assert len(words) == 2 + 8 * 2 + 2 + 3 * 2 + 1 + 2 + 5
+    words = [decode(w, isa) for w in load_program(WRITE)]
     shift_dir = isa["config"]["shift_dir"]["field"]
     assert not any(w.op == "CONFIG" and w.args[0] == shift_dir for w in words)
     outs = [w for w in words if w.op == "SHIFT_OUT"]
     ins = [w for w in words if w.op == "SHIFT_IN"]
+    pulls = [i for i, w in enumerate(words) if w.op == "PULL"]
     (push,) = [w for w in words if w.op == "PUSH"]
-    assert len(outs) == 8 and all(w.side == (SWCLK, 0) for w in outs)
+    assert len(outs) == 8 + 32 + 1 and all(w.side == (SWCLK, 0) for w in outs)
     assert len(ins) == 3 and all(w.args == (SWDIO,) and w.side == (SWCLK, 1) for w in ins)
     assert push.side == (SWCLK, 0) and push.delay == 3, "the PUSH is the turnaround back's low half"
+    assert len(pulls) == 1 + 5
+    for i in pulls[2:]:
+        assert words[i - 1] == decode(load_program(WRITE)[i - 1], isa) and words[i - 1].op == "SET" and words[i - 1].args == (SWCLK, 1) and words[i - 1].delay == 2, "a PULL in a clock's last high cycle"
+        assert words[i].delay == 0 and words[i].side is None
+    assert len(words) == 2 + 16 + 2 + 6 + 1 + 2 + 5 + 1 + 4 * 17 + 3 == 106
 
 
 # --- stage 5: the read data, swd_read.asm -----------------------------------------------

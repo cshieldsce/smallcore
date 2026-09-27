@@ -1,6 +1,6 @@
 # SWD host read: the request, the turnaround, the ACK, the decision, and on OK
 # the 32 data bits and the parity the target sends, then the turnaround back.
-# swd_request.asm word for word through the third ACK sample; from there the
+# swd_write.asm word for word through the third ACK sample; from there the
 # decision comes first, because on OK the target keeps the line and drives
 # data bit 0 from the very rise the host samples ACK[2] on: no turnaround
 # between the ACK and the data, one after the parity. The host reads six
