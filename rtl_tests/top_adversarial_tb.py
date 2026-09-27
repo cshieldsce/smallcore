@@ -24,7 +24,7 @@ import cocotb
 from cocotb.triggers import FallingEdge, ReadOnly, RisingEdge
 
 from cpu import CPU, Instruction, assemble, decode, encode, load_isa
-from tb import Imem, drive_host, model_state, reset, rtl_state, start_clock
+from tb import Imem, Pads, drive_host, model_state, reset, rtl_state, start_clock
 
 ISA = load_isa()
 OPS = tuple(ISA["instructions"])
@@ -821,3 +821,54 @@ async def a_config_next_to_a_pin_write_settles_the_pad_on_that_edge(dut):
         ls.pins(level << 2)
         regs.append((await ls.edge())["in_shift_reg"])
     assert ls.cpu.halted and regs == [0x80, 0xC0, 0xC0, 0x81, 0x02]
+
+
+# --- The pads -------------------------------------------------------------------------
+
+# tb.Pads on top: pad k reads gpio_out[k] while gpio_oe[k] drives, else what the
+# outside drives, else a weak pull-up's 1, resolved onto gpio_in every falling
+# edge; a pad driving against the outside fails the run. The Lockstep reads the
+# same gpio_in into the model before each edge.
+
+
+@cocotb.test()
+async def a_pin_driven_released_sampled_and_driven_again(dut):
+    """One pin, pin 2, through every transition, its readback sampled after
+    each: driven low push-pull, it reads its own 0; made open-drain while 0,
+    still its own 0; written 1, released, it reads the outside, the pull-up's
+    1; a WAIT for a 0 holds STALL clocks until the outside pulls the line
+    low, then the sample is that 0; push-pull again while 1, it drives and
+    reads its own 1; low again, its own 0. Six samples, 0 0 1 0 1 0, LSB
+    first: 0x50, and gpio_oe on every edge is what open_drain and the level
+    say."""
+    program = assemble(
+        "SET 2, 0\nSHIFT_IN 2\nCONFIG open_drain23, 1\nSHIFT_IN 2\nSET 2, 1\nSHIFT_IN 2\n"
+        "WAIT 2, 0\nSHIFT_IN 2\nCONFIG open_drain23, 0\nSHIFT_IN 2\nSET 2, 0\nSHIFT_IN 2"
+    )
+    imem = Imem(dut, [])
+    start_clock(dut)
+    pads = Pads(dut)
+    await begin(dut, imem, program)
+    ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+    states = []
+    for _ in range(6):
+        states.append(await ls.edge())
+    assert [s["in_shift_reg"] for s in states[1::2]] == [0x00, 0x00, 0x80]  # own 0, own 0, the pull-up's 1
+    assert [(s["gpio"][2], s["gpio_oe"][2]) for s in states] == [(0, 1), (0, 1), (0, 1), (0, 1), (1, 0), (1, 0)]
+    frozen = await ls.edge()  # the WAIT finds the line high
+    assert ls.cpu.stalled and frozen["pc"] == 6
+    for _ in range(STALL):
+        assert await ls.edge() == frozen and ls.cpu.stalled
+    pads.set(2, 0)  # the outside pulls the line low: on the pad from the next falling edge
+    assert await ls.edge() == frozen and ls.cpu.stalled
+    issued = await ls.edge()
+    assert not ls.cpu.stalled and issued["pc"] == 7
+    sampled = await ls.edge()
+    assert sampled["in_shift_reg"] == 0x40  # 0 0 1 0 in so far
+    pads.set(2, None)  # and lets go before the pin drives again
+    for _ in range(4):
+        states.append(await ls.edge())
+    assert ls.cpu.halted
+    assert [(s["gpio"][2], s["gpio_oe"][2]) for s in states[6:]] == [(1, 1), (1, 1), (0, 1), (0, 1)]
+    assert states[-1]["in_shift_reg"] == 0x50
+    assert all(s["gpio_oe"] == oe(s["gpio"], s["open_drain"]) for s in states)
