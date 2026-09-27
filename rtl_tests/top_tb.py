@@ -1019,3 +1019,57 @@ async def restart_resets_the_core_and_keeps_the_fifos(dut):
     await ClockCycles(dut.clk, 70)
     await ReadOnly()
     assert int(dut.halted.value) == 1  # ran off the end
+
+
+@cocotb.test()
+async def restart_on_the_clock_a_pull_or_push_issues_keeps_the_fifos(dut):
+    """A restart pulse on the very clock a PULL issues: the core resets and
+    the TX FIFO must not pop, or the byte would vanish into a shift register
+    the reset then clears. Same for a PUSH: a stale in_shift_reg must not
+    land in the RX FIFO. A restart leaves both FIFOs untouched, whatever the
+    core was about to do."""
+    program = assemble("""
+        NOP [1]
+        PULL
+        PUSH
+    """)
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+
+    await FallingEdge(dut.clk)
+    dut.tx_data.value = 0x96
+    dut.tx_push.value = 1
+    await FallingEdge(dut.clk)
+    dut.tx_push.value = 0
+    dut.program_words.value = len(program)
+
+    async def restart_when(en):
+        """Wait for the core to be about to act on a FIFO, then pulse restart
+        across that same edge."""
+        for _ in range(20):
+            await RisingEdge(dut.clk)
+            await ReadOnly()
+            if int(en.value) == 1:
+                break
+        else:
+            raise AssertionError("the instruction never issued")
+        await FallingEdge(dut.clk)
+        assert int(en.value) == 1  # still up: the edge has not happened yet
+        dut.restart.value = 1
+        await FallingEdge(dut.clk)
+        dut.restart.value = 0
+        await ReadOnly()
+
+    await restart_when(dut.pull_en)  # the PULL's edge
+    assert int(dut.core_i.pc.value) == 0
+    assert int(dut.tx_fifo.count.value) == 1, "the restart popped the byte"
+    assert int(dut.tx_fifo.head_data.value) == 0x96
+    assert int(dut.core_i.shift_reg.value) == 0
+
+    await restart_when(dut.push_en)  # runs again: NOP, PULL takes the byte, then the PUSH's edge
+    assert int(dut.core_i.pc.value) == 0
+    assert int(dut.tx_fifo.count.value) == 0
+    assert int(dut.rx_fifo.count.value) == 0, "the restart pushed a byte"
