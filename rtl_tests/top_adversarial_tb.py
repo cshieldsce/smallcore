@@ -265,10 +265,12 @@ async def wait_holds_on_a_pin_level_until_it_arrives_then_issues_once(dut):
 
 # Every run below starts the same way: PULL 3, 0 takes 0xA5 into shift_reg
 # and drops gpio[3], SHIFT_IN 1 with gpio_in[1] high puts 0x80 into
-# in_shift_reg, and a second byte, 0x3C, waits in the TX FIFO. The word
-# under test comes third, at address 2, and is the last word.
+# in_shift_reg, and two more bytes, 0x3C and 0x77, wait in the TX FIFO: one
+# for a PULL under test to take and one for it to leave, so a PULL that
+# pulled again on a hold cycle would show in the count. The word under test
+# comes third, at address 2, and is the last word.
 PREFIX = "PULL 3, 0\nSHIFT_IN 1\n"
-PRELOAD = (0xA5, 0x3C)
+PRELOAD = (0xA5, 0x3C, 0x77)
 GPIO_IN = 0b0010
 AT = 2  # the edge the word under test issues on
 
