@@ -1107,3 +1107,82 @@ async def the_fifos_at_their_boundaries_under_a_rude_host(dut):
         state = await ls.edge()
         assert state["rx"] == after[k], (k, state["rx"])
     assert ls.cpu.halted and ls.idle_pops == 2 and ls.popped == [b[0], b[1]] and ls.pushes == 5
+
+
+@cocotb.test()
+async def host_traffic_while_the_core_is_stalled_moves_only_the_queues(dut):
+    """A WAIT stalled on a pin while the host pushes five bytes, four land
+    and the fifth is dropped, and pops the two the program left in the RX
+    FIFO: the core's registers do not move on any of those edges. The level
+    then lets the WAIT go and four PULLs take the four bytes in order. A
+    PULL stalled on an empty TX FIFO while the host drains three RX bytes:
+    frozen until a byte comes, which it takes. A PUSH stalled on a full RX
+    FIFO while the host pushes two TX bytes: frozen until a pop makes room,
+    then it lands once."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    program = assemble("SHIFT_IN 0\nPUSH\nPUSH\nWAIT 2, 1\nPULL\nPULL\nPULL\nPULL")
+    await begin(dut, imem, program, gpio_in=1)
+    ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+    ls.pins(1)
+    for _ in range(3):
+        await ls.edge()
+    frozen = await ls.edge()
+    assert ls.cpu.stalled and frozen["pc"] == 3 and frozen["rx"] == [0x80, 0x80]
+    for i in range(STALL):
+        if 2 <= i < 7:
+            ls.push(BYTES[i - 2])
+        if i in (10, 15):
+            ls.pop()
+        state = await ls.edge()
+        assert core(state) == core(frozen) and ls.cpu.stalled, i
+    assert state["tx"] == list(BYTES[:4]) and state["rx"] == [] and ls.dropped == 1 and ls.popped == [0x80, 0x80]
+    ls.pins(0b0101)
+    taken = []
+    while not ls.cpu.halted:
+        state = await ls.edge()
+        if state["shift_reg"] != (taken[-1] if taken else 0):
+            taken.append(state["shift_reg"])
+    assert taken == list(BYTES[:4]) and ls.pulls == 4, taken
+
+    program = assemble("SHIFT_IN 0\nPUSH\nPUSH\nPUSH\nPULL\nSET 1, 0")
+    await begin(dut, imem, program, gpio_in=1)
+    ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+    ls.pins(1)
+    for _ in range(4):
+        await ls.edge()
+    frozen = await ls.edge()
+    assert ls.cpu.stalled and frozen["pc"] == 4 and frozen["rx"] == [0x80] * 3
+    for i in range(STALL):
+        if i in (3, 9, 20):
+            ls.pop()
+        state = await ls.edge()
+        assert core(state) == core(frozen) and ls.cpu.stalled, i
+    assert state["rx"] == [] and ls.popped == [0x80] * 3
+    ls.push(0x96)
+    await ls.edge()
+    state = await ls.edge()
+    assert not ls.cpu.stalled and state["shift_reg"] == 0x96 and state["tx"] == []
+    while not ls.cpu.halted:
+        await ls.edge()
+
+    program = assemble(FILL_RX + "PUSH\nSET 1, 0")
+    await begin(dut, imem, program, gpio_in=1)
+    ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+    ls.pins(1)
+    for _ in range(5):
+        await ls.edge()
+    frozen = await ls.edge()
+    assert ls.cpu.stalled and frozen["pc"] == 5 and frozen["rx"] == [0x80] * 4
+    for i in range(STALL):
+        if i in (4, 12):
+            ls.push(BYTES[i // 4])
+        state = await ls.edge()
+        assert core(state) == core(frozen) and ls.cpu.stalled, i
+    assert state["tx"] == [BYTES[1], BYTES[3]]
+    ls.pop()
+    await ls.edge()
+    state = await ls.edge()
+    assert not ls.cpu.stalled and state["rx"] == [0x80] * 4 and ls.pushes == 5
+    while not ls.cpu.halted:
+        await ls.edge()
