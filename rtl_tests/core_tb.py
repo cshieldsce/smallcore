@@ -367,6 +367,101 @@ async def skip_not_taken_matches_model(dut):
 
 
 @cocotb.test()
+async def pull_matches_model(dut):
+    """PULL with a byte waiting, cycle by cycle. tx_data 0xA5 with tx_empty
+    low: pull_en is high before the first edge, shift_reg loads 0xA5 on the
+    issue edge and the [2] holds it, then SHIFT_OUT shifts it. Running off the
+    end checks halted."""
+    program = assemble("""
+        PULL [2]
+        SHIFT_OUT
+    """)
+    cpu = CPU(program, tx_data=[0xA5])
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program), tx_empty=0, tx_data=0xA5)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+    assert dut.pull_en.value == 1
+
+    cpu.step()
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    rtl = rtl_state(dut)
+    assert rtl == model_state(cpu), f"cycle {cpu.cycle}: RTL={rtl}, model={model_state(cpu)}"
+    assert (rtl["shift_reg"], rtl["pc"], rtl["counter"]) == (0xA5, 0, 2)
+    assert dut.pull_en.value == 0  # the delay does not pull again
+
+    while not cpu.halted:
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+
+@cocotb.test()
+async def pull_stall_matches_model(dut):
+    """PULL against an empty TX FIFO, then after a byte arrives. With tx_empty
+    high edges go by with nothing moving and pull_en low. The byte arrives
+    between edges, pull_en rises, and the next edge loads shift_reg and
+    completes the PULL. Running off the end checks halted."""
+    program = assemble("""
+        PULL
+        SET 0, 0
+    """)
+    cpu = CPU(program)
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program), tx_empty=1)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+    # TX FIFO empty: every stalled edge changes nothing.
+    for _ in range(2):
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert cpu.stalled
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+        assert (rtl["pc"], rtl["counter"]) == (0, 0)
+        assert dut.pull_en.value == 0
+
+    # A byte arrives on the falling edge, between the rising edges that sample
+    # it (the read-only phase forbids writes).
+    await FallingEdge(dut.clk)
+    cpu.tx_fifo.append(0xA5)
+    dut.tx_data.value = 0xA5
+    dut.tx_empty.value = 0
+    await ReadOnly()
+    assert dut.pull_en.value == 1
+
+    # Release edge: the PULL loads shift_reg and completes.
+    cpu.step()
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    rtl = rtl_state(dut)
+    assert not cpu.stalled
+    assert rtl == model_state(cpu), f"cycle {cpu.cycle}: RTL={rtl}, model={model_state(cpu)}"
+    assert (rtl["shift_reg"], rtl["pc"]) == (0xA5, 1)
+
+    while not cpu.halted:
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+
+@cocotb.test()
 async def uart_tx_0x55_matches_model(dut):
     """A real program end to end: programs/uart_tx_0x55.asm, cycle by cycle
     against the model until it halts. Idle, start, 8 data bits and stop is
