@@ -10,7 +10,7 @@ read hierarchically through VPI: dut.core_i.shift_reg, dut.tx_fifo.count.
 from pathlib import Path
 
 import cocotb
-from cocotb.triggers import FallingEdge, ReadOnly, RisingEdge
+from cocotb.triggers import ClockCycles, FallingEdge, ReadOnly, RisingEdge
 
 from cpu import assemble, load_program  # sim/cpu.py
 from tb import Imem, drive_host, reset, start_clock
@@ -961,3 +961,61 @@ async def i2c_write_stretch_slave_holds_scl_master_waits(dut):
     dut.rx_pop.value = 0
     await ReadOnly()
     assert int(dut.rx_empty.value) == 1
+
+
+@cocotb.test()
+async def restart_resets_the_core_and_keeps_the_fifos(dut):
+    """top.restart is the core's reset without the FIFOs' reset: a program
+    several words in, with a byte queued behind the one it took, goes back to
+    pc 0 with its GPIO at reset levels, and the queued byte is still there.
+    top.halted is the core's halted, read at the port: 1 with no program, 0
+    while this one runs, 1 again when it runs off the end."""
+    program = assemble("""
+        SET 0, 0
+        PULL
+        NOP [31]
+        NOP [31]
+    """)
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert int(dut.halted.value) == 1  # no program
+
+    # Two bytes queued with the core halted, then release it.
+    for byte in (0x96, 0x53):
+        await FallingEdge(dut.clk)
+        dut.tx_data.value = byte
+        dut.tx_push.value = 1
+    await FallingEdge(dut.clk)
+    dut.tx_push.value = 0
+    dut.program_words.value = len(program)
+    await ClockCycles(dut.clk, 6)  # SET, PULL, into the first NOP's delay
+    await ReadOnly()
+    assert int(dut.halted.value) == 0
+    assert int(dut.core_i.pc.value) == 2
+    assert (int(dut.gpio_out.value) & 1) == 0  # the SET landed
+    assert int(dut.tx_fifo.count.value) == 1  # PULL took 0x96, 0x53 waits
+
+    # One-clock restart pulse.
+    await FallingEdge(dut.clk)
+    dut.restart.value = 1
+    await FallingEdge(dut.clk)
+    dut.restart.value = 0
+    await ReadOnly()
+    assert int(dut.core_i.pc.value) == 0
+    assert int(dut.core_i.delay_counter.value) == 0
+    assert int(dut.gpio_out.value) == 0b1111  # reset levels
+    assert int(dut.tx_fifo.count.value) == 1  # the FIFO did not reset
+    assert int(dut.tx_fifo.head_data.value) == 0x53
+
+    # The program runs again and takes the second byte.
+    await ClockCycles(dut.clk, 3)
+    await ReadOnly()
+    assert int(dut.tx_fifo.count.value) == 0
+    assert int(dut.core_i.shift_reg.value) == 0x53
+    await ClockCycles(dut.clk, 70)
+    await ReadOnly()
+    assert int(dut.halted.value) == 1  # ran off the end
