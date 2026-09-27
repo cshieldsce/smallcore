@@ -677,3 +677,66 @@ async def i2c_write_host_byte_to_bus_ack_to_host(dut):
     dut.rx_pop.value = 0
     await ReadOnly()
     assert int(dut.rx_empty.value) == 1
+
+
+@cocotb.test()
+async def i2c_write_host_byte_to_bus_nack_to_host(dut):
+    """programs/i2c_write.asm with a slave that NACKs: the ACK test with the
+    slave letting go of SDA on the ninth clock. The pad has let go too, so the
+    pull-up puts a 1 on the bus, gpio_in[0] carries it in, SHIFT_IN samples
+    it and the PUSH hands the host a 1. Everything else on the wire is the
+    same: one START, the byte MSB first, ten clocks, one STOP."""
+    program = load_program(PROGRAMS / "i2c_write.asm")
+    byte = 0xA3
+    slave = I2cSlave(ack=False)
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0011  # the bus idles high
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.rx_empty.value) == 1
+
+    # Host push with the core halted, then release it on the next falling edge.
+    await FallingEdge(dut.clk)
+    dut.tx_data.value = byte
+    dut.tx_push.value = 1
+    await FallingEdge(dut.clk)
+    dut.tx_push.value = 0
+    dut.program_words.value = len(program)
+
+    sda, scl, pad_sda_low = await i2c_bus(dut, slave)
+
+    # The slave still saw the whole transaction; it just did not answer.
+    assert slave.events == ["START", byte, "STOP"]
+
+    (start,), (stop,) = i2c_starts(sda, scl), i2c_stops(sda, scl)
+    rises = [e for e in rising_edges(scl) if start < e < stop]
+    falls = [e for e in falling_edges(scl) if start < e < stop]
+    assert len(rises) == 10 and len(falls) == 10, f"SCL rose at {rises}, fell at {falls}"
+    assert all(f < r for f, r in zip(falls, rises)) and all(r < f for r, f in zip(rises, falls[1:]))
+    assert [sda[e] for e in rises[:8]] == [1, 0, 1, 0, 0, 0, 1, 1]  # 0xA3 MSB first
+
+    # The ninth clock: nobody holds SDA, so the pull-up has it high.
+    assert sda[rises[8]] == 1
+    assert not pad_sda_low[rises[8]]
+
+    # Bus free, both lines let go.
+    assert sda[-1] == 1 and scl[-1] == 1
+    assert int(dut.gpio_oe.value) & 0b11 == 0
+
+    # The byte was consumed once; the NACK, a 1, reached the host.
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.rx_empty.value) == 0
+    assert int(dut.rx_fifo.count.value) == 1
+    assert int(dut.rx_data.value) == 1
+
+    # Host pop, driven on the falling edge.
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 1
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 0
+    await ReadOnly()
+    assert int(dut.rx_empty.value) == 1
