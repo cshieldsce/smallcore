@@ -5,10 +5,12 @@ module core(
     input      [8:0]  program_words,
     input      [3:0]  gpio_in,
     input      [7:0]  tx_data,
+    output     [7:0]  rx_data,
+    output            pull_en,
+    output            push_en,
     output     [7:0]  imem_addr,
     output     [3:0]  gpio_oe,
-    output reg [3:0]  gpio_out,
-    output            pull_en
+    output reg [3:0]  gpio_out
 );
     // opcodes
     localparam [2:0] OP_NOP_SET = 3'b000;
@@ -133,7 +135,12 @@ module core(
     wire   skip_taken;
     assign skip_taken = is_skip && (in_shift_reg[skip_bit] == level);
 
+    // pull
     assign pull_en = issue && is_fifo && !fifo_select && !tx_empty;
+
+    // push
+    assign rx_data = in_shift_reg;
+    assign push_en = issue && is_fifo && fifo_select && !rx_full;
 
     always @(posedge clk) begin
         if (reset) begin            
@@ -164,7 +171,7 @@ module core(
                 else if (is_skip) begin
                     pc <= pc + (skip_taken ? 9'd2 : 9'd1);
                 end
-                else if (is_nop_set || is_config || is_shift || is_wait || (is_fifo && !fifo_select)) begin
+                else if (is_nop_set || is_config || is_shift || is_wait || is_fifo) begin
                     pc <= pc + 9'd1;
                 end
             end
