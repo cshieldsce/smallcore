@@ -666,3 +666,49 @@ async def a_stall_and_a_delay_never_share_a_cycle(dut):
         assert not ls.cpu.stalled and (issued["pc"], issued["counter"]) == (f + 2, 0), line
         assert (await ls.edge())["halted"], line
         assert (ls.pulls, ls.pushes) == ((1, 0) if release == "push" else (0, 5) if release == "pop" else (0, 0)), line
+
+
+# --- Branches ------------------------------------------------------------------------
+
+
+@cocotb.test()
+async def a_skip_right_after_a_sample_decides_on_that_sample(dut):
+    """SHIFT_IN 1 then SKIP on the bit the sample landed in, bit 7 LSB first
+    and bit 0 MSB first. The pin holds the sampled level before the
+    SHIFT_IN's edge only and the opposite before every other edge, so a
+    sample one edge early or late, or a SKIP reading the pin instead of the
+    register, decides the other way. With a [3] on the SHIFT_IN, on the SKIP
+    and on both, the pin keeps the opposite level through the holds. Then two
+    samples back to back and a SKIP on each: the first lands in bit 7 and is
+    shifted to bit 6 by the second."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    for shift_dir in (0, 1):
+        bit = 7 if shift_dir == 0 else 0
+        head = "CONFIG shift_dir, 1\n" if shift_dir else ""
+        e = len(assemble(head))  # the SHIFT_IN's address, and the edge it issues on
+        for d1, d2 in ((0, 0), (3, 0), (0, 3), (3, 3)):
+            for s in (0, 1):
+                program = assemble(f"{head}SHIFT_IN 1 [{d1}]\nSKIP {bit}, 1 [{d2}]\nSET 0, 0\nSET 2, 0")
+                await begin(dut, imem, program, gpio_in=(1 - s) << 1)
+                ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+                which = f"shift_dir {shift_dir}, [{d1}] [{d2}], sample {s}"
+                while not ls.cpu.halted:
+                    ls.pins((s if ls.edges == e else 1 - s) << 1)
+                    state = await ls.edge()
+                    if ls.edges == e + 1:
+                        assert state["in_shift_reg"] == s << bit, which
+                    if ls.edges == e + 2 + d1 + d2:  # the SKIP's last edge
+                        assert state["pc"] == e + 2 + s, f"{which}: pc {state['pc']} after the SKIP"
+                assert state["gpio"] == [s, 1, 0, 1], which  # SET 0, 0 skipped on a 1
+                assert ls.edges == e + 2 + d1 + d2 + 2 - s, which
+
+    program = assemble("SHIFT_IN 1\nSHIFT_IN 1\nSKIP 6, 1\nSET 0, 0\nSKIP 7, 1\nSET 2, 0\nSET 3, 0")
+    for a, b in ((0, 0), (0, 1), (1, 0), (1, 1)):
+        await begin(dut, imem, program, gpio_in=a << 1)
+        ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+        while not ls.cpu.halted:
+            ls.pins({0: a, 1: b}.get(ls.edges, 1 - b) << 1)
+            state = await ls.edge()
+        assert state["in_shift_reg"] == (b << 7) | (a << 6), (a, b)
+        assert state["gpio"] == [a, 1, b, 0], (a, b)  # each SET skipped on its own sample
