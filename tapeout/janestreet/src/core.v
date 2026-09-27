@@ -4,7 +4,12 @@ module core(
     input      [15:0] imem_word,
     input      [8:0]  program_words,
     input      [3:0]  gpio_in,
+    input      [7:0]  tx_data,
+    output     [7:0]  rx_data,
+    output            pull_en,
+    output            push_en,
     output     [7:0]  imem_addr,
+    output     [3:0]  gpio_oe,
     output reg [3:0]  gpio_out
 );
     // opcodes
@@ -16,6 +21,11 @@ module core(
     localparam [2:0] OP_WAIT    = 3'b101;
     localparam [2:0] OP_SKIP    = 3'b110;
 
+    // config
+    localparam [1:0] CFG_SHIFT_DIR = 2'd0;
+    localparam [1:0] CFG_OD_01     = 2'd1;
+    localparam [1:0] CFG_OD_23     = 2'd2;
+    
     reg  [8:0] pc;
     reg  [4:0] delay_counter;
 
@@ -92,8 +102,45 @@ module core(
     assign last = issue ? (delay == 5'd0) : (delay_counter == 5'd1);
 
     wire pc_en;
-
     assign pc_en = last && !stall;
+
+    wire gpio_en;
+    assign gpio_en = issue && !stall && side && !is_jmp;
+
+    reg       shift_dir;
+    reg [3:0] open_drain;
+    wire      cfg_en;
+
+    assign cfg_en = issue && is_config;
+
+    assign gpio_oe = ~(open_drain & gpio_out);
+
+    // shift out
+    wire       shift_en;  
+    wire       shift_bit;
+    reg  [7:0] shift_reg;
+
+    assign shift_bit = (shift_dir == 0) ? shift_reg[0] : shift_reg[7];
+    assign shift_en  = issue && is_shift && !shift_select;
+
+    // shift in
+    wire       shift_in_en;
+    wire       in_bit;
+    reg  [7:0] in_shift_reg;
+
+    assign in_bit      = gpio_in[input_pin];
+    assign shift_in_en = issue && is_shift && shift_select;
+
+    // skip
+    wire   skip_taken;
+    assign skip_taken = is_skip && (in_shift_reg[skip_bit] == level);
+
+    // pull
+    assign pull_en = issue && is_fifo && !fifo_select && !tx_empty;
+
+    // push
+    assign rx_data = in_shift_reg;
+    assign push_en = issue && is_fifo && fifo_select && !rx_full;
 
     always @(posedge clk) begin
         if (reset) begin            
@@ -101,6 +148,11 @@ module core(
             pc            <= 9'd0;
             delay_counter <= 5'd0;
             gpio_out      <= 4'b1111;
+            shift_dir     <= 1'b0;
+            open_drain    <= 4'b0000;
+            shift_reg     <= 8'd0;
+            in_shift_reg  <= 8'd0;
+
         end
         else begin
             // Counter
@@ -111,9 +163,65 @@ module core(
                 delay_counter <= delay_counter - 5'd1;
             end
 
-            // pc 
-            if (pc_en && is_nop_set) begin
-                pc <= pc + 9'd1;
+            // PC
+            if (pc_en) begin
+                if (is_jmp) begin
+                    pc <= {1'b0, operand};
+                end
+                else if (is_skip) begin
+                    pc <= pc + (skip_taken ? 9'd2 : 9'd1);
+                end
+                else if (is_nop_set || is_config || is_shift || is_wait || is_fifo) begin
+                    pc <= pc + 9'd1;
+                end
+            end
+
+            // GPIO
+            if (gpio_en) begin
+                gpio_out[side_pin] <= side_val;
+            end 
+
+            // Config
+            if (cfg_en) begin
+                case (config_field)
+                    CFG_SHIFT_DIR : begin
+                        shift_dir <= config_value[0];
+                    end
+                    CFG_OD_01 : begin
+                        open_drain[1:0] <= config_value;
+                    end
+                    CFG_OD_23 : begin
+                        open_drain[3:2] <= config_value;
+                    end
+                    default: begin
+                    end
+                endcase
+            end
+
+            // Shift out
+            if (shift_en) begin
+                gpio_out[0] <= shift_bit;
+
+                if (shift_dir == 1'b0) begin
+                    shift_reg <= {1'b0, shift_reg[7:1]};
+                end else begin
+                    shift_reg <= {shift_reg[6:0], 1'b0};
+                end
+            end
+
+            // Shift in
+            if (shift_in_en) begin
+                if (shift_dir == 1'b0) begin
+                    in_shift_reg <= {in_bit, in_shift_reg[7:1]};
+                end
+                else begin
+                    in_shift_reg <= {in_shift_reg[6:0], in_bit};
+                end
+            end
+
+            // Pull
+            if (pull_en) begin
+                shift_reg <= tx_data;
             end
         end
     end
