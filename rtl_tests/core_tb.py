@@ -601,3 +601,65 @@ async def uart_tx_0x55_matches_model(dut):
 
     assert cpu.cycle == 88
     assert int(dut.gpio_out.value) & 1 == 1
+
+
+@cocotb.test()
+async def uart_rx_0xa5_matches_model(dut):
+    """The receiver end to end: programs/uart_rx.asm, cycle by cycle against
+    the model while the bench drives one 8N1 frame of 0xA5 onto gpio_in[0] at
+    8 clocks per bit. The WAIT stalls while the line idles high, issues on the
+    start edge, the eight SHIFT_INs sample mid-bit, PUSH hands 0xA5 out once
+    during the stop bit, and the JMP is back at the WAIT 80 clocks after the
+    edge, one frame. The program never halts, so the bench stops it there."""
+    program = load_program(PROGRAMS / "uart_rx.asm")
+    cpu = CPU(program, gpio_in=1)
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program), gpio_in=0b1111, rx_full=0)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+    pushed = []  # rx_data on every edge push_en led into
+
+    async def cycle(rx):
+        """Drive the RX pin between edges (the read-only phase forbids writes),
+        note a push leading into the edge, then step both sides across it."""
+        await FallingEdge(dut.clk)
+        cpu.gpio_in[0] = rx
+        dut.gpio_in.value = 0b1110 | rx
+        await ReadOnly()
+        if dut.push_en.value == 1:
+            pushed.append(int(dut.rx_data.value))
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+        return rtl
+
+    # Idle high: the WAIT stalls.
+    for _ in range(2):
+        rtl = await cycle(1)
+        assert cpu.stalled
+        assert (rtl["pc"], rtl["counter"]) == (0, 0)
+
+    byte = 0xA5
+    frame = [0] + [(byte >> bit) & 1 for bit in range(8)] + [1]  # start, d0..d7 LSB first, stop
+    start = cpu.cycle
+    for level in frame:
+        for _ in range(8):
+            await cycle(level)
+
+    # One frame, 80 clocks: back at the WAIT, the byte pushed exactly once.
+    assert cpu.cycle - start == 80
+    assert pushed == [byte]
+    assert cpu.rx_fifo == [byte]
+    assert int(dut.in_shift_reg.value) == byte
+
+    # Idle again: the WAIT stalls for the next start bit.
+    rtl = await cycle(1)
+    assert cpu.stalled
+    assert (rtl["pc"], rtl["counter"]) == (0, 0)
