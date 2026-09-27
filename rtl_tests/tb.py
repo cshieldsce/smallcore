@@ -37,6 +37,17 @@ def drive_inputs(dut, program_words, tx_empty=0, rx_full=0, gpio_in=0, tx_data=0
     dut.tx_data.value = tx_data
 
 
+def drive_host(dut, program_words):
+    """top.v's inputs besides clk, reset and imem_word, with the host idle:
+    nothing pushed, nothing popped, the input pins low. The FIFO flags are
+    top's own wires; the host sees tx_full and rx_empty."""
+    dut.program_words.value = program_words
+    dut.gpio_in.value = 0
+    dut.tx_data.value = 0
+    dut.tx_push.value = 0
+    dut.rx_pop.value = 0
+
+
 class Imem:
     """Combinational instruction memory: imem_word follows imem_addr in the
     same time step, like the model's `self.program[self.pc]`. A background task
@@ -50,6 +61,14 @@ class Imem:
 
     def read(self, addr):
         return self.program[addr] if addr < len(self.program) else 0
+
+    def load(self, program):
+        """Swap in another program without restarting the task, for a bench
+        that runs several in one test. Rewrites imem_word now, so call it
+        between edges, not in the read-only phase; the task keeps following
+        imem_addr from here."""
+        self.program = list(program)
+        self.dut.imem_word.value = self.read(int(self.dut.imem_addr.value))
 
     async def _drive(self):
         while True:

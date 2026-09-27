@@ -13,20 +13,10 @@ import cocotb
 from cocotb.triggers import FallingEdge, ReadOnly, RisingEdge
 
 from cpu import assemble, load_program  # sim/cpu.py
-from tb import Imem, reset, start_clock
+from tb import Imem, drive_host, reset, start_clock
 
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
 BIT = 8  # clocks per UART bit in uart_tx_pull.asm and uart_rx.asm
-
-
-def drive_host(dut, program_words):
-    """Drive every top input besides clk, reset and imem_word so none is X,
-    with the host idle: nothing pushed, nothing popped."""
-    dut.program_words.value = program_words
-    dut.gpio_in.value = 0
-    dut.tx_data.value = 0
-    dut.tx_push.value = 0
-    dut.rx_pop.value = 0
 
 
 def uart_frame(byte):
