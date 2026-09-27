@@ -92,8 +92,10 @@ module core(
     assign last = issue ? (delay == 5'd0) : (delay_counter == 5'd1);
 
     wire pc_en;
-
     assign pc_en = last && !stall;
+
+    wire gpio_en;
+    assign gpio_en = issue && !stall && side && !is_jmp;
 
     always @(posedge clk) begin
         if (reset) begin            
@@ -111,10 +113,15 @@ module core(
                 delay_counter <= delay_counter - 5'd1;
             end
 
-            // pc 
+            // PC
             if (pc_en && is_nop_set) begin
-                pc <= pc + 1;
+                pc <= pc + 9'd1;
             end
+
+            // GPIO
+            if (gpio_en) begin
+                gpio_out[side_pin] <= side_val;
+            end 
         end
     end
 

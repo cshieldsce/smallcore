@@ -77,3 +77,32 @@ async def nop_timing_matches_model(dut):
         rtl = rtl_state(dut)
         model = model_state(cpu)
         assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+
+@cocotb.test()
+async def set_timing_matches_model(dut):
+    """SET against the model, cycle by cycle. SET 2, 0 [2] must drive the pin
+    on its issue edge, hold it through the delay without rewriting it, and only
+    then let the pc move on; the next two SETs run back to back, and running
+    off the end checks halted."""
+    program = assemble("""
+        SET 2, 0 [2]
+        SET 1, 0
+        SET 2, 1
+    """)
+    cpu = CPU(program)
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program))
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+    while not cpu.halted:
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
