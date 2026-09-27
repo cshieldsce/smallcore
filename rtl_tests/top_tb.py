@@ -223,3 +223,97 @@ async def uart_rx_pin_to_host_byte(dut):
     dut.rx_pop.value = 0
     await ReadOnly()
     assert int(dut.rx_empty.value) == 1
+
+
+# SPI: the bench is the slave. It watches top's pins only, one sample per
+# clock, and reads the frame the way a mode 0 slave would: CS low frames the
+# transfer, MOSI is taken on every rising edge of SCLK.
+
+MOSI, SCLK, CS = 0, 1, 2  # gpio_out pins spi_tx_lsb.asm and spi_tx_msb.asm drive
+
+
+def rising_edges(trace):
+    return [i for i in range(1, len(trace)) if trace[i - 1] == 0 and trace[i] == 1]
+
+
+def falling_edges(trace):
+    return [i for i in range(1, len(trace)) if trace[i - 1] == 1 and trace[i] == 0]
+
+
+async def spi_pin_trace(dut, limit=200):
+    """Sample gpio_out after every rising edge of clk until the core halts,
+    plus a few clocks after so the idle levels show. Returns one list per pin,
+    one level per clock. Edges are found in the traces afterwards, so there is
+    no previous-level state to seed: the first sample is only ever a level."""
+    mosi, sclk, cs = [], [], []
+    tail = 4  # clocks recorded after the halt
+    for _ in range(limit):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        pins = int(dut.gpio_out.value)
+        mosi.append((pins >> MOSI) & 1)
+        sclk.append((pins >> SCLK) & 1)
+        cs.append((pins >> CS) & 1)
+        if int(dut.core_i.halted.value):
+            tail -= 1
+            if tail == 0:
+                return mosi, sclk, cs
+    raise AssertionError(f"core still running after {limit} clocks")
+
+
+def mode0_sampled(mosi, sclk, cs):
+    """What a mode 0 slave shifts in: MOSI on each rising edge of SCLK while
+    CS is low, in order."""
+    return [mosi[e] for e in rising_edges(sclk) if cs[e] == 0]
+
+
+@cocotb.test()
+async def spi_tx_lsb_host_byte_to_pins(dut):
+    """programs/spi_tx_lsb.asm end to end. The host pushes 0x96 into the TX
+    FIFO while program_words is 0, as in host_push_then_pull, then releases
+    the program; the PULL takes the byte and the SHIFT_OUTs clock it out.
+    0x96 = 1001_0110 is not a palindrome, so LSB first (0 1 1 0 1 0 0 1) and
+    MSB first (1 0 0 1 0 1 1 0) differ on the wire: a bit-order bug fails."""
+    program = load_program(PROGRAMS / "spi_tx_lsb.asm")
+    byte = 0x96
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert (int(dut.gpio_out.value) >> CS) & 1 == 1  # CS idle high out of reset
+    assert int(dut.tx_fifo.empty.value) == 1
+
+    # Host push with the core halted, then release it on the next falling edge.
+    await FallingEdge(dut.clk)
+    dut.tx_data.value = byte
+    dut.tx_push.value = 1
+    await FallingEdge(dut.clk)
+    dut.tx_push.value = 0
+    dut.program_words.value = len(program)
+
+    mosi, sclk, cs = await spi_pin_trace(dut)
+
+    # CS starts high, falls once, rises once.
+    assert cs[0] == 1
+    (start,), (end,) = falling_edges(cs), rising_edges(cs)
+    assert start < end
+    assert cs[end:] == [1] * len(cs[end:])
+
+    # Exactly 8 rising edges of SCLK, all inside the frame.
+    edges = rising_edges(sclk)
+    assert len(edges) == 8, f"rising edges of SCLK at {edges}"
+    assert all(start < e < end for e in edges)
+
+    # The slave's view of the byte: 0x96 LSB first.
+    assert mode0_sampled(mosi, sclk, cs) == [0, 1, 1, 0, 1, 0, 0, 1]
+
+    # Mode 0: SCLK is low when CS rises and stays low after.
+    assert sclk[end - 1] == 0
+    assert sclk[end:] == [0] * len(sclk[end:])
+
+    # The pins are driven, and the byte was consumed exactly once.
+    assert int(dut.gpio_oe.value) & 0b111 == 0b111
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.tx_full.value) == 0
