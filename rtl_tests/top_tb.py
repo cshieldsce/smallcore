@@ -963,6 +963,90 @@ async def i2c_write_stretch_slave_holds_scl_master_waits(dut):
     assert int(dut.rx_empty.value) == 1
 
 
+# SWD: the bench is the target. Stage 1, the request alone: the host owns
+# SWDIO, so the bench only watches top's pins, one sample per clock, and takes
+# SWDIO on every rising edge of SWCLK the way the target does. No turnaround,
+# no ACK, no data yet.
+
+SWDIO, SWCLK = 0, 1  # gpio_out pins swd_request.asm drives: SWDIO is the shift pin
+
+
+async def swd_pin_trace(dut, limit=200):
+    """Sample gpio_out and gpio_oe after every rising edge of clk until the
+    core halts, plus a few clocks after so the idle levels show. Returns
+    swdio, swclk and whether the pad was driving SWDIO, one entry per clock."""
+    swdio, swclk, swdio_oe = [], [], []
+    tail = 4  # clocks recorded after the halt
+    for _ in range(limit):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        pins, oe = int(dut.gpio_out.value), int(dut.gpio_oe.value)
+        swdio.append((pins >> SWDIO) & 1)
+        swclk.append((pins >> SWCLK) & 1)
+        swdio_oe.append((oe >> SWDIO) & 1)
+        if int(dut.core_i.halted.value):
+            tail -= 1
+            if tail == 0:
+                return swdio, swclk, swdio_oe
+    raise AssertionError(f"core still running after {limit} clocks")
+
+
+@cocotb.test()
+async def swd_request_host_byte_to_pins(dut):
+    """programs/swd_request.asm end to end. The host pushes 0xA9 into the TX
+    FIFO, a DP write to A[3:2] = 01: Start 1, APnDP 0, RnW 0, A2 1, A3 0,
+    parity 1, Stop 0, Park 1. The target on the pins samples SWDIO on each
+    rising edge of SWCLK and must see 1 0 0 1 0 1 0 1, bit 0 first. Not a
+    palindrome (backwards it is 1 0 1 0 1 0 0 1), so a bit-order slip fails.
+    The host owns SWDIO the whole way: there is no turnaround yet."""
+    program = load_program(PROGRAMS / "swd_request.asm")
+    byte = 0xA9
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert int(dut.gpio_out.value) & 0b11 == 0b11  # both lines high out of reset
+    assert int(dut.tx_fifo.empty.value) == 1
+
+    # Host push with the core halted, then release it on the next falling edge.
+    await FallingEdge(dut.clk)
+    dut.tx_data.value = byte
+    dut.tx_push.value = 1
+    await FallingEdge(dut.clk)
+    dut.tx_push.value = 0
+    dut.program_words.value = len(program)
+
+    swdio, swclk, swdio_oe = await swd_pin_trace(dut)
+
+    # Exactly 8 rising edges of SWCLK, 8 clocks apart, each held high for 4.
+    # The first falling edge is the idle drop before the request.
+    ups, downs = rising_edges(swclk), falling_edges(swclk)
+    assert len(ups) == 8, f"rising edges of SWCLK at {ups}"
+    assert [b - a for a, b in zip(ups, ups[1:])] == [8] * 7
+    assert [d - u for u, d in zip(ups, [d for d in downs if d > ups[0]])] == [4] * 8
+
+    # The target's view of the request: 0xA9 bit 0 first, with the start,
+    # stop and park bits where the protocol puts them and the parity right.
+    bits = [swdio[e] for e in ups]
+    assert bits == [1, 0, 0, 1, 0, 1, 0, 1]
+    start, apndp, rnw, a2, a3, parity, stop, park = bits
+    assert (start, stop, park) == (1, 0, 1)
+    assert parity == apndp ^ rnw ^ a2 ^ a3
+
+    # SWCLK idles low after the request. SWDIO is high from the park bit on,
+    # and the host drove it on every clock: no turnaround.
+    assert swclk[downs[-1]:] == [0] * len(swclk[downs[-1]:])
+    assert swdio[ups[-1]:] == [1] * len(swdio[ups[-1]:])
+    assert swdio_oe == [1] * len(swdio_oe)
+    assert int(dut.gpio_oe.value) & 0b11 == 0b11
+
+    # The request was consumed exactly once.
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.tx_full.value) == 0
+
+
 @cocotb.test()
 async def restart_resets_the_core_and_keeps_the_fifos(dut):
     """top.restart is the core's reset without the FIFOs' reset: a program
