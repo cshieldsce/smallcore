@@ -263,3 +263,31 @@ async def wait_stall_matches_model(dut):
         rtl = rtl_state(dut)
         model = model_state(cpu)
         assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+
+@cocotb.test()
+async def uart_tx_0x55_matches_model(dut):
+    """A real program end to end: programs/uart_tx_0x55.asm, cycle by cycle
+    against the model until it halts. Idle, start, 8 data bits and stop is
+    11 bit-times of SET [7], 8 clocks each, so 88 clocks, ending with the line
+    high."""
+    program = load_program(PROGRAMS / "uart_tx_0x55.asm")
+    cpu = CPU(program)
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program))
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+    while not cpu.halted:
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+    assert cpu.cycle == 88
+    assert int(dut.gpio_out.value) & 1 == 1
