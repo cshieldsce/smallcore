@@ -232,3 +232,105 @@ async def control_restarts_the_core_and_keeps_the_fifos(dut):
     assert await host_read(dut, CONTROL) == 13
     assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
     assert int(dut.top_i.program_words.value) == 0
+
+
+# SPI over the bus: the bench is the host on one side and a mode 0 slave on
+# the pads on the other, the far end of the wire.
+
+
+def bits_msb(byte):
+    """The bits of `byte`, bit 7 first: the wire order of an MSB-first transfer."""
+    return [(byte >> bit) & 1 for bit in range(7, -1, -1)]
+
+
+class Mode0Slave:
+    """A mode 0 slave on the MISO pad sending `bits` in wire order. Nobody
+    drives MISO while CS is high. Once CS is low the first bit is on the pad,
+    and the next goes on at every falling edge of SCLK, so each is stable
+    across the rising edge the master samples on. Called by Pads every falling
+    edge of clk with gpio_out and gpio_oe; remembers what it saw of MOSI on
+    each rising edge of SCLK, the byte it shifted in."""
+
+    def __init__(self, bits):
+        self.bits = bits
+        self.i = 0
+        self.sclk = 1
+        self.mosi = []
+
+    def __call__(self, out, oe):
+        cs, sclk, mosi = (out >> CS) & 1, (out >> SCLK) & 1, (out >> MOSI) & 1
+        if cs:
+            self.i = 0
+        else:
+            if self.sclk == 0 and sclk == 1:
+                self.mosi.append(mosi)
+            if self.sclk == 1 and sclk == 0:
+                self.i += 1
+        self.sclk = sclk
+        if cs:
+            return None
+        return self.bits[min(self.i, len(self.bits) - 1)]
+
+
+async def until_halted(dut, limit=300):
+    """Rising edges of clk until STATUS at the port says halted, then a few more."""
+    await FallingEdge(dut.clk)
+    dut.host_addr.value = STATUS
+    for _ in range(limit):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if int(dut.host_rdata.value) & HALTED:
+            await ClockCycles(dut.clk, 4)
+            return
+    raise AssertionError(f"not halted after {limit} clocks")
+
+
+@cocotb.test()
+async def spi_duplex_msb_over_the_host_bus(dut):
+    """The milestone. A developer at the host bus selects spi_duplex_msb, sees
+    it running, writes 0x96, and reads 0x53 back, with nothing outside the chip
+    but a mode 0 slave on the pads. The program came from rom.v, the byte went
+    through host.v into the real TX FIFO, out of MOSI in one 8-clock CS frame
+    MSB first, and the slave's byte came back through MISO, the input shift
+    register, PUSH, the real RX FIFO and host.v."""
+    pads = await begin(dut)
+    slave = Mode0Slave(bits_msb(0x53))
+    pads.attach(MISO, slave)
+
+    await host_write(dut, CONTROL, SPI_DUPLEX_MSB)
+    await ClockCycles(dut.clk, 10)
+    assert await host_read(dut, STATUS) == RX_EMPTY  # running, stalled on PULL, nothing yet
+    assert int(dut.gpio_oe.value) & (1 << MISO) == 0  # the program let go of the MISO pad
+    assert (int(dut.gpio_out.value) >> CS) & 1 == 1
+
+    await host_write(dut, TX_DATA, 0x96)
+    await until_halted(dut)
+    assert slave.mosi == bits_msb(0x96), f"the slave saw {slave.mosi}"
+    assert (int(dut.gpio_out.value) >> CS) & 1 == 1
+    assert await host_read(dut, STATUS) == HALTED  # done, a byte waiting, room in TX
+    assert await host_read(dut, RX_DATA) == 0x53
+    assert rx_count(dut) == 1
+    await host_pop(dut)
+    assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
+    assert rx_count(dut) == 0
+    await host_pop(dut)  # nothing to pop
+    assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
+    assert rx_count(dut) == 0
+
+
+@cocotb.test()
+async def spi_loopback_returns_the_byte_written(dut):
+    """The board test's RTL twin: pad 0 (MOSI) jumpered to pad 3 (MISO), both
+    duplex slots, each one returns the byte the host wrote. Loopback cannot
+    tell the bit orders apart, the slave test above does; this proves the
+    wiring the FPGA will have. The second byte is written before the second
+    select, so it is still queued after the restart."""
+    await begin(dut, wires=[(MOSI, MISO)])
+    for slot, byte in ((SPI_DUPLEX_MSB, 0x96), (SPI_DUPLEX_LSB, 0x3C)):
+        await host_write(dut, TX_DATA, byte)
+        await host_write(dut, CONTROL, slot)
+        await until_halted(dut)
+        assert await host_read(dut, STATUS) == HALTED
+        assert await host_read(dut, RX_DATA) == byte, f"slot {slot}"
+        await host_pop(dut)
+        assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
