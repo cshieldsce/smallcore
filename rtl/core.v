@@ -5,6 +5,7 @@ module core(
     input      [8:0]  program_words,
     input      [3:0]  gpio_in,
     output     [7:0]  imem_addr,
+    output     [3:0]  gpio_oe,
     output reg [3:0]  gpio_out
 );
     // opcodes
@@ -16,6 +17,11 @@ module core(
     localparam [2:0] OP_WAIT    = 3'b101;
     localparam [2:0] OP_SKIP    = 3'b110;
 
+    // config
+    localparam [1:0] CFG_SHIFT_DIR = 2'd0;
+    localparam [1:0] CFG_OD_01     = 2'd1;
+    localparam [1:0] CFG_OD_23     = 2'd2;
+    
     reg  [8:0] pc;
     reg  [4:0] delay_counter;
 
@@ -97,12 +103,22 @@ module core(
     wire gpio_en;
     assign gpio_en = issue && !stall && side && !is_jmp;
 
+    reg       shift_dir;
+    reg [3:0] open_drain;
+    wire      cfg_en;
+
+    assign cfg_en = issue && is_config;
+
+    assign gpio_oe = ~(open_drain & gpio_out);
+
     always @(posedge clk) begin
         if (reset) begin            
             // Reset sets PC=0, Counter=0, GPIO=1111 
             pc            <= 9'd0;
             delay_counter <= 5'd0;
             gpio_out      <= 4'b1111;
+            shift_dir     <= 1'b0;
+            open_drain    <= 4'b0000;
         end
         else begin
             // Counter
@@ -114,7 +130,7 @@ module core(
             end
 
             // PC
-            if (pc_en && is_nop_set) begin
+            if (pc_en && (is_nop_set || is_config)) begin
                 pc <= pc + 9'd1;
             end
 
@@ -122,6 +138,23 @@ module core(
             if (gpio_en) begin
                 gpio_out[side_pin] <= side_val;
             end 
+
+            // Config
+            if (cfg_en) begin
+                case (config_field)
+                    CFG_SHIFT_DIR : begin
+                        shift_dir <= config_value[0];
+                    end
+                    CFG_OD_01 : begin
+                        open_drain[1:0] <= config_value;
+                    end
+                    CFG_OD_23 : begin
+                        open_drain[3:2] <= config_value;
+                    end
+                    default: begin
+                    end
+                endcase
+            end
         end
     end
 
