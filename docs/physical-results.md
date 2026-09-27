@@ -85,6 +85,7 @@ Commit `132fe20`: `rtl/smallcore.v`, the chip: `host.v` (a four-register bus, st
 - Timing per corner: setup +10.15 ns slow, +10.74 typ, +11.09 fast; hold +0.11 fast, +0.31 typ, +0.64 slow. The worst path at the slow corner is about 9.85 ns, 0.7 ns longer than v1: the ROM lookup sits in the instruction fetch path, `sel` and `pc` through the case statement into decode, and that is now the critical path. 50 MHz still has half the period spare.
 - Budget: 1,010 synth cells is about 4% of the ~24K guidance for 6x4. The program library is not what fills the tile.
 - This run is the first with the real pinout, so hold-fix and pin counts from here on compare with this row, not with v1's provisional wrapper.
+- After this harden, review fixes added two AND gates in `top.v` (the FIFO pop and push are held off on a restart's clock) and eight in `host.v` (RX_DATA reads 0 while empty). Not re-hardened by hand; the CI run for that push has the numbers, a handful of cells over this row.
 
 ## Unit costs, typ lib
 

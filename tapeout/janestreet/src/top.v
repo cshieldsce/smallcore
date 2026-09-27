@@ -32,7 +32,7 @@ module top (
         .reset     (reset),
 
         .push      (tx_push),
-        .pop       (pull_en),
+        .pop       (pull_en & ~restart),   // a restart leaves the FIFOs untouched, even on a PULL's edge
         .push_data (tx_data),
 
         .head_data (core_tx_data),
@@ -50,7 +50,7 @@ module top (
         .clk       (clk),
         .reset     (reset),
 
-        .push      (push_en),
+        .push      (push_en & ~restart),  // same on a PUSH's edge
         .pop       (rx_pop),
         .push_data (core_rx_data),
 
