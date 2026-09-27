@@ -45,7 +45,8 @@ python -m pytest tests/test_uart_rx.py -v           # UART RX: uart_rx.asm fed b
 python -m pytest tests/test_i2c.py -v               # I2C master write on a bus model with a slave: one byte, clock stretching, address + data
 python tools/render_docs.py                         # docs/*.mmd -> .svg (needs mermaid-cli)
 make lint                                           # verilator --lint-only -Wall -Wno-fatal rtl/core.v
-make test-rtl                                       # python -m pytest rtl_tests: Verilator builds core.v into build/rtl/, cocotb runs rtl_tests/core_tb.py
+make test-rtl                                       # python -m pytest rtl_tests: Verilator builds core.v and top.v into build/rtl/, cocotb runs rtl_tests/*_tb.py
+python -m pytest rtl_tests/test_top_adversarial.py -v  # top.v under a hostile host: stalls held, delays one-shot, metamorphic pairs, seeded traffic in lockstep with the model
 WAVES=1 make test-rtl                               # same, plus build/rtl/dump.vcd (gtkwave build/rtl/dump.vcd)
 make test                                           # tests/ then rtl_tests/
 ```

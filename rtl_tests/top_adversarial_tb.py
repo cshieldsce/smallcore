@@ -421,3 +421,92 @@ async def a_stall_only_prepends_held_cycles(dut):
 
         await begin(dut, imem, program, gpio_in=0)
         prepends(prompt, await run(dut, before=level), s, k)
+
+
+# --- Host pressure ---------------------------------------------------------------
+
+
+def random_instruction(rng, n_words, ops=OPS):
+    """A valid instruction, drawn as tests/test_adversarial.py draws them:
+    an opcode from `ops`, operands in range, a JMP target inside the program
+    or its halt address, a side effect half the time and never SHIFT_OUT's
+    on pin 0."""
+    op = rng.choice(ops)
+    spec = ISA["instructions"][op]
+    delay = rng.choice((0, 0, 0, 1, 2, 3, DELAY_MAX))
+    if op == "JMP":
+        return Instruction(op, (rng.randrange(n_words + 1),), delay)
+    if op == "CONFIG":
+        cfg = rng.choice(list(ISA["config"].values()))
+        args = (cfg["field"], rng.randrange(1 << cfg["bits"]))
+    else:
+        args = tuple(rng.randrange(1 << o["bits"]) for o in spec["operands"])
+    side = None
+    if spec.get("side_effect") and rng.random() < 0.5:
+        side = (rng.choice((1, 2, 3)) if op == "SHIFT_OUT" else rng.randrange(4), rng.randrange(2))
+    return Instruction(op, args, delay, side)
+
+
+RECEIVER = OPS + ("PUSH",) * 6  # PUSH seven times in sixteen
+
+
+def random_program(rng):
+    """Two to eleven words. A quarter of the programs are receivers, heavy
+    on PUSH: the RX FIFO is four deep, so only a program that PUSHes four
+    times under a host that does not pop ever stalls a PUSH."""
+    n = rng.randrange(2, 12)
+    ops = RECEIVER if rng.random() < 0.25 else OPS
+    return [encode(random_instruction(rng, n, ops), ISA) for _ in range(n)]
+
+
+SEEDS = 100
+CYCLES = 200
+TEMPERAMENTS = (0.0, 0.05, 0.3, 0.8)  # how often a host acts per edge: from never to most edges
+
+
+@cocotb.test()
+async def random_programs_under_host_pressure_match_the_model(dut):
+    """SEEDS random programs, each for CYCLES clocks or until it halts,
+    against the golden CPU with a DEPTH-deep RX FIFO, edge for edge: the
+    core's registers, both FIFOs' count and head after every edge, and
+    every byte the host pops. The outside world is the same seed on both
+    sides. Each seed draws a host temperament: how often it pushes when the
+    TX FIFO is not full and how often it pops when the RX FIFO is not
+    empty, from never to most edges, so some runs starve the PULLs and
+    some let the PUSHes fill the FIFO. New input levels on every edge, so
+    WAITs stall and release at random. The sweep must reach every kind of
+    cycle for every kind of word to count."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    seen = {"stall": set(), "issue": set(), "hold": set()}
+    pushed = popped = halted = 0
+    for seed in range(SEEDS):
+        rng = random.Random(seed)
+        program = random_program(rng)
+        preload = [rng.randrange(256) for _ in range(rng.randrange(3))]
+        push_often, pop_often = rng.choice(TEMPERAMENTS), rng.choice(TEMPERAMENTS)
+        levels = rng.randrange(16)
+        await begin(dut, imem, program, tx=preload, gpio_in=levels)
+        cpu = CPU(program, tx_data=preload, rx_depth=DEPTH)
+        ls = Lockstep(dut, cpu)
+        ls.pins(levels)
+        for _ in range(CYCLES):
+            if cpu.halted:
+                halted += 1
+                break
+            op, counter = decode(program[cpu.pc], ISA).op, cpu.counter
+            if int(dut.tx_full.value) == 0 and rng.random() < push_often:
+                ls.push(rng.randrange(256))
+                pushed += 1
+            if int(dut.rx_empty.value) == 0 and rng.random() < pop_often:
+                ls.pop()
+            ls.pins(rng.randrange(16))
+            try:
+                await ls.edge()
+            except AssertionError as e:
+                raise AssertionError(f"seed {seed}, program {[f'{w:#06x}' for w in program]}: {e}") from e
+            seen["stall" if cpu.stalled else "issue" if counter == 0 else "hold"].add(op)
+        popped += len(ls.popped)
+    assert seen["stall"] == {"PULL", "PUSH", "WAIT"}, seen
+    assert seen["issue"] == seen["hold"] == set(OPS), seen
+    assert pushed > 0 and popped > 0 and 0 < halted < SEEDS, (pushed, popped, halted)
