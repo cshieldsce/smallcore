@@ -317,3 +317,55 @@ async def spi_tx_lsb_host_byte_to_pins(dut):
     assert int(dut.gpio_oe.value) & 0b111 == 0b111
     assert int(dut.tx_fifo.empty.value) == 1
     assert int(dut.tx_full.value) == 0
+
+
+@cocotb.test()
+async def spi_tx_msb_host_byte_to_pins(dut):
+    """programs/spi_tx_msb.asm end to end, the LSB test with the other
+    program. The two programs differ in one word, CONFIG shift_dir 0 vs 1, so
+    the same 0x96 must now reach the slave as 1 0 0 1 0 1 1 0: this proves
+    that CONFIG changes what is on the wire, not just a register. Framing,
+    clock count and clock idle are unchanged."""
+    program = load_program(PROGRAMS / "spi_tx_msb.asm")
+    byte = 0x96
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert (int(dut.gpio_out.value) >> CS) & 1 == 1  # CS idle high out of reset
+    assert int(dut.tx_fifo.empty.value) == 1
+
+    # Host push with the core halted, then release it on the next falling edge.
+    await FallingEdge(dut.clk)
+    dut.tx_data.value = byte
+    dut.tx_push.value = 1
+    await FallingEdge(dut.clk)
+    dut.tx_push.value = 0
+    dut.program_words.value = len(program)
+
+    mosi, sclk, cs = await spi_pin_trace(dut)
+
+    # CS starts high, falls once, rises once.
+    assert cs[0] == 1
+    (start,), (end,) = falling_edges(cs), rising_edges(cs)
+    assert start < end
+    assert cs[end:] == [1] * len(cs[end:])
+
+    # Exactly 8 rising edges of SCLK, all inside the frame.
+    edges = rising_edges(sclk)
+    assert len(edges) == 8, f"rising edges of SCLK at {edges}"
+    assert all(start < e < end for e in edges)
+
+    # The slave's view of the byte: 0x96 MSB first.
+    assert mode0_sampled(mosi, sclk, cs) == [1, 0, 0, 1, 0, 1, 1, 0]
+
+    # Mode 0: SCLK is low when CS rises and stays low after.
+    assert sclk[end - 1] == 0
+    assert sclk[end:] == [0] * len(sclk[end:])
+
+    # The pins are driven, and the byte was consumed exactly once.
+    assert int(dut.gpio_oe.value) & 0b111 == 0b111
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.tx_full.value) == 0
