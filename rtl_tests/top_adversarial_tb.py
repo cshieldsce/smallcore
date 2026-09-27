@@ -872,3 +872,42 @@ async def a_pin_driven_released_sampled_and_driven_again(dut):
     assert [(s["gpio"][2], s["gpio_oe"][2]) for s in states[6:]] == [(1, 1), (1, 1), (0, 1), (0, 1)]
     assert states[-1]["in_shift_reg"] == 0x50
     assert all(s["gpio_oe"] == oe(s["gpio"], s["open_drain"]) for s in states)
+
+
+@cocotb.test()
+async def an_open_drain_pin_releases_samples_and_drives(dut):
+    """An I2C master's SDA on pin 1, open-drain, SCL on pin 0 push-pull, a
+    slave on the SDA pad. START: SDA driven low, then SCL low. The ACK slot:
+    SDA released, SCL high, SDA sampled, SCL low; the slave holds the line
+    low through it or leaves it to the pull-up. SKIP 7, 0 on the sample
+    takes the ACK path, SDA driven low once more, or the JMP over it; then
+    SCL high and SDA released: STOP. SDA drives only its 0s, gpio_oe[1] is
+    1 exactly when gpio[1] is 0, and the pad reads the slave's 0 while it
+    holds, the master's 0 while it drives, the line's 1 otherwise."""
+    program = assemble(
+        "CONFIG open_drain01, 2\nSET 1, 0\nSET 0, 0\nSET 1, 1\nSET 0, 1\nSHIFT_IN 1\nSET 0, 0\n"
+        "SKIP 7, 0\nJMP stop\nSET 1, 0\nstop: SET 0, 1\nSET 1, 1"
+    )
+    imem = Imem(dut, [])
+    start_clock(dut)
+    pads = Pads(dut)
+    holding = False
+    pads.attach(1, lambda out, oe: 0 if holding else None)
+    for ack in (True, False):
+        await begin(dut, imem, program)
+        ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+        states, reads = [], []
+        while not ls.cpu.halted:
+            # Set after edge k, on the pad from the falling edge after edge k + 1: low across edges 5 to 7,
+            # SCL's rise, the sample and SCL's fall.
+            holding = ack and ls.edges in (3, 4, 5)
+            states.append(await ls.edge())
+            reads.append(ls.cpu.gpio_in[1])
+        s, a = (0, 0) if ack else (1, 1)
+        assert len(states) == 11, ack
+        assert reads == [1, 1, 0, 0, s, s, s, 1, 1, a, a], (ack, reads)
+        assert states[5]["in_shift_reg"] == (0x00 if ack else 0x80), ack
+        assert states[7]["pc"] == (9 if ack else 8), ack  # over the JMP on an ACK
+        assert [st["gpio"][1] for st in states] == [1, 0, 0, 1, 1, 1, 1, 1, a, a, 1], ack
+        assert all(st["gpio_oe"][1] == (1 if st["gpio"][1] == 0 else 0) for st in states), ack
+        assert all(st["gpio_oe"][0] == 1 for st in states), ack
