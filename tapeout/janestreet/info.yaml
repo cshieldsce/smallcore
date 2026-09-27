@@ -3,7 +3,7 @@ project:
   title:        "SmallCore"
   author:       "Charlie Shields"
   discord:      ""
-  description:  "PIO-style programmable protocol engine: 16-bit words with a per-word delay, shift registers, FIFOs, WAIT and SKIP"
+  description:  "PIO-style programmable protocol peripheral: 11 UART/SPI/I2C programs in ROM, a 4-register host bus, four bidirectional pads"
   language:     "Verilog"
   clock_hz:     0       # not decided yet; the template's CLOCK_PERIOD of 20 ns (50 MHz) is the flow's constraint
 
@@ -13,45 +13,49 @@ project:
   # Your top module name must start with "tt_um_". Make it unique by including your github username:
   top_module:  "tt_um_cshieldsce_smallcore"
 
-  # Source files live in ./src. core.v is staged from ../../rtl/core.v by `make sync`; do not edit it here.
+  # Source files live in ./src. All but the wrapper are staged from ../../rtl/ by `make sync`; do not edit them here.
   source_files:
     - "tt_um_cshieldsce_smallcore.v"
+    - "smallcore.v"
+    - "host.v"
+    - "rom.v"
     - "top.v"
     - "core.v"
     - "fifo.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
-# PROVISIONAL: this mapping only lets the flow elaborate the current core. It is not the final pinout.
+# Host register bus: ui = write data, uo = read data, uio[7:4] = re, we, addr[1:0] as inputs.
+# Protocol pads: uio[3:0] = gpio[3:0], bidirectional; the programs pick what each pin is.
 pinout:
   # Inputs
-  ui[0]: "imem_word[0] (provisional)"
-  ui[1]: "imem_word[1] / tx_empty (provisional)"
-  ui[2]: "imem_word[2] (provisional)"
-  ui[3]: "imem_word[3] (provisional)"
-  ui[4]: "imem_word[4] / gpio_in[0] / rx_full (provisional)"
-  ui[5]: "imem_word[5] / gpio_in[1] (provisional)"
-  ui[6]: "imem_word[6] / gpio_in[2] (provisional)"
-  ui[7]: "imem_word[7] / gpio_in[3] (provisional)"
+  ui[0]: "host_wdata[0]"
+  ui[1]: "host_wdata[1]"
+  ui[2]: "host_wdata[2]"
+  ui[3]: "host_wdata[3]"
+  ui[4]: "host_wdata[4]"
+  ui[5]: "host_wdata[5]"
+  ui[6]: "host_wdata[6]"
+  ui[7]: "host_wdata[7]"
 
   # Outputs
-  uo[0]: "imem_addr[0] (provisional)"
-  uo[1]: "imem_addr[1] (provisional)"
-  uo[2]: "imem_addr[2] (provisional)"
-  uo[3]: "imem_addr[3] (provisional)"
-  uo[4]: "imem_addr[4] (provisional)"
-  uo[5]: "imem_addr[5] (provisional)"
-  uo[6]: "imem_addr[6] (provisional)"
-  uo[7]: "imem_addr[7] (provisional)"
+  uo[0]: "host_rdata[0]"
+  uo[1]: "host_rdata[1]"
+  uo[2]: "host_rdata[2]"
+  uo[3]: "host_rdata[3]"
+  uo[4]: "host_rdata[4]"
+  uo[5]: "host_rdata[5]"
+  uo[6]: "host_rdata[6]"
+  uo[7]: "host_rdata[7]"
 
   # Bidirectional pins
-  uio[0]: "gpio_out[0] out / imem_word[8] in (provisional)"
-  uio[1]: "gpio_out[1] out / imem_word[9] in (provisional)"
-  uio[2]: "gpio_out[2] out / imem_word[10] in (provisional)"
-  uio[3]: "gpio_out[3] out / imem_word[11] in (provisional)"
-  uio[4]: "imem_word[12] (provisional)"
-  uio[5]: "imem_word[13] (provisional)"
-  uio[6]: "imem_word[14] (provisional)"
-  uio[7]: "imem_word[15] (provisional)"
+  uio[0]: "gpio[0]: MOSI / UART TX / UART RX / SDA"
+  uio[1]: "gpio[1]: SCLK / SCL"
+  uio[2]: "gpio[2]: CS"
+  uio[3]: "gpio[3]: MISO"
+  uio[4]: "host_addr[0] (input)"
+  uio[5]: "host_addr[1] (input)"
+  uio[6]: "host_we (input)"
+  uio[7]: "host_re (input)"
 
 # Do not change!
 yaml_version: 6

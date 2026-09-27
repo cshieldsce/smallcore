@@ -1,5 +1,5 @@
 # Tiny Tapeout IHP CMOS5L packaging for the Jane Street protocol emulator competition.
-# The RTL lives in ../../rtl; `make sync` stages it into src/. Nothing in src/core.v, top.v, fifo.v is edited by hand.
+# The RTL lives in ../../rtl; `make sync` stages it into src/. Nothing in src/smallcore.v, host.v, rom.v, top.v, core.v, fifo.v is edited by hand.
 #
 # One-time setup (WSL/Linux): make setup            clones tt-support-tools into tt/ and installs the PDK into $(PDK_ROOT)
 #                              python venv with     pip install -r tt/requirements.txt librelane==$(LIBRELANE_VERSION)
@@ -12,7 +12,7 @@ LIBRELANE_VERSION ?= 3.1.0.dev3
 TT_TOOLS_REF      ?= ihp-sg13cmos5l
 TT                 = $(PYTHON) tt/tt_tool.py --ihp
 RTL                = ../../rtl
-RTL_FILES          = top.v core.v fifo.v
+RTL_FILES          = smallcore.v host.v rom.v top.v core.v fifo.v
 
 export PDK_ROOT
 # tt_tool.py shells out to yowasp-yosys by name, so the venv's bin/ has to be on PATH, not just its python
@@ -42,9 +42,9 @@ synth-top: sync  # same for the TT wrapper + core, what LibreLane's synthesis st
 	TOP=tt_um_cshieldsce_smallcore $(YOSYS) -q -c scripts/synth_core.tcl
 	grep -E " cells$$|Chip area" build/synth/tt_um_cshieldsce_smallcore_stat.txt
 
-synth-breakdown: sync  # cells, area and flops for core, top and wrapper, one row of docs/physical-results.md's breakdown table
+synth-breakdown: sync  # cells, area and flops for core, top, smallcore and wrapper, one row of docs/physical-results.md's breakdown table
 	mkdir -p build/synth
-	@for t in core top tt_um_cshieldsce_smallcore; do \
+	@for t in core top smallcore tt_um_cshieldsce_smallcore; do \
 	  TOP=$$t $(YOSYS) -q -c scripts/synth_core.tcl || exit 1; \
 	  f=build/synth/$${t}_stat.txt; \
 	  printf '%-28s cells %6s  area %10s um2  flops %4s\n' $$t \

@@ -1,8 +1,18 @@
-# Smoke test of the provisional wrapper: reset values, then NOP words advance imem_addr once per cycle.
-# The cycle-accurate checks live in rtl_tests/ against sim/cpu.py; this only proves the wrapper wiring.
+# Smoke test of the wrapper: pins reach smallcore. Reset, STATUS says halted;
+# a CONTROL write held 3 clocks selects spi_duplex_msb and STATUS says running.
+# The cycle-accurate tests live in rtl_tests/ against sim/cpu.py.
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
+
+STATUS, CONTROL = 2, 3
+HALTED, RX_EMPTY = 0b100, 0b001
+SPI_DUPLEX_MSB = 8
+
+
+def uio(addr, we=0, re=0, pads=0b1111):
+    """uio_in: re on 7, we on 6, addr on 5:4, the four pads' levels on 3:0."""
+    return (re << 7) | (we << 6) | (addr << 4) | pads
 
 
 @cocotb.test()
@@ -12,22 +22,20 @@ async def test_wrapper(dut):
 
     dut.ena.value = 1
     dut.ui_in.value = 0
-    dut.uio_in.value = 0
+    dut.uio_in.value = uio(STATUS)
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 5)
-
-    # provisional mapping: imem_word = {uio_in, ui_in} = NOP [0], program_words = {ui_in[1], uio_in} = 0
-    assert dut.uio_oe.value == 0x0F
-    assert int(dut.uio_out.value) & 0x0F == 0x0F  # gpio_out resets to 1111; [7:4] fold in FIFO storage, not reset
-    assert dut.uo_out.value == 0      # pc = 0
-
     dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 3)
-    assert dut.uo_out.value == 0      # program_words = 0: halted, pc holds
+    await ClockCycles(dut.clk, 3)  # the host keeps its strobes low 3 clocks after reset
 
-    # ui_in[1] = 1 makes program_words = 0x100 and imem_word = NOP with operand bit 1 set, still a NOP [0]
-    dut.ui_in.value = 0x02
-    await ClockCycles(dut.clk, 1)
-    for expected in range(1, 5):
-        await ClockCycles(dut.clk, 1)
-        assert int(dut.uo_out.value) == expected, f"pc {int(dut.uo_out.value)} != {expected}"
+    assert int(dut.uio_oe.value) == 0x0F, "pads driven, host control pins inputs"
+    assert int(dut.uio_out.value) & 0x0F == 0x0F, "gpio_out resets to 1111"
+    assert int(dut.uo_out.value) == HALTED | RX_EMPTY, "no program selected"
+
+    dut.ui_in.value = SPI_DUPLEX_MSB
+    dut.uio_in.value = uio(CONTROL, we=1)
+    await ClockCycles(dut.clk, 3)
+    dut.uio_in.value = uio(STATUS)
+    await ClockCycles(dut.clk, 6)
+    assert int(dut.uo_out.value) == RX_EMPTY, "running, stalled on PULL"
+    assert int(dut.uio_oe.value) & 0x08 == 0, "MISO pad released by the program"
