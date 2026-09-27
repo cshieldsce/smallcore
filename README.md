@@ -22,13 +22,33 @@ isa.yaml      instruction set: encoding, opcodes, operand ranges
 programs/     assembly programs (.asm)
 sim/          simulator and assembler (cpu.py)
 tests/        pytest test benches
-rtl/          the Verilog core (core.v), Verilog-2001
-rtl_tests/    cocotb benches for rtl/ under Verilator, checked against sim/cpu.py
+rtl/          Verilog-2001: core.v, fifo.v, top.v (the core with its TX and RX FIFOs)
+rtl_tests/    cocotb benches for rtl/ under Verilator, checked against sim/cpu.py; top_tb.py runs the protocols end to end
 docs/         Mermaid diagrams (.mmd) and rendered .svg, see Docs below
 tools/        wavetrace.py (waveform helper), render_docs.py (docs/*.mmd -> .svg)
-tapeout/      janestreet/: Tiny Tapeout IHP CMOS5L packaging, 6x4 tiles; src/core.v is staged from rtl/ by make tapeout-sync
+tapeout/      janestreet/: Tiny Tapeout IHP CMOS5L packaging, 6x4 tiles; src/{top,core,fifo}.v are staged from rtl/ by make tapeout-sync
 build/        generated: test waveforms, caches (safe to delete)
 ```
+
+## Status
+
+**Baseline v1**, tag `v1`, 2026-09-27: UART, SPI and I²C are verified end to end in RTL. Each program runs on `rtl/top.v`, the core with its TX and RX FIFOs, under Verilator, and the bench is the far end of the wire: it touches only top's host ports and pins, pushing bytes into the real TX FIFO, popping them from the real RX FIFO, and reading or driving `gpio_out`, `gpio_oe` and `gpio_in`.
+
+| protocol | programs | the bench is | proves |
+|---|---|---|---|
+| UART | `uart_tx_pull.asm`, `uart_rx.asm` | a line sampled once per clock; an 8N1 frame driven in | a host byte leaves as a frame at 8 clocks per bit; a frame arrives as one host byte |
+| SPI mode 0 | `spi_tx_lsb.asm`, `spi_tx_msb.asm`, `spi_duplex_lsb.asm`, `spi_duplex_msb.asm` | a slave that samples MOSI on SCLK's rise and drives MISO while it is low | CS frames exactly eight clocks; 0x96 leaves in either bit order under `CONFIG shift_dir`; 0x53 comes back through SHIFT_IN, PUSH and the RX FIFO in both orders |
+| I²C master write | `i2c_write.asm`, `i2c_write_addr_data.asm`, `i2c_write_stretch.asm` | two open-drain lines with pull-ups, resolved every clock from `gpio_oe`, and a slave that ACKs or NACKs and can hold SCL | START, the byte, the ACK or NACK sampled and PUSHed to the host, STOP; the ACK steers SKIP, address then data on an ACK, STOP with the data byte still in the FIFO on a NACK; a slave stretching 8 clocks holds the master 5 clocks per clock, 50 in all, the model's numbers |
+
+Behind that: `sim/cpu.py` is the golden model, with 2431 pytest tests in `tests/` including an adversarial sweep of every 16-bit word. `rtl_tests/core_tb.py` runs the core in lockstep with the model (18 tests), `fifo_tb.py` the FIFO (7), `top_tb.py` the protocols above (13), and `top_adversarial_tb.py` (8) holds each kind of stall for 37 clocks and releases it once, checks that every delayed word acts once, compares LSB and MSB first for all 256 bytes, and runs 100 seeded programs under random host pushes, pops and pin levels in lockstep with the model and its FIFOs. The SPI, I²C and adversarial tests were each shown to fail under a mutation of the program, the bench or the RTL before being kept.
+
+The v1 RTL hardened through the Tiny Tapeout IHP CMOS5L flow at 6x4 tiles with zero DRC, antenna and LVS violations; `docs/physical-results.md` has the row, "+ FIFO storage", and its notes.
+
+| synth cells | routed cells | cell area | utilization of 6x4 | setup slack | hold slack |
+|---|---|---|---|---|---|
+| 695 | 991 | 16,571 µm² | 1.84% | +10.86 ns | +0.14 ns |
+
+Slacks are at the flow's 20 ns clock, worst corner. The two DEPTH 4 FIFOs are 60% of `top` and the biggest area lever; the wrapper's pin mapping is still provisional. Known gap, accepted for v1: the random lockstep compares each FIFO by count and head, not every queued byte, so a byte corrupted deeper in a FIFO would show only on reaching the head; `fifo_tb.py` covers ordering, wrap and full on its own.
 
 ## Commands
 

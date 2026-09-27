@@ -12,7 +12,7 @@ Measured numbers from the Tiny Tapeout IHP CMOS5L flow in `tapeout/janestreet/`,
 | + SHIFT | – | | | | | | |
 | + WAIT/JMP/SKIP | – | | | | | | |
 | + FIFO interface | – | | | | | | |
-| + FIFO storage (top: core + TX/RX FIFOs, DEPTH 4) | 695 | 991 | 16,571 µm² | 1.84% | +10.86 ns | +0.14 ns | 2026-09-26 |
+| + FIFO storage (top: core + TX/RX FIFOs, DEPTH 4), Baseline v1 | 695 | 991 | 16,571 µm² | 1.84% | +10.86 ns | +0.14 ns | 2026-09-26 |
 | + program memory/interface | | | | | | | |
 | final | | | | | | | |
 
@@ -55,6 +55,8 @@ To add a row: from `tapeout/janestreet/`, run `make synth-breakdown`. It prints 
 ## FIFO storage notes
 
 Commit `f795664`: `rtl/top.v` with the complete ISA core, a TX FIFO and an RX FIFO, both DEPTH 4, end-to-end UART TX and RX passing in `rtl_tests/top_tb.py`. The rows from SET/GPIO to FIFO interface were not hardened on their own; this row is the first measurement after RTL-0 and covers all of them.
+
+- This RTL is Baseline v1. Tag `v1` (2026-09-27) has `rtl/` byte for byte as at `f795664`; what landed between is tests and docs: SPI and I2C end to end in `rtl_tests/top_tb.py` and the `top_adversarial_tb.py` suite. So this row is the v1 numbers, and the README's Status section quotes it.
 
 - Wrapper change: `src/tt_um_cshieldsce_smallcore.v` now instantiates `top` instead of `core`, and `make sync` stages `top.v`, `core.v` and `fifo.v`. The old wrapper predated the FIFO ports: it left the core's `tx_data` undriven and `gpio_oe`, `rx_data`, `pull_en`, `push_en` unconnected, so synthesis would have pruned logic and under-reported the core. The new wrapper folds `tx_full`, `rx_empty` and the parity of each `rx_data` nibble into `uio_out[7:4]` with `gpio_oe`, so every output reaches a port. Still provisional pins; not comparable one-for-one with RTL-0's wrapper.
 - Synth cells 695 (11,948 µm² synth area) from LibreLane's `06-yosys-synthesis/reports/stat.rpt`. 125 of them are tie-high: every flop maps to `dfrbpq_1` with its async `RESET_B` tied off, since reset is synchronous, so each of the 121 flops gets a tie, plus 4 for the constant `uio_oe` bits.
