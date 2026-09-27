@@ -26,12 +26,12 @@ check:  # fail if src/ has drifted from rtl/
 synth: sync  # quick yosys mapping of the core alone against the typ lib: cells and cell area, seconds not minutes
 	mkdir -p build/synth
 	TOP=core $(YOSYS) -q -c scripts/synth_core.tcl
-	grep -E " cells$|Chip area" build/synth/core_stat.txt
+	grep -E " cells$$|Chip area" build/synth/core_stat.txt
 
 synth-top: sync  # same for the TT wrapper + core, what LibreLane's synthesis step sees
 	mkdir -p build/synth
 	TOP=tt_um_cshieldsce_smallcore $(YOSYS) -q -c scripts/synth_core.tcl
-	grep -E " cells$|Chip area" build/synth/tt_um_cshieldsce_smallcore_stat.txt
+	grep -E " cells$$|Chip area" build/synth/tt_um_cshieldsce_smallcore_stat.txt
 
 config: sync  # src/user_config.json + src/config_merged.json from info.yaml (6x4 die area, def template)
 	$(TT) --create-user-config
