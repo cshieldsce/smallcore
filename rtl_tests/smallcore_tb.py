@@ -21,10 +21,10 @@ NONE, SPI_TX_MSB, SPI_DUPLEX_LSB, SPI_DUPLEX_MSB = 0, 6, 7, 8  # manifest slots
 MOSI, SCLK, CS, MISO = 0, 1, 2, 3  # pads the SPI programs use
 
 
-async def host_write(dut, addr, data, hold=3, gap=3):
+async def host_write(dut, addr, data, hold=4, gap=3):
     """One write: addr and data set, we high for `hold` rising edges, low for
-    `gap` more. Everything moves on falling edges, the read-only phase forbids
-    writes. Leaves addr on the register written."""
+    `gap` more, the bus rules' minimums. Everything moves on falling edges,
+    the read-only phase forbids writes. Leaves addr on the register written."""
     await FallingEdge(dut.clk)
     dut.host_addr.value = addr
     dut.host_wdata.value = data
@@ -37,7 +37,7 @@ async def host_write(dut, addr, data, hold=3, gap=3):
         await RisingEdge(dut.clk)
 
 
-async def host_pop(dut, hold=3, gap=3):
+async def host_pop(dut, hold=4, gap=3):
     """One pop: re high for `hold` rising edges with addr on RX_DATA."""
     await FallingEdge(dut.clk)
     dut.host_addr.value = RX_DATA
@@ -101,15 +101,15 @@ async def we_is_an_edge_not_a_level(dut):
     strobes with the minimum gap are two transactions. The last write is to
     CONTROL, so a decode that ignored addr would push a fourth byte."""
     await begin(dut)
-    await host_write(dut, TX_DATA, 0x96, hold=3)
+    await host_write(dut, TX_DATA, 0x96, hold=4)
     await ReadOnly()
     assert tx_count(dut) == 1
     assert int(dut.top_i.tx_fifo.head_data.value) == 0x96
     await host_write(dut, TX_DATA, 0x53, hold=20)
     await ReadOnly()
     assert tx_count(dut) == 2
-    await host_write(dut, TX_DATA, 0x3C, hold=3, gap=3)
-    await host_write(dut, CONTROL, NONE, hold=3, gap=3)
+    await host_write(dut, TX_DATA, 0x3C, hold=4, gap=3)
+    await host_write(dut, CONTROL, NONE, hold=4, gap=3)
     await ReadOnly()
     assert tx_count(dut) == 3
     assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
@@ -152,7 +152,7 @@ async def strobes_on_other_addresses_do_nothing(dut):
         await FallingEdge(dut.clk)
         dut.host_addr.value = addr
         dut.host_re.value = 1
-        await ClockCycles(dut.clk, 3)
+        await ClockCycles(dut.clk, 4)
         await FallingEdge(dut.clk)
         dut.host_re.value = 0
         await ClockCycles(dut.clk, 3)
@@ -177,6 +177,29 @@ async def tx_fifo_full_drops_the_fifth_write(dut):
     assert tx_count(dut) == 4
     assert int(dut.top_i.tx_fifo.head_data.value) == 0x96
     assert await host_read(dut, STATUS) == HALTED | TX_FULL | RX_EMPTY
+
+
+@cocotb.test()
+async def a_strobe_in_the_worst_phase_still_acts_once(dut):
+    """The bus rule's reason. A strobe raised just after a rising edge is
+    captured almost a full clock later, and the transaction decodes addr and
+    wdata from the pins two clocks after that capture. Held 4 clocks, with
+    addr and wdata changing the moment it drops, it still pushes the right
+    byte exactly once; 3 would drop on the decoding clock."""
+    await begin(dut)
+    await RisingEdge(dut.clk)  # just after an edge: the worst phase
+    dut.host_addr.value = TX_DATA
+    dut.host_wdata.value = 0x96
+    dut.host_we.value = 1
+    await ClockCycles(dut.clk, 4)  # captured on the first, decoded on the third, still high on the fourth
+    dut.host_we.value = 0  # drops just after the fourth edge, and the pins move with it
+    dut.host_addr.value = CONTROL
+    dut.host_wdata.value = 13
+    await ClockCycles(dut.clk, 4)
+    await ReadOnly()
+    assert tx_count(dut) == 1
+    assert int(dut.top_i.tx_fifo.head_data.value) == 0x96
+    assert await host_read(dut, CONTROL) == NONE  # nothing decoded after the drop
 
 
 async def until_cs(dut, level, limit=200):
@@ -208,7 +231,7 @@ async def control_restarts_the_core_and_keeps_the_fifos(dut):
     assert tx_count(dut) == 1
     assert (await host_read(dut, STATUS)) & HALTED == 0
 
-    await host_write(dut, CONTROL, SPI_TX_MSB, hold=3, gap=0)
+    await host_write(dut, CONTROL, SPI_TX_MSB, hold=3, gap=0)  # 3 high, raised on a falling edge: the restart is the third edge
     await ReadOnly()  # the clock after the restart pulse
     assert int(dut.top_i.core_i.pc.value) <= 1  # back at the top
     assert int(dut.gpio_out.value) == 0b1111  # reset levels: CS high, SCLK high
@@ -334,3 +357,23 @@ async def spi_loopback_returns_the_byte_written(dut):
         assert await host_read(dut, RX_DATA) == byte, f"slot {slot}"
         await host_pop(dut)
         assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
+
+
+@cocotb.test()
+async def rx_data_reads_zero_while_empty(dut):
+    """RX_DATA is 0 whenever the RX FIFO is empty, not whatever its memory
+    holds. Four loopback frames wrap the DEPTH 4 ring, so after the fourth
+    pop the read pointer is back on the slot that held the first byte; a
+    read that showed the memory would show 0x96. Silicon does not zero its
+    memory, so the read is gated on empty, and the reset-state test's
+    RX_DATA == 0 is true by design rather than by the simulator."""
+    await begin(dut, wires=[(MOSI, MISO)])
+    for byte in (0x96, 0x3C, 0x53, 0xC3):
+        await host_write(dut, TX_DATA, byte)
+        await host_write(dut, CONTROL, SPI_DUPLEX_MSB)
+        await until_halted(dut)
+        assert await host_read(dut, RX_DATA) == byte
+        await host_pop(dut)
+        assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
+        assert await host_read(dut, RX_DATA) == 0, f"empty after {byte:#04x}"
+    assert int(dut.top_i.rx_fifo.rd_ptr.value) == 0, "the ring wrapped: the test hit the case"
