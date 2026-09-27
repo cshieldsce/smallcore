@@ -966,50 +966,97 @@ async def i2c_write_stretch_slave_holds_scl_master_waits(dut):
 # SWD: the bench is the wire and the target. Stage 1, the request: the host
 # owns SWDIO and the target takes it on every rising edge of SWCLK. Stage 2,
 # the turnaround: after the park bit the host lets go of SWDIO for one clock.
-# The bench resolves SWDIO every clock from the pad (gpio_out, gpio_oe) and a
-# pull-up, and feeds it back on gpio_in, the pad readback. No ACK, no data yet.
+# Stage 3, the ACK: the target takes the line on the turnaround's rise with
+# ACK[0], then ACK[1], ACK[2], and lets go; the host samples the three and
+# PUSHes them. The bench resolves SWDIO every clock from the pad (gpio_out,
+# gpio_oe), the target and a pull-up, and feeds it back on gpio_in, the pad
+# readback. No data yet.
 
 SWDIO, SWCLK = 0, 1  # the same pin numbers on gpio_out/gpio_oe (the pad) and gpio_in (the wire): SWDIO is the shift pin
+SWD_OK, SWD_WAIT, SWD_FAULT = 1, 2, 4  # the ACK, ACK[0] first on the wire
 
 
-async def swd_wire(dut, limit=200):
+class SwdTarget:
+    """A target that answers every request with `ack`. It follows the clock:
+    on each rising edge of SWCLK it samples the line as it stood at the edge.
+    The first eight samples are the request, checked after the eighth: start
+    1, stop 0, park 1, parity right, and kept as `request`, the byte the host
+    sent. On the ninth rise, the turnaround's, it takes the line with ACK[0],
+    moves to ACK[1] and ACK[2] on the next two, and lets go on the twelfth.
+    `drive` is what it puts on the wire: 0, 1 or None."""
+
+    def __init__(self, ack=SWD_OK):
+        self.bits = [(ack >> i) & 1 for i in range(3)]
+        self.swclk = 1  # the clock as last seen: every pin is high out of reset
+        self.samples = []
+        self.request = None
+        self.drive = None
+
+    def update(self, swdio, swclk):
+        if swclk and not self.swclk:
+            self.samples.append(swdio)
+            n = len(self.samples)
+            if n == 8:
+                start, apndp, rnw, a2, a3, parity, stop, park = self.samples
+                assert (start, stop, park) == (1, 0, 1), f"bad request framing: {self.samples}"
+                assert parity == apndp ^ rnw ^ a2 ^ a3, f"request parity error: {self.samples}"
+                self.request = sum(bit << i for i, bit in enumerate(self.samples))
+            i = n - 9  # 0 on the turnaround's rise
+            self.drive = self.bits[i] if 0 <= i < 3 else None
+        self.swclk = swclk
+        return self.drive
+
+
+async def swd_wire(dut, target, limit=250):
     """The wire, until the core halts plus a few clocks. On every falling edge
-    of clk it resolves SWDIO from the pad and the pull-up, puts it on
-    gpio_in[0] for the host's next edge, and records it. Returns three lists,
-    one entry per clock: swdio (the wire), swclk, and whether the pad was
-    driving SWDIO."""
-    swdio, swclk, host_drives = [], [], []
+    of clk it shows the target the wire as it stood for the host's last edge,
+    resolves SWDIO from the pad, the target's answer and the pull-up, puts it
+    on gpio_in[0] for the host's next edge, and records it. A pad driving
+    against the target is a fight, which no working host has: it fails here.
+    Returns four lists, one entry per clock: swdio (the wire), swclk, whether
+    the pad was driving SWDIO, and what the target drove (0, 1 or None)."""
+    swdio, swclk, host_drives, target_drives = [], [], [], []
+    line = 1
     tail = 4  # clocks recorded after the halt
     for _ in range(limit):
         await FallingEdge(dut.clk)
         out, oe = int(dut.gpio_out.value), int(dut.gpio_oe.value)
+        clock = (out >> SWCLK) & 1
+        drive = target.update(line, clock)
         driving = (oe >> SWDIO) & 1
-        level = (out >> SWDIO) & 1 if driving else 1
-        dut.gpio_in.value = (int(dut.gpio_in.value) & ~(1 << SWDIO)) | (level << SWDIO)
-        swdio.append(level)
-        swclk.append((out >> SWCLK) & 1)
+        pad = (out >> SWDIO) & 1 if driving else None
+        assert not (pad is not None and drive is not None and pad != drive), f"the pad drives {pad} against the target's {drive}"
+        line = pad if pad is not None else drive if drive is not None else 1
+        dut.gpio_in.value = (int(dut.gpio_in.value) & ~(1 << SWDIO)) | (line << SWDIO)
+        swdio.append(line)
+        swclk.append(clock)
         host_drives.append(driving)
+        target_drives.append(drive)
         await RisingEdge(dut.clk)
         await ReadOnly()
         if int(dut.core_i.halted.value):
             tail -= 1
             if tail == 0:
-                return swdio, swclk, host_drives
+                return swdio, swclk, host_drives, target_drives
     raise AssertionError(f"core still running after {limit} clocks")
 
 
 @cocotb.test()
-async def swd_request_host_byte_to_pins_then_lets_go(dut):
+async def swd_request_host_byte_to_wire_ack_to_host(dut):
     """programs/swd_request.asm end to end. The host pushes 0xA9 into the TX
     FIFO, a DP write to A[3:2] = 01: Start 1, APnDP 0, RnW 0, A2 1, A3 0,
     parity 1, Stop 0, Park 1. The target on the wire samples SWDIO on each
-    rising edge of SWCLK and must see 1 0 0 1 0 1 0 1, bit 0 first. Not a
-    palindrome (backwards it is 1 0 1 0 1 0 0 1), so a bit-order slip fails.
-    The host drives SWDIO through the park bit's clock, lets go as that clock
-    falls, gives one more clock with nobody driving, the turnaround, and
-    halts with the line let go and reading high from the pull-up."""
+    rising edge of SWCLK and must see 1 0 0 1 0 1 0 1, bit 0 first (not a
+    palindrome: backwards it is 1 0 1 0 1 0 0 1, so a bit-order slip fails).
+    The host drives SWDIO through the park bit's clock and lets go as that
+    clock falls; the turnaround's rise finds nobody driving, and the target
+    takes the line there with OK, 1 0 0. The host samples the three bits on
+    the next three rises, through the pad readback, SHIFT_IN and in_shift_reg,
+    and PUSHes them: the host reads 0x20, the ACK in bits 7:5. OK and FAULT
+    are mirror images, so ACK[0] first is proven: FAULT would read 0x80."""
     program = load_program(PROGRAMS / "swd_request.asm")
     byte = 0xA9
+    target = SwdTarget(SWD_OK)
     dut.imem_word.value = 0
     drive_host(dut, program_words=0)
     dut.gpio_in.value = 0b0001  # the wire idles high
@@ -1019,6 +1066,7 @@ async def swd_request_host_byte_to_pins_then_lets_go(dut):
     await ReadOnly()
     assert int(dut.gpio_out.value) & 0b11 == 0b11  # both lines high out of reset
     assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.rx_empty.value) == 1
 
     # Host push with the core halted, then release it on the next falling edge.
     await FallingEdge(dut.clk)
@@ -1028,41 +1076,59 @@ async def swd_request_host_byte_to_pins_then_lets_go(dut):
     dut.tx_push.value = 0
     dut.program_words.value = len(program)
 
-    swdio, swclk, host_drives = await swd_wire(dut)
+    swdio, swclk, host_drives, target_drives = await swd_wire(dut, target)
 
-    # Nine rising edges of SWCLK, eight for the request and one for the
-    # turnaround, 8 clocks apart, each held high for 4. The first falling
-    # edge is the idle drop before the request.
+    # Twelve rising edges of SWCLK, eight for the request, one for the
+    # turnaround and three for the ACK, 8 clocks apart, each held high for
+    # 4. The first falling edge is the idle drop before the request. What a
+    # rise takes is the wire as it stood at the edge, the entry before the
+    # one that shows the clock high.
     ups, downs = rising_edges(swclk), falling_edges(swclk)
-    assert len(ups) == 9, f"rising edges of SWCLK at {ups}"
-    assert [b - a for a, b in zip(ups, ups[1:])] == [8] * 8
-    assert [d - u for u, d in zip(ups, [d for d in downs if d > ups[0]])] == [4] * 9
+    assert len(ups) == 12, f"rising edges of SWCLK at {ups}"
+    assert [b - a for a, b in zip(ups, ups[1:])] == [8] * 11
+    assert [d - u for u, d in zip(ups, [d for d in downs if d > ups[0]])] == [4] * 12
+    taken = [swdio[e - 1] for e in ups]
 
     # The target's view of the request: 0xA9 bit 0 first, with the start,
     # stop and park bits where the protocol puts them and the parity right.
-    bits = [swdio[e] for e in ups[:8]]
-    assert bits == [1, 0, 0, 1, 0, 1, 0, 1]
-    start, apndp, rnw, a2, a3, parity, stop, park = bits
-    assert (start, stop, park) == (1, 0, 1)
-    assert parity == apndp ^ rnw ^ a2 ^ a3
+    assert taken[:8] == [1, 0, 0, 1, 0, 1, 0, 1]
+    assert target.request == byte
 
     # The host owned SWDIO up to the clock after the park bit and let go on
-    # the edge that dropped it, for good: the turnaround's rising edge finds
-    # nobody driving and the pull-up's 1 on the wire.
-    release = ups[7] + 4
+    # the edge that dropped it, for good. The turnaround's rise finds the
+    # pull-up's 1 and nobody driving; the target takes the line on it.
+    release, trn, last = ups[7] + 4, ups[8], ups[11]
     assert host_drives[:release] == [1] * release, "the host let go before the park bit was clocked"
     assert host_drives[release:] == [0] * len(host_drives[release:]), "the host took the line back"
-    assert swdio[release:] == [1] * len(swdio[release:])
-    assert swclk[downs[-1]:] == [0] * len(swclk[downs[-1]:]), "SWCLK idle low after the turnaround"
+    assert swdio[release:trn] == [1] * (trn - release)
+    assert target_drives[:trn] == [None] * trn
+    assert None not in target_drives[trn:last], "the target let go during the ACK"
+    assert target_drives[last:] == [None] * len(target_drives[last:]), "the target kept the line after the ACK"
+
+    # OK on the wire, ACK[0] first, on the three rises after the turnaround.
+    assert taken[8] == 1, "the turnaround's edge finds the pull-up"
+    assert taken[9:12] == [1, 0, 0]
+    assert swclk[downs[-1]:] == [0] * len(swclk[downs[-1]:]), "SWCLK idle low after the ACK"
 
     # At the end the pad drives SWCLK, not SWDIO, and what it would drive on
     # SWDIO is the 1 the park bit left: open-drain letting go.
     assert int(dut.gpio_oe.value) & 0b11 == 0b10
     assert int(dut.gpio_out.value) & 0b11 == 0b01
 
-    # The request was consumed exactly once.
+    # The request was consumed once; the ACK reached the host as 0x20.
     assert int(dut.tx_fifo.empty.value) == 1
     assert int(dut.tx_full.value) == 0
+    assert int(dut.rx_empty.value) == 0
+    assert int(dut.rx_fifo.count.value) == 1
+    assert int(dut.rx_data.value) == SWD_OK << 5
+
+    # Host pop, driven on the falling edge.
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 1
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 0
+    await ReadOnly()
+    assert int(dut.rx_empty.value) == 1
 
 
 @cocotb.test()
