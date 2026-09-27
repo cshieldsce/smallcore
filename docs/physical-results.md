@@ -13,7 +13,7 @@ Measured numbers from the Tiny Tapeout IHP CMOS5L flow in `tapeout/janestreet/`,
 | + WAIT/JMP/SKIP | – | | | | | | |
 | + FIFO interface | – | | | | | | |
 | + FIFO storage (top: core + TX/RX FIFOs, DEPTH 4), Baseline v1 | 695 | 991 | 16,571 µm² | 1.84% | +10.86 ns | +0.14 ns | 2026-09-26 |
-| + program memory/interface | | | | | | | |
+| + program memory/interface (`smallcore`: host + ROM + top, real pinout), Peripheral v1 | 1,010 | 1,334 | 20,249 µm² | 2.24% | +10.15 ns | +0.11 ns | 2026-09-27 |
 | final | | | | | | | |
 
 Columns, all from `runs/wokwi/final/metrics.csv` unless noted:
@@ -34,12 +34,14 @@ Where the cells go, one row per milestone, appended as they land. Yosys + abc ag
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | RTL-0 control | 98 | 1,517 µm² | 14 | – | – | – | 98 | 1,517 µm² | 161 | – | – | 2026-09-25 |
 | + FIFO storage (2 × DEPTH 4) | 310 | 4,380 µm² | 39 | 257 | 6,630 µm² | 82 | 567 | 11,010 µm² | 695 | 11,948 µm² | `f795664` | 2026-09-26 |
+| + program memory/interface (`smallcore`: host + ROM + top) | 312 | 4,420 µm² | 39 | 236 | 6,608 µm² | 82 | 548 | 11,028 µm² | 1,010 | 15,372 µm² | `132fe20` | 2026-09-27 |
 
 - Core: `make synth`, `core` alone.
 - FIFO: `top` minus `core`, both FIFOs together. Derived, since the two are flattened into one netlist.
 - Top: `top` alone, core plus FIFOs, no wrapper. At RTL-0 there was no `top`, so it is the core.
 - Flow synth: LibreLane's `*-yosys-synthesis/reports/stat.rpt`, wrapper included, so it adds tie cells and the wrapper's pin logic.
 - Flops: `sg13cmos5l_dfrbpq_1` count in the mapped netlist.
+- The program memory/interface row's Top is still `top` alone; `smallcore` (host + ROM + top) under the quick script is 843 cells, 14,141 µm², 138 flops, so the host block and the whole ROM together are 295 cells, 3,113 µm² and 17 flops. `make synth-breakdown` prints `smallcore` as a fourth line.
 
 To add a row: from `tapeout/janestreet/`, run `make synth-breakdown`. It prints cells, area and flops for `core`, `top` and the wrapper; subtract core from top for the FIFO columns. Take the flow columns from the harden, and put anything surprising in that milestone's notes section.
 
@@ -69,6 +71,20 @@ Commit `f795664`: `rtl/top.v` with the complete ISA core, a TX FIFO and an RX FI
 - Timing per corner: setup +10.86 ns slow, +12.67 typ, +13.74 fast; hold +0.14 fast, +0.35 typ, +0.70 slow. At RTL-0 slow setup was +12.21, so the full ISA and FIFOs made the worst path about 1.35 ns longer, to about 9.1 ns at the slow corner. 50 MHz still has plenty of margin.
 - Budget: 695 synth cells is under 3% of the ~24K guidance for 6x4.
 - An earlier harden of the core alone, through the old wrapper, finished at 22:54 but was never recorded, and its `runs/wokwi/` was deleted by this run. It would not have been a valid FIFO-interface row anyway, for the pruning reason above.
+
+## Program memory/interface notes
+
+Commit `132fe20`: `rtl/smallcore.v`, the chip: `host.v` (a four-register bus, strobes synchronized and edge-detected, a program select that restarts the core), `rom.v` (all eleven programs, 272 words, generated from `programs/manifest.txt`, looked up by `{sel, addr}`) and `top.v` with a core-only `restart` and `halted` out. The Tiny Tapeout wrapper has its real pinout: `ui` write data, `uo` read data, `uio[7:4]` address and strobes as inputs, `uio[3:0]` the four protocol pads, bidirectional. This is Peripheral v1, tag `v1.1`.
+
+- Quick synth, `make synth-breakdown`: `core` 312 cells, `top` 548, `smallcore` 843, wrapper 886. The host block and the ROM together are 295 cells and 3,113 µm², about what one DEPTH 4 FIFO costs. Yosys folds the 272-word case statement hard: most SPI and I²C words repeat, and each word is a 16-bit constant, so the ROM is a few hundred gates, not 4,352 bits of storage. Doubling the library would not double this.
+- Flops: 138 in `smallcore`, 121 in `top` plus 17: 3 + 3 strobe synchronizers, 4 `sel`, and 7 named `program_words` that Yosys keeps beside `sel` for the `words` lookup (the lookup depends on `sel` alone, and `words` never exceeds 64, so 7 bits). `top` itself is 548 cells against 567 at v1 with two more ports; abc variance, the core is 312 against 310.
+- The wrapper adds 43 cells over `smallcore`: the pin mapping is direct, no folding, so the rest is tie cells for `uio_oe[7:4]`, `uio_out[7:4]` and the reset inversion.
+- Flow synth: 1,010 cells, 15,372 µm², from `06-yosys-synthesis/reports/stat.rpt`; 138 of them tie-high, one per flop as before, plus 8 tie-low for `uio_out[7:4]` and `uio_oe[7:4]`. v1 was 695, so the flow saw +315 cells for the host block, the ROM and the pin change.
+- Routed: 1,334 cells, 20,249 µm², 2.24% of the 6x4 core, +343 cells and +3,678 µm² over v1. Zero routing DRC, Magic DRC, antenna and LVS errors, no slew or cap violations, no setup or hold violations at any corner.
+- Routed minus synth is 324: 192 `dlygate4sd3_1` hold fixes (v1 had 186; the pin mapping changed but the input fan-in is similar, 8 write-data pins into the FIFO and now 4 control pins into the synchronizers), 73 `buf_1` and the rest from resizing and the clock tree over 138 flops.
+- Timing per corner: setup +10.15 ns slow, +10.74 typ, +11.09 fast; hold +0.11 fast, +0.31 typ, +0.64 slow. The worst path at the slow corner is about 9.85 ns, 0.7 ns longer than v1: the ROM lookup sits in the instruction fetch path, `sel` and `pc` through the case statement into decode, and that is now the critical path. 50 MHz still has half the period spare.
+- Budget: 1,010 synth cells is about 4% of the ~24K guidance for 6x4. The program library is not what fills the tile.
+- This run is the first with the real pinout, so hold-fix and pin counts from here on compare with this row, not with v1's provisional wrapper.
 
 ## Unit costs, typ lib
 

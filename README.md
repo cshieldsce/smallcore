@@ -15,22 +15,58 @@ A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay
 | `JMP label [d]` | continue at label |
 | `CONFIG field, value [d]` | config[field] <- value: `shift_dir` 0 (reset) or 1, LSB or MSB first for both shift registers; `open_drain01` and `open_drain23`, a 2-bit mask for pins 1:0 or 3:2, 1 = open-drain |
 
-`[d]` holds for d extra cycles. Every instruction but `JMP` can take a GPIO side effect, `pin, value` after its own operands, that drives one more pin on the same edge as the operation: `SHIFT_OUT 1, 0` puts the next bit on MOSI and drops the clock, `SHIFT_IN 3, 1, 1` raises the clock and samples MISO, `PULL 2, 0` drops CS the moment a byte arrives, `PUSH 2, 1` raises it as the received byte leaves, and a WAIT's side effect lands on the cycle the level arrives. `SET` is the side effect on its own. The FIFOs are fed and drained from outside the core, by the test bench or the CLI.
+`[d]` holds for d extra cycles. Every instruction but `JMP` can take a GPIO side effect, `pin, value` after its own operands, that drives one more pin on the same edge as the operation: `SHIFT_OUT 1, 0` puts the next bit on MOSI and drops the clock, `SHIFT_IN 3, 1, 1` raises the clock and samples MISO, `PULL 2, 0` drops CS the moment a byte arrives, `PUSH 2, 1` raises it as the received byte leaves, and a WAIT's side effect lands on the cycle the level arrives. `SET` is the side effect on its own. The FIFOs are fed and drained from outside the core: by the test bench, the CLI, or the host register bus of `rtl/smallcore.v`, the chip, which also holds every program in a ROM (see Host interface).
 
 ```
 isa.yaml      instruction set: encoding, opcodes, operand ranges
-programs/     assembly programs (.asm)
+programs/     assembly programs (.asm); manifest.txt gives each its permanent ROM slot
 sim/          simulator and assembler (cpu.py)
 tests/        pytest test benches
-rtl/          Verilog-2001: core.v, fifo.v, top.v (the core with its TX and RX FIFOs)
-rtl_tests/    cocotb benches for rtl/ under Verilator, checked against sim/cpu.py; top_tb.py runs the protocols end to end
+rtl/          Verilog-2001: core.v, fifo.v, top.v (the core with its TX and RX FIFOs), host.v (the register bus),
+              rom.v (GENERATED from programs/ by make rom), smallcore.v (host + rom + top: the chip)
+rtl_tests/    cocotb benches for rtl/ under Verilator, checked against sim/cpu.py; top_tb.py runs the protocols end to end,
+              smallcore_tb.py runs them from the ROM through the host bus, pynq_tb.py the board wrapper
 docs/         Mermaid diagrams (.mmd) and rendered .svg, see Docs below
-tools/        wavetrace.py (waveform helper), render_docs.py (docs/*.mmd -> .svg)
-tapeout/      janestreet/: Tiny Tapeout IHP CMOS5L packaging, 6x4 tiles; src/{top,core,fifo}.v are staged from rtl/ by make tapeout-sync
+tools/        gen_rom.py (programs/manifest.txt -> rtl/rom.v), wavetrace.py (waveform helper), render_docs.py (docs/*.mmd -> .svg)
+tapeout/      janestreet/: Tiny Tapeout IHP CMOS5L packaging, 6x4 tiles; src/*.v are staged from rtl/ by make tapeout-sync
+fpga/         pynq_z2/: the FPGA smoke test, buttons for a host, LEDs for read data, a PMOD jumper for the wire
 build/        generated: test waveforms, caches (safe to delete)
 ```
 
+## Host interface
+
+`rtl/smallcore.v` is SmallCore packaged as a peripheral: `host.v`, a four-register bus, `rom.v`, every program in `programs/manifest.txt` at its slot, and `top.v`. A host selects a program by number, queues bytes, runs it, watches for completion and reads the result, with nothing outside the chip supplying instructions. The Tiny Tapeout wrapper maps the ports onto the 24 pins one for one:
+
+| signal | dir | width | Tiny Tapeout pin |
+|---|---|---|---|
+| `host_wdata` | in | 8 | `ui[7:0]` |
+| `host_rdata` | out | 8 | `uo[7:0]` |
+| `host_addr`, `host_we`, `host_re` | in | 2, 1, 1 | `uio[5:4]`, `uio[6]`, `uio[7]` as inputs |
+| `gpio[3:0]` | bidir | 4 | `uio[3:0]`: `gpio_out` drives when `gpio_oe`, `gpio_in` is the pad readback |
+
+`host_rdata` continuously shows the register `host_addr` selects. A write happens on the rising edge of `host_we`, a pop on the rising edge of `host_re`, each decoded against `host_addr` at that moment:
+
+| addr | write (`host_we` rises) | read (`host_rdata`) |
+|---|---|---|
+| 0 TX_DATA | push `host_wdata` into the TX FIFO; dropped if full, check STATUS first | 0 |
+| 1 RX_DATA | – | RX FIFO head; `host_re` rising here pops it, nothing if empty |
+| 2 STATUS | – | `{5'b0, halted, tx_full, rx_empty}` |
+| 3 CONTROL | `sel <= host_wdata[3:0]`, the core restarts at pc 0 in that slot; both FIFOs keep their bytes | `{4'b0, sel}` |
+
+Rules: a strobe is held at least 3 clocks high and 3 low between strobes, and low for 3 clocks after reset before the first one; `host_wdata` and `host_addr` are set before it rises and held until it falls. Exactly one push, pop or select happens per rising edge, so a host on GPIO pins, an MCU or a button, works. Hard reset clears the core, both FIFOs and `sel`, and slot 0 is no program: a fresh chip sits halted with every pad driven high until the host selects. A CONTROL write while a program runs is an abort and restart, a defined thing: the core resets, its pads return to their reset levels, the FIFOs are untouched, so a byte queued behind the one in flight goes out on the next run. `halted` says execution finished, not that the protocol succeeded; the RX FIFO says what happened (an I²C program halts after a NACK too, with the ACK bit pushed for the host to read).
+
+| slot | program | slot | program | slot | program |
+|---|---|---|---|---|---|
+| 0 | none, halted | 4 | `uart_rx` | 8 | `spi_duplex_msb` |
+| 1 | `uart_tx_0x55` | 5 | `spi_tx_lsb` | 9 | `i2c_write` |
+| 2 | `uart_tx_pull` | 6 | `spi_tx_msb` | 10 | `i2c_write_stretch` |
+| 3 | `uart_tx_loop` | 7 | `spi_duplex_lsb` | 11 | `i2c_write_addr_data` |
+
+Slots are permanent: a new program takes an unused slot, 12..15 read as slot 0. `rom.v` is one lookup on `{sel, addr}`, so every program keeps its own addresses from 0 and `JMP` targets need no relocation; the whole 272-word library costs about as much as one FIFO. Because `gpio_in[k]` is the readback of pad `k` and every pad is push-pull high out of reset, a program that listens on a pin lets go of it first, the way the I²C programs always did: `uart_rx` opens with `CONFIG open_drain01, 1`, the SPI duplex programs with `CONFIG open_drain23, 2`.
+
 ## Status
+
+**Peripheral v1**, tag `v1.1`, 2026-09-27: SmallCore is a usable programmable protocol peripheral, not only a core that can be made to run protocols under a bench. `rtl_tests/smallcore_tb.py` drives only the chip's ports: a host at the register bus selects slot 8, sees STATUS say running, writes 0x96, and reads 0x53 back, with a mode 0 slave on the pads the only thing outside the chip; the program came from `rom.v`, the byte went through `host.v` into the real TX FIFO, out of the pads as one 8-clock frame MSB first, and the slave's byte came back through the pad readback, SHIFT_IN, PUSH, the real RX FIFO and the bus. The same bench proves strobes are edges not levels, that a strobe held high through reset does nothing, that CONTROL restarts the core and keeps the FIFOs, and that a loopback jumper from pad 0 to pad 3 returns the byte written, the wiring of the board test. `rtl_tests/pynq_tb.py` presses the PYNQ-Z2 wrapper's buttons in simulation and reads 0x96 on its LEDs; `fpga/pynq_z2/README.md` has the Vivado steps for the board itself, not yet run. The Tiny Tapeout wrapper now has its real pinout, above. Hardened through the same flow at 6x4 tiles, zero DRC, antenna and LVS violations, `docs/physical-results.md` row "+ program memory/interface": 1,010 synth cells, 1,334 routed, 20,249 µm², 2.24% of the tile, setup slack +10.15 ns and hold +0.11 ns at 20 ns, worst corners. Against v1 the host block, the whole eleven-program ROM and the real pinout cost 343 routed cells; the ROM folds to a few hundred gates because its words repeat.
 
 **Baseline v1**, tag `v1`, 2026-09-27: UART, SPI and I²C are verified end to end in RTL. Each program runs on `rtl/top.v`, the core with its TX and RX FIFOs, under Verilator, and the bench is the far end of the wire: it touches only top's host ports and pins, pushing bytes into the real TX FIFO, popping them from the real RX FIFO, and reading or driving `gpio_out`, `gpio_oe` and `gpio_in`.
 
@@ -66,6 +102,10 @@ python -m pytest tests/test_i2c.py -v               # I2C master write on a bus 
 python tools/render_docs.py                         # docs/*.mmd -> .svg (needs mermaid-cli)
 make lint                                           # verilator --lint-only -Wall -Wno-fatal rtl/core.v
 make test-rtl                                       # python -m pytest rtl_tests: Verilator builds core.v and top.v into build/rtl/, cocotb runs rtl_tests/*_tb.py
+python -m pytest rtl_tests/test_smallcore.py -v     # the chip: host bus semantics, spi_duplex_msb from the ROM through the bus with a slave on the pads, the loopback
+python -m pytest rtl_tests/test_rom.py -v           # rom.v word for word against the assembler
+python -m pytest rtl_tests/test_pynq.py -v          # fpga/pynq_z2/ wrapper: buttons, debounce, LEDs, the PMOD jumper modelled in the bench
+make rom                                            # programs/manifest.txt + the assembler -> rtl/rom.v; rom-check fails if it is stale (make test runs it)
 python -m pytest rtl_tests/test_top_adversarial.py -v  # top.v under a hostile host: stalls held, delays one-shot, metamorphic pairs, seeded traffic in lockstep with the model
 WAVES=1 make test-rtl                               # same, plus build/rtl/dump.vcd (gtkwave build/rtl/dump.vcd)
 make test                                           # tests/ then rtl_tests/
@@ -90,6 +130,7 @@ What the protocols have asked of the core, in order. Open items stay open until 
 | compact repetition / bit count | SPI, 16 words per byte; I2C, 3 per bit | open |
 | per-pin idle level | SPI, one `SET` for SCLK | open, not hurting yet |
 | configurable shift-output pin | SPI | open, fixed `gpio[0]` has not failed |
+| listen on a pad that is push-pull high at reset | the chip: `gpio_in` is the pad readback | one `CONFIG` word releases the pin, `uart_rx`, `spi_duplex_*`; the I²C programs already did |
 
 Three kinds of state: instruction (`pc`, the delay counter), stream (the shift registers and FIFOs) and configuration (`shift_dir`, `open_drain`), each a `CONFIG` field. A shift pin or input pin would join the third kind as the last field.
 
