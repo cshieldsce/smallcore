@@ -8,7 +8,7 @@ does it in core.v; the bench only feeds them the same inputs and reads them back
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotb.triggers import ClockCycles, FallingEdge
 
 CLK_PERIOD_NS = 10
 
@@ -114,3 +114,64 @@ def model_state(cpu):
         "shift_reg": cpu.shift_reg,
         "in_shift_reg": cpu.in_shift_reg,
     }
+
+
+def drive_smallcore(dut):
+    """smallcore's inputs besides clk and reset, host idle: no strobe, addr on
+    STATUS so host_rdata shows the flags, pads read 1 until Pads takes over."""
+    dut.host_wdata.value = 0
+    dut.host_addr.value = 2
+    dut.host_we.value = 0
+    dut.host_re.value = 0
+    dut.gpio_in.value = 0b1111
+
+
+class Pads:
+    """Four bidirectional pads on smallcore, resolved on every falling edge of
+    clk so gpio_in is settled before the rising edge the core samples on. Pad k
+    reads its own gpio_out[k] while gpio_oe[k] drives, else what the outside
+    drives: a level from set(), a function from attach(), a wire from another
+    pad, or 1 from a weak pull-up when nothing does. A pad driving against an
+    outside level is a fight, which no working program ever has: it fails here.
+
+    attach(pin, fn): fn(out, oe) is called with the 4-bit gpio_out and gpio_oe
+    each falling edge and returns the outside level for that pin, or None.
+    wires: [(from_pin, to_pin)], to_pin reads from_pin's resolved level when
+    it is not driving, the board's loopback jumper."""
+
+    def __init__(self, dut, wires=()):
+        self.dut = dut
+        self.level = [None] * 4
+        self.fn = [None] * 4
+        self.wires = {to: frm for frm, to in wires}
+        cocotb.start_soon(self._run())
+
+    def set(self, pin, level):
+        self.level[pin] = level
+
+    def attach(self, pin, fn):
+        self.fn[pin] = fn
+
+    def _outside(self, k, out, oe, resolved):
+        outside = self.fn[k](out, oe) if self.fn[k] else self.level[k]
+        if outside is None and k in self.wires:
+            src = self.wires[k]
+            outside = resolved[src] if resolved[src] is not None else self._resolve(src, out, oe, resolved)
+        return outside
+
+    def _resolve(self, k, out, oe, resolved):
+        driving, level = (oe >> k) & 1, (out >> k) & 1
+        outside = self._outside(k, out, oe, resolved)
+        assert not (driving and outside is not None and outside != level), (
+            f"pad {k}: driving {level} against the outside's {outside}"
+        )
+        return level if driving else (1 if outside is None else outside)
+
+    async def _run(self):
+        while True:
+            await FallingEdge(self.dut.clk)
+            out, oe = int(self.dut.gpio_out.value), int(self.dut.gpio_oe.value)
+            resolved = [None] * 4
+            for k in range(4):
+                resolved[k] = self._resolve(k, out, oe, resolved)
+            self.dut.gpio_in.value = sum(resolved[k] << k for k in range(4))

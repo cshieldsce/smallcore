@@ -16,6 +16,8 @@ lint:  # Verilator static checks, no simulation; -Wno-fatal prints warnings with
 	verilator --lint-only -Wall -Wno-fatal rtl/fifo.v
 	verilator --lint-only -Wall -Wno-fatal rtl/top.v rtl/core.v rtl/fifo.v --top-module top
 	verilator --lint-only -Wall -Wno-fatal rtl/rom.v
+	verilator --lint-only -Wall -Wno-fatal rtl/host.v
+	verilator --lint-only -Wall -Wno-fatal rtl/smallcore.v rtl/host.v rtl/rom.v rtl/top.v rtl/core.v rtl/fifo.v --top-module smallcore
 
 rom:  # regenerate rtl/rom.v from programs/manifest.txt and the assembler
 	$(PYTHON) tools/gen_rom.py
