@@ -7,14 +7,19 @@ programs/swd_request.asm grows one stage at a time:
   2. the turnaround: after the park bit the host lets go of SWDIO for one
      clock, so the target can take the line;
   3. the ACK: the host samples the target's three ACK bits on the next three
-     clocks and PUSHes them to the host, no decision taken on them yet.
+     clocks and PUSHes them;
+  4. the decision: a second turnaround gives the host the line back, then
+     OK goes on (to where the data phase will be), WAIT sends the request
+     again, when the host supplies it again, FAULT exits, the PUSH having
+     reported it.
 
 No data yet. The bench is the wire and the target. The wire is SWDIO resolved
 every cycle from the pad (gpio and gpio_oe), the target and a pull-up. The
 target samples SWDIO on every rising edge of SWCLK, reads the first eight as
 a request packet, start, stop and park bits and the parity included, takes
 the line on the ninth, the turnaround's, with ACK[0], moves to ACK[1] and
-ACK[2] on the next two, and lets go on the twelfth."""
+ACK[2] on the next two, lets go on the twelfth, and after the thirteenth, the
+host's turnaround, listens for the next request."""
 
 from pathlib import Path
 from typing import NamedTuple
@@ -28,7 +33,7 @@ REQUEST = PROGRAMS / "swd_request.asm"
 SWDIO, SWCLK = 0, 1  # the same pin numbers on gpio (the pad) and gpio_in (the wire): SWDIO is the shift pin
 HIGH = 4  # cycles SWCLK is high per bit, and low
 BIT = 2 * HIGH
-CLOCKS = 8 + 1 + 3  # rises of SWCLK: the request's eight, the turnaround's, the ACK's three
+CLOCKS = 8 + 1 + 3 + 1  # rises of SWCLK per transaction: the request, the turnaround, the ACK, the turnaround back
 OK, WAIT, FAULT = 1, 2, 4  # the ACK, ACK[0] first on the wire
 ACK_SHIFT = 5  # where three LSB-first samples land in an 8-bit register: bits 7:5, the ACK << 5
 
@@ -54,6 +59,7 @@ class Packet(NamedTuple):
 
 
 FIELDS = ("start", "apndp", "rnw", "a2", "a3", "par", "stop", "park")
+RISES = FIELDS + ("trn", "ack0", "ack1", "ack2", "trn")
 
 
 def target_decode(bits):
@@ -73,29 +79,39 @@ REQUESTS = [(apndp, rnw, a) for apndp in (0, 1) for rnw in (0, 1) for a in range
 
 
 class Target:
-    """A target on the wire that answers every request with `ack`. It follows
-    the clock: on each rising edge of SWCLK it samples the line as it stood at
-    the edge. The first eight samples are the request, decoded into `seen`
-    after the eighth. On the ninth rise, the turnaround's, it takes the line
-    with ACK[0], moves to ACK[1] and ACK[2] on the next two rises, and lets go
-    on the twelfth. `drive` is what it puts on the wire: 0, 1 or None."""
+    """A target on the wire. It follows the clock: on each rising edge of SWCLK
+    it samples the line as it stood at the edge. A transaction is thirteen
+    rises. The first eight samples are a request, decoded and appended to
+    `seen` after the eighth. On the ninth rise, the turnaround's, the target
+    takes the line with ACK[0] of the next answer in `acks` (the last one
+    repeats), moves to ACK[1] and ACK[2] on the next two rises, lets go on
+    the twelfth, and after the thirteenth, the host's turnaround, it is ready
+    for the next request. `drive` is what it puts on the wire: 0, 1 or None."""
 
-    def __init__(self, ack=OK):
-        self.bits = [(ack >> i) & 1 for i in range(3)]
+    def __init__(self, acks=(OK,)):
+        self.acks = list(acks)
         self.swclk = 1  # the clock as last seen: every pin is high out of reset
+        self.rises = 0  # in this transaction
         self.samples = []
-        self.seen = None
+        self.seen = []
         self.drive = None
 
     def update(self, swdio, swclk):
         """Take the wire as it stood at the end of the last cycle; return the level to drive, or None."""
         if swclk and not self.swclk:
-            self.samples.append(swdio)
-            n = len(self.samples)
-            if n == 8:
-                self.seen = target_decode(self.samples)
-            i = n - 9  # 0 on the turnaround's rise
-            self.drive = self.bits[i] if 0 <= i < 3 else None
+            self.rises += 1
+            n = self.rises
+            if n <= 8:
+                self.samples.append(swdio)
+                if n == 8:
+                    self.seen.append(target_decode(self.samples))
+            elif n <= 11:
+                ack = self.acks[min(len(self.seen) - 1, len(self.acks) - 1)]
+                self.drive = (ack >> (n - 9)) & 1
+            elif n == 12:
+                self.drive = None
+            else:  # 13, the host's turnaround: whatever comes next is a new request
+                self.rises, self.samples = 0, []
         self.swclk = swclk
         return self.drive
 
@@ -109,16 +125,18 @@ class Run(NamedTuple):
     cpu: CPU
 
 
-def run(byte, target=None):
-    """Run the program to its end with `byte` waiting in the TX FIFO, the wire
-    resolved after every cycle from the pad, the target and the pull-up, and
-    fed back to gpio_in for the next. A pad driving against the target is a
-    fight, which no working host ever has: it fails here."""
+def run(tx_data, target=None, cycles=2000):
+    """Run the program with `tx_data` waiting in the TX FIFO until it halts or
+    `cycles` pass, the wire resolved after every cycle from the pad, the
+    target and the pull-up, and fed back to gpio_in for the next. A pad
+    driving against the target is a fight, which no working host ever has:
+    it fails here."""
     target = target or Target()
-    cpu = CPU(load_program(REQUEST), gpio_in=1, tx_data=[byte])
+    tx_data = [tx_data] if isinstance(tx_data, int) else list(tx_data)
+    cpu = CPU(load_program(REQUEST), gpio_in=1, tx_data=tx_data)
     swdio, owned, driven = [], [], []
     line = 1
-    while not cpu.halted:
+    while not cpu.halted and cpu.cycle < cycles:
         cpu.step()
         drive = target.update(line, cpu.gpio[SWCLK])
         driving = cpu.gpio_oe[SWDIO] == 1
@@ -153,8 +171,8 @@ def show(wave, r):
     wave.add("host owns", [int(o) for o in r.owned], group="wire")
     wave.add("target drives", ["-" if d is None else str(d) for d in r.driven], group="wire")
     labels = ["-"] * len(r.swdio)
-    for name, edge in zip(FIELDS + ("trn", "ack0", "ack1", "ack2"), rising_edges(r.swclk)):
-        labels[edge] = name
+    for i, edge in enumerate(rising_edges(r.swclk)):
+        labels[edge] = RISES[i % CLOCKS]
     wave.add("rise", labels)
 
 
@@ -182,7 +200,7 @@ def test_target_samples_the_request_lsb_first(packet, wave):
     bits = sampled(r.swdio, r.swclk)[:8]
     assert bits == wire_bits(byte)
     assert target_decode(bits) == packet
-    assert r.target.seen == packet, "the target's own view"
+    assert r.target.seen == [packet], "the target's own view"
 
 
 def test_dp_write_to_a01_is_0xa9_on_the_wire():
@@ -195,15 +213,15 @@ def test_dp_write_to_a01_is_0xa9_on_the_wire():
 
 
 def test_swclk_rises_once_per_bit_and_idles_low():
-    """Twelve rising edges, eight for the request, one for the turnaround and
-    three for the ACK, and no other: SWCLK is low before the first, low again
-    after the last, and stays there."""
+    """Thirteen rising edges, eight for the request, one for the turnaround,
+    three for the ACK and one for the turnaround back, and no other: SWCLK is
+    low before the first, low again after the last, and stays there."""
     r = run(0xA9)
     ups, downs = rising_edges(r.swclk), falling_edges(r.swclk)
     assert len(ups) == CLOCKS, f"SWCLK rose at {ups}"
     assert len(downs) == CLOCKS and all(u < d for u, d in zip(ups, downs)), "each rise has its fall"
     assert r.swclk[0] == 0, "SWCLK idle low before the request"
-    assert set(r.swclk[downs[-1]:]) == {0}, "SWCLK idle low after the ACK"
+    assert set(r.swclk[downs[-1]:]) == {0}, "SWCLK idle low after the transaction"
 
 
 @pytest.mark.parametrize("byte", (0xA9, request(1, 1, 0b11), request(0, 1, 0b00)), ids=lambda b: f"{b:#04x}")
@@ -247,16 +265,17 @@ def test_program_waits_for_the_request_with_the_line_idle():
 def test_host_owns_swdio_through_the_park_bit_and_lets_go_as_that_clock_falls(wave):
     """The host drives SWDIO on every cycle of the request, through the park
     bit's rising edge and its high half, and lets go on the edge that drops
-    SWCLK after it: from there the pad is not driving, and it stays that way.
-    The line reads high meanwhile, from the pull-up, until the target takes
-    it: a bench that only watched levels could not tell, `owned` is gpio_oe."""
+    SWCLK after it: from there the pad is not driving until the turnaround
+    back. The line reads high meanwhile, from the pull-up, until the target
+    takes it: a bench that only watched levels could not tell, `owned` is
+    gpio_oe."""
     r = run(0xA9)
     show(wave, r)
     ups, downs = rising_edges(r.swclk), falling_edges(r.swclk)
-    release, trn = downs[7], ups[8]  # the clock after the park bit drops; the turnaround's rise
+    release, trn, retake = downs[7], ups[8], downs[12]  # the park bit's clock drops; the turnaround's rise; the turnaround back's clock drops
     assert release == ups[7] + HIGH
     assert all(r.owned[:release]), "the host let go before the park bit was clocked"
-    assert not any(r.owned[release:]), "the host took the line back"
+    assert not any(r.owned[release:retake]), "the host took the line back early"
     assert set(r.swdio[release:trn]) == {1}, "the pull-up holds the line high while nobody drives"
 
 
@@ -277,8 +296,9 @@ def test_letting_go_is_open_drain_with_a_one_the_park_bit_left():
     isa = load_isa()
     words = [decode(w, isa) for w in load_program(REQUEST)]
     od01 = isa["config"]["open_drain01"]["field"]
-    (release,) = [i for i, w in enumerate(words) if w.op == "CONFIG"]
+    release, retake = [i for i, w in enumerate(words) if w.op == "CONFIG"]
     assert words[release].args == (od01, 1) and words[release].side == (SWCLK, 0)
+    assert words[retake].args == (od01, 0) and words[retake].side == (SWCLK, 0), "taken back the same way"
     assert words[release - 1].op == "SET" and words[release - 1].args == (SWCLK, 1), "right after the park bit's clock"
     assert not any(w.op == "SET" and w.args[0] == SWDIO for w in words), "no SET on SWDIO: SHIFT_OUT and the pad mode do it all"
 
@@ -292,10 +312,10 @@ def test_ack_reaches_the_host_in_the_top_three_bits(ack, wave):
     enters at bit 7 and walks right, so three of them sit in bits 7:5 and the
     host reads the ACK as the byte >> 5: 0x20, 0x40, 0x80. OK and FAULT are
     mirror images, so ACK[0] first is proven, not assumed."""
-    r = run(0xA9, Target(ack))
+    r = run(0xA9, Target([ack]))
     show(wave, r)
-    assert r.target.seen == Packet(0, 0, 0b01), "the target answered the request it was asked"
-    assert r.cpu.rx_fifo == [ack << ACK_SHIFT]
+    assert r.target.seen == [Packet(0, 0, 0b01)], "the target answered the request it was asked"
+    assert r.cpu.rx_fifo[0] == ack << ACK_SHIFT
     assert r.cpu.in_shift_reg == ack << ACK_SHIFT
     assert r.cpu.rx_fifo[0] >> ACK_SHIFT == ack
 
@@ -304,60 +324,180 @@ def test_ack_bits_are_sampled_on_the_three_rises_after_the_turnaround(ack):
     """Each ACK bit is on the wire from the rise before its own, where the
     target put it, and the host takes it on its own rise: the three samples
     after the turnaround's are ACK[0], ACK[1], ACK[2]."""
-    r = run(0xA9, Target(ack))
+    r = run(0xA9, Target([ack]))
     taken = sampled(r.swdio, r.swclk)
-    assert len(taken) == CLOCKS
     assert taken[9:12] == [(ack >> i) & 1 for i in range(3)]
     assert taken[8] == 1, "the turnaround's edge finds the pull-up"
 
 
 def test_target_drives_from_the_turnaround_to_the_last_ack_clock_and_no_one_fights():
     """The target owns the line from the turnaround's rise to the third ACK
-    rise, when it lets go; the host never drives after its release, so there
-    is no cycle where both drive (run() would have failed on one)."""
-    r = run(0xA9, Target(FAULT))
-    ups = rising_edges(r.swclk)
-    trn, last = ups[8], ups[11]
+    rise, when it lets go; the host does not drive between its release and
+    the turnaround back, so there is no cycle where both drive (run() would
+    have failed on one)."""
+    r = run(0xA9, Target([FAULT]))
+    ups, downs = rising_edges(r.swclk), falling_edges(r.swclk)
+    trn, last, retake = ups[8], ups[11], downs[12]
     assert set(r.driven[:trn]) == {None}
     assert None not in r.driven[trn:last], "the target let go during the ACK"
     assert set(r.driven[last:]) == {None}, "the target kept the line after the ACK"
-    assert not any(r.owned[trn:]), "the host drove while the target had the line"
+    assert not any(r.owned[trn:retake]), "the host drove while the target had the line"
     assert not any(a and (b is not None) for a, b in zip(r.owned, r.driven)), "both drove at once"
 
 
-def test_ack_is_pushed_once_as_the_last_clock_falls():
+def test_ack_is_pushed_once_as_the_last_ack_clock_falls():
     """Nothing is in the RX FIFO until the third ACK bit is in; the PUSH lands
-    on the edge that drops SWCLK after it, the program's last word, and the
-    host reads one byte."""
+    on the edge that drops SWCLK after it, and nothing else is pushed for the
+    rest of the transaction: the host reads one byte."""
     cpu = CPU(load_program(REQUEST), gpio_in=1, tx_data=[0xA9])
-    target = Target(OK)
+    target = Target([OK])
     line, seen = 1, []
-    while not cpu.halted:
+    while not cpu.halted and cpu.cycle < 400:
         cpu.step()
         drive = target.update(line, cpu.gpio[SWCLK])
         line = cpu.gpio[SWDIO] if cpu.gpio_oe[SWDIO] else drive if drive is not None else 1
         cpu.gpio_in[SWDIO] = line
         seen.append((cpu.gpio[SWCLK], list(cpu.rx_fifo)))
+    assert cpu.halted
     swclk = [c for c, _ in seen]
-    last_fall = falling_edges(swclk)[-1]
-    assert all(fifo == [] for _, fifo in seen[:last_fall]), "pushed early"
-    assert seen[last_fall] == (0, [OK << ACK_SHIFT])
-    assert len(seen) == last_fall + 1, "the PUSH is the last word"
+    push = falling_edges(swclk)[11]  # the third ACK clock drops
+    assert all(fifo == [] for _, fifo in seen[:push]), "pushed early"
+    assert seen[push] == (0, [OK << ACK_SHIFT])
+    assert all(fifo == [OK << ACK_SHIFT] for _, fifo in seen[push:]), "pushed again"
 
 
-def test_program_is_two_words_per_bit_plus_the_turnaround_and_the_push():
+# --- stage 4: the decision -------------------------------------------------------
+
+
+def test_turnaround_back_gives_the_host_the_line_before_it_decides(ack):
+    """After the ACK one more clock with nobody driving, the thirteenth rise,
+    and on the edge that drops it the host takes SWDIO back: push-pull again,
+    driving the 1 that was on the pin all along. Whatever the ACK, the host
+    owns an idle line, SWDIO high and SWCLK low, when it acts on it."""
+    r = run(0xA9, Target([ack]), cycles=300)
+    ups, downs = rising_edges(r.swclk), falling_edges(r.swclk)
+    trn, retake = ups[12], downs[12]
+    assert retake == trn + HIGH
+    assert not any(r.owned[trn - HIGH:trn]) and set(r.driven[trn - HIGH:trn + HIGH]) == {None}, "somebody drove through the turnaround back"
+    assert r.swdio[trn - 1] == 1, "the pull-up's 1 is what the turnaround back's edge finds"
+    assert all(r.owned[retake:retake + BIT]), "the host did not take the line back"
+    assert set(r.swdio[retake:retake + BIT]) == {1} and set(r.swclk[retake:retake + HIGH]) == {0}
+
+
+def test_ok_ends_the_transaction_with_the_host_owning_the_line(wave):
+    """OK: the program goes on to where the data phase will be, which for now
+    is the end. Thirteen clocks, one ACK byte, halted with SWDIO driven high
+    and SWCLK low, ready for the next request."""
+    r = run(0xA9, Target([OK]))
+    show(wave, r)
+    assert r.cpu.halted
+    assert r.target.seen == [Packet(0, 0, 0b01)]
+    assert r.cpu.rx_fifo == [OK << ACK_SHIFT]
+    assert len(rising_edges(r.swclk)) == CLOCKS
+    assert r.cpu.gpio_oe[SWDIO] == 1 and r.cpu.gpio[SWDIO] == 1 and r.cpu.gpio[SWCLK] == 0
+
+
+def test_wait_sends_the_request_again_when_the_host_supplies_it_again(wave):
+    """WAIT: the target was not ready, the host asks again. The core cannot
+    keep a copy of the request (SHIFT_OUT empties shift_reg and nothing
+    reloads it but PULL), so the retry is a JMP back to the PULL and the host
+    pushes the request again; here it queued it twice up front. The target
+    sees the same request twice and answers WAIT then OK; the host reads
+    0x40 then 0x28: OK in bits 7:5 with the WAIT's bit walked down to bit 3,
+    since in_shift_reg keeps shifting. Two transactions, 26 clocks."""
+    r = run([0xA9, 0xA9], Target([WAIT, OK]))
+    show(wave, r)
+    assert r.cpu.halted
+    assert r.target.seen == [Packet(0, 0, 0b01)] * 2
+    assert r.cpu.rx_fifo == [WAIT << ACK_SHIFT, OK << ACK_SHIFT | WAIT << (ACK_SHIFT - 3)]
+    assert [b >> ACK_SHIFT for b in r.cpu.rx_fifo] == [WAIT, OK], "the host reads the ACK as the byte >> 5 either way"
+    assert len(rising_edges(r.swclk)) == 2 * CLOCKS
+    assert r.cpu.tx_fifo == [], "both requests were consumed"
+
+
+def test_wait_with_no_second_request_holds_the_line_idle_on_the_pull():
+    """WAIT with nothing more from the host: the program is back on its PULL,
+    not halted, SWDIO driven high and SWCLK low, and stays there. A host that
+    wants to give up simply does not push again; the WAIT it read says why."""
+    r = run(0xA9, Target([WAIT]), cycles=400)
+    assert not r.cpu.halted and r.cpu.stalled
+    assert decode(r.cpu.program[r.cpu.pc], r.cpu.isa).op == "PULL"
+    assert r.cpu.rx_fifo == [WAIT << ACK_SHIFT]
+    assert len(rising_edges(r.swclk)) == CLOCKS, "no clock without a request"
+    assert r.cpu.gpio_oe[SWDIO] == 1 and r.cpu.gpio[SWDIO] == 1 and r.cpu.gpio[SWCLK] == 0
+    assert set(r.swdio[-100:]) == {1} and set(r.swclk[-100:]) == {0} and all(r.owned[-100:])
+
+
+def test_fault_exits_after_the_push_reported_it():
+    """FAULT: the transaction is over and no retry would help; the host must
+    clear the error itself. The program halts after the turnaround back with
+    the FAULT in the RX FIFO, the request sent once, thirteen clocks."""
+    r = run([0xA9, 0xA9], Target([FAULT]))
+    assert r.cpu.halted
+    assert r.cpu.rx_fifo == [FAULT << ACK_SHIFT]
+    assert r.target.seen == [Packet(0, 0, 0b01)]
+    assert len(rising_edges(r.swclk)) == CLOCKS
+    assert r.cpu.tx_fifo == [0xA9], "the second request was not sent"
+
+
+def issued(program, tx_data, target):
+    """The addresses of the words a run issued, in order."""
+    cpu = CPU(program, gpio_in=1, tx_data=tx_data)
+    line, pcs = 1, []
+    while not cpu.halted and cpu.cycle < 400:
+        if cpu.counter == 0 and not cpu.stalled:
+            pcs.append(cpu.pc)
+        cpu.step()
+        drive = target.update(line, cpu.gpio[SWCLK])
+        line = cpu.gpio[SWDIO] if cpu.gpio_oe[SWDIO] else drive if drive is not None else 1
+        cpu.gpio_in[SWDIO] = line
+    return pcs
+
+
+def test_the_three_answers_take_three_paths():
+    """OK, WAIT and FAULT leave the branch by different words. The branch is
+    five words after the turnaround back: SKIP 5, 0 over a JMP to the data
+    label for OK (bit 5 set), SKIP 6, 0 over a JMP to the request for WAIT
+    (bit 6), and a JMP to the end for FAULT, or for no ACK bit at all. The
+    data label and the end coincide until there is a data phase. SKIP sees
+    one bit at a time, so a three-way decision is two SKIPs and three JMPs:
+    the cost of branching on a 3-bit field with this ISA, on record."""
+    isa = load_isa()
+    program = load_program(REQUEST)
+    words = [decode(w, isa) for w in program]
+    (pull,) = [i for i, w in enumerate(words) if w.op == "PULL"]
+    _, retake = [i for i, w in enumerate(words) if w.op == "CONFIG"]
+    skip_ok, jmp_data, skip_wait, jmp_retry, jmp_done = range(retake + 1, retake + 6)
+    assert words[skip_ok] == decode(program[skip_ok], isa) and words[skip_ok].op == "SKIP" and words[skip_ok].args == (ACK_SHIFT, 0)
+    assert words[jmp_data].op == "JMP" and words[jmp_data].args == (len(words),), "OK: on to the data phase, the end for now"
+    assert words[skip_wait].op == "SKIP" and words[skip_wait].args == (ACK_SHIFT + 1, 0)
+    assert words[jmp_retry].op == "JMP" and words[jmp_retry].args == (pull,), "WAIT: the request again"
+    assert words[jmp_done].op == "JMP" and words[jmp_done].args == (len(words),), "FAULT: the end"
+    assert jmp_done == len(words) - 1
+
+    ok = issued(program, [0xA9], Target([OK]))
+    wait = issued(program, [0xA9, 0xA9], Target([WAIT, OK]))
+    fault = issued(program, [0xA9], Target([FAULT]))
+    assert jmp_data in ok and skip_wait not in ok and jmp_done not in ok
+    assert jmp_retry in wait and wait.count(pull) == 2 and jmp_data in wait, "WAIT went round once, then OK went on"
+    assert jmp_done in fault and jmp_data not in fault and jmp_retry not in fault
+
+
+def test_program_is_two_words_per_bit_plus_the_turnarounds_the_push_and_the_branch():
     """Two words per bit, out or in, SPI's and I2C's shape: SHIFT_OUT with the
     clock low and SET with it high for the request, SET with the clock low
     and SHIFT_IN raising it for the ACK. No CONFIG shift_dir, because the
-    reset configuration, LSB first, is SWD's. The turnaround is two words,
-    let go and clock, and the PUSH drops the last clock."""
+    reset configuration, LSB first, is SWD's. Each turnaround is two words,
+    let go or take back and a clock; the PUSH drops the last ACK clock; the
+    branch is five."""
     isa = load_isa()
     words = [decode(w, isa) for w in load_program(REQUEST)]
-    assert len(words) == 2 + 8 * 2 + 2 + 3 * 2 + 1
+    assert len(words) == 2 + 8 * 2 + 2 + 3 * 2 + 1 + 2 + 5
     shift_dir = isa["config"]["shift_dir"]["field"]
     assert not any(w.op == "CONFIG" and w.args[0] == shift_dir for w in words)
     outs = [w for w in words if w.op == "SHIFT_OUT"]
     ins = [w for w in words if w.op == "SHIFT_IN"]
+    (push,) = [w for w in words if w.op == "PUSH"]
     assert len(outs) == 8 and all(w.side == (SWCLK, 0) for w in outs)
     assert len(ins) == 3 and all(w.args == (SWDIO,) and w.side == (SWCLK, 1) for w in ins)
-    assert words[-1].op == "PUSH" and words[-1].side == (SWCLK, 0)
+    assert push.side == (SWCLK, 0) and push.delay == 3, "the PUSH is the turnaround back's low half"
