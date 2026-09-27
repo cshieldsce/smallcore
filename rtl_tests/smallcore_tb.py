@@ -11,13 +11,14 @@ from pathlib import Path
 import cocotb
 from cocotb.triggers import ClockCycles, FallingEdge, ReadOnly, RisingEdge
 
+from cpu import load_program  # sim/cpu.py
 from tb import Pads, drive_smallcore, reset, start_clock
 
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
 
 TX_DATA, RX_DATA, STATUS, CONTROL = 0, 1, 2, 3  # host_addr
 HALTED, TX_FULL, RX_EMPTY = 0b100, 0b010, 0b001  # STATUS bits
-NONE, SPI_TX_MSB, SPI_DUPLEX_LSB, SPI_DUPLEX_MSB = 0, 6, 7, 8  # manifest slots
+NONE, UART_TX_PULL, SPI_TX_MSB, SPI_DUPLEX_LSB, SPI_DUPLEX_MSB = 0, 2, 6, 7, 8  # manifest slots
 MOSI, SCLK, CS, MISO = 0, 1, 2, 3  # pads the SPI programs use
 
 
@@ -377,3 +378,49 @@ async def rx_data_reads_zero_while_empty(dut):
         assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
         assert await host_read(dut, RX_DATA) == 0, f"empty after {byte:#04x}"
     assert int(dut.top_i.rx_fifo.rd_ptr.value) == 0, "the ring wrapped: the test hit the case"
+
+
+@cocotb.test()
+async def control_switches_slots_mid_frame_and_the_new_program_takes_the_queued_byte(dut):
+    """Two bytes queued and uart_tx_pull selected: pad 0 is sending the
+    first as a UART frame. Mid-frame the host writes CONTROL with
+    spi_tx_msb. On the clock after the strobe is decoded the core is at the
+    top of slot 6, reading its words, the pads are at reset levels, the
+    frame is cut, and the second byte, still queued, leaves as one 8-clock
+    MSB-first SPI frame the slave on the pads captures. CONTROL reads the
+    new slot; STATUS then says halted with nothing left."""
+    pads = await begin(dut)
+    slave = Mode0Slave(bits_msb(0x00))
+    pads.attach(MISO, lambda out, oe: (slave(out, oe), None)[1])  # a listener only: the TX program never lets go of MISO
+    spi = load_program(PROGRAMS / "spi_tx_msb.asm")
+    await host_write(dut, TX_DATA, 0x96)
+    await host_write(dut, TX_DATA, 0x53)
+    await host_write(dut, CONTROL, UART_TX_PULL)
+    for _ in range(40):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if int(dut.gpio_out.value) & 1 == 0:
+            break  # the start bit: the PULL took 0x96
+    else:
+        raise AssertionError("no start bit")
+    await ClockCycles(dut.clk, 12)  # into the first data bit
+    await ReadOnly()
+    assert tx_count(dut) == 1 and int(dut.top_i.tx_fifo.head_data.value) == 0x53
+    assert (await host_read(dut, STATUS)) & HALTED == 0
+
+    await host_write(dut, CONTROL, SPI_TX_MSB, hold=3, gap=0)  # the restart is the third edge
+    await ReadOnly()  # the clock after it
+    pc = int(dut.top_i.core_i.pc.value)
+    assert pc <= 1, pc
+    assert int(dut.top_i.program_words.value) == len(spi)
+    assert int(dut.top_i.imem_word.value) == spi[pc], "not reading slot 6's words"
+    assert int(dut.gpio_out.value) == 0b1111  # the frame is cut, every pad at its reset level
+    assert tx_count(dut) == 1 and int(dut.top_i.tx_fifo.head_data.value) == 0x53
+    assert await host_read(dut, CONTROL) == SPI_TX_MSB
+
+    await until_cs(dut, 0)
+    assert tx_count(dut) == 0
+    await until_cs(dut, 1)
+    assert slave.mosi == bits_msb(0x53), f"the slave saw {slave.mosi}"
+    await until_halted(dut)
+    assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
