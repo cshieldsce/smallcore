@@ -32,27 +32,25 @@ DELAY_MAX = (1 << ISA["fields"]["delay"]["bits"]) - 1
 DEPTH = 4  # both FIFOs in top.v
 STALL = 37  # clocks a stall is held for: longer than any delay, not a multiple of anything
 CORE = ("pc", "counter", "gpio", "halted", "shift_dir", "open_drain", "gpio_oe", "shift_reg", "in_shift_reg")
-HELD = ("gpio", "open_drain", "gpio_oe", "shift_reg", "in_shift_reg", "shift_dir", "tx_count", "tx_head", "rx_count", "rx_head")
+HELD = ("gpio", "open_drain", "gpio_oe", "shift_reg", "in_shift_reg", "shift_dir", "tx", "rx")
+
+
+def fifo_queue(fifo):
+    """Every byte a FIFO holds, oldest first, read out of its memory from the
+    read pointer: what the core or the host will get, not just the head. A
+    slot past the count is stale memory and is not read."""
+    count, rd_ptr = int(fifo.count.value), int(fifo.rd_ptr.value)
+    return [int(fifo.mem[(rd_ptr + i) % DEPTH].value) for i in range(count)]
 
 
 def top_state(dut):
     """The architectural state of top: the core's as tb.rtl_state reads it,
-    plus each FIFO as the core and the host see it, count and head. A head
-    is read only while the FIFO holds something; empty, it is stale memory."""
-    tx, rx = int(dut.tx_fifo.count.value), int(dut.rx_fifo.count.value)
-    return {
-        **rtl_state(dut.core_i),
-        "tx_count": tx, "tx_head": int(dut.tx_fifo.head_data.value) if tx else None,
-        "rx_count": rx, "rx_head": int(dut.rx_data.value) if rx else None,
-    }
+    plus every byte each FIFO holds, oldest first."""
+    return {**rtl_state(dut.core_i), "tx": fifo_queue(dut.tx_fifo), "rx": fifo_queue(dut.rx_fifo)}
 
 
 def model_top_state(cpu):
-    return {
-        **model_state(cpu),
-        "tx_count": len(cpu.tx_fifo), "tx_head": cpu.tx_fifo[0] if cpu.tx_fifo else None,
-        "rx_count": len(cpu.rx_fifo), "rx_head": cpu.rx_fifo[0] if cpu.rx_fifo else None,
-    }
+    return {**model_state(cpu), "tx": list(cpu.tx_fifo), "rx": list(cpu.rx_fifo)}
 
 
 def held(state):
@@ -106,17 +104,26 @@ async def run(dut, before=None, limit=400):
 
 class Lockstep:
     """top and the golden CPU crossing the same edges. edge() steps both
-    across one and compares them. push(byte) and pop() queue host actions
-    for the coming edge and pins(levels) sets the input pins for it, on both
-    sides. A host action reaches the model after its step across that edge,
-    which is when the core sees it too: a byte pushed on an edge is in the
-    FIFO from the next edge on, a byte popped on an edge is the head before
-    it. pulls and pushes count the edges pull_en and push_en led into."""
+    across one and compares them, every register and every queued byte.
+    push(byte), pop(), restart() and reset() queue host actions for the
+    coming edge; pins(levels) sets the input pins for it. Whatever drives
+    dut.gpio_in before an edge, pins() or a pad model, the model reads the
+    same levels for its step. A push or pop reaches the model after its step
+    across that edge, which is when the core sees it too: a byte pushed on
+    an edge is in the FIFO from the next edge on, a byte popped on an edge is
+    the head before it. The host may misbehave, as fifo.v lets it: a push
+    into a full FIFO is dropped unless the core pulls on that edge, a pop of
+    an empty one is nothing, and both are counted. A restart is the model
+    built afresh with the FIFOs kept, a reset with them emptied; the core is
+    frozen on that edge, so it pops and pushes nothing, and a reset drops the
+    host's push too. The model holds still once halted, as the core does.
+    pulls and pushes count the edges the FIFOs popped for a PULL and pushed
+    for a PUSH; the host's dropped pushes and idle pops are counted too."""
 
     def __init__(self, dut, cpu):
         self.dut, self.cpu = dut, cpu
-        self.push_byte, self.pop_now = None, False
-        self.pulls = self.pushes = 0
+        self.push_byte, self.pop_now, self.restart_now, self.reset_now = None, False, False, False
+        self.pulls = self.pushes = self.dropped = self.idle_pops = self.edges = 0
         self.popped = []  # bytes the host took, as rx_data showed them
 
     def push(self, byte):
@@ -125,9 +132,20 @@ class Lockstep:
     def pop(self):
         self.pop_now = True
 
+    def restart(self):
+        self.restart_now = True
+
+    def reset(self):
+        self.reset_now = True
+
     def pins(self, levels):
         self.dut.gpio_in.value = levels
         self.cpu.gpio_in = pins(levels)
+
+    def fresh(self, tx, rx):
+        cpu = CPU(self.cpu.program, rx_depth=DEPTH)
+        cpu.tx_fifo, cpu.rx_fifo, cpu.gpio_in = list(tx), list(rx), list(self.cpu.gpio_in)
+        return cpu
 
     async def edge(self):
         dut, cpu = self.dut, self.cpu
@@ -135,23 +153,41 @@ class Lockstep:
         if self.push_byte is not None:
             dut.tx_data.value = self.push_byte
         dut.rx_pop.value = self.pop_now
-        popped = int(dut.rx_data.value) if self.pop_now else None
-        self.pulls += int(dut.core_i.pull_en.value)
-        self.pushes += int(dut.core_i.push_en.value)
-        cpu.step()
+        dut.restart.value = self.restart_now
+        dut.reset.value = self.reset_now
+        await ReadOnly()  # the inputs as the edge will find them, a pad model's included
+        cpu.gpio_in = pins(int(dut.gpio_in.value))
+        head, had_rx = int(dut.rx_data.value), bool(cpu.rx_fifo)
+        self.pulls += int(dut.tx_fifo.pop.value)
+        self.pushes += int(dut.rx_fifo.push.value)
+        if self.reset_now:
+            cpu = self.cpu = self.fresh(tx=(), rx=())
+        elif self.restart_now:
+            cpu = self.cpu = self.fresh(tx=cpu.tx_fifo, rx=cpu.rx_fifo)
+        elif not cpu.halted:
+            cpu.step()
         await RisingEdge(dut.clk)
-        if self.push_byte is not None:
-            cpu.tx_fifo.append(self.push_byte)
-        if self.pop_now:
-            self.popped.append(popped)
-            assert cpu.rx_fifo.pop(0) == popped, "the host read a different head than the model's"
-        self.push_byte, self.pop_now = None, False
+        self.edges += 1
+        if self.push_byte is not None and not self.reset_now:
+            if len(cpu.tx_fifo) < DEPTH:
+                cpu.tx_fifo.append(self.push_byte)
+            else:
+                self.dropped += 1
+        if self.pop_now and not self.reset_now:
+            if had_rx:
+                self.popped.append(head)
+                assert cpu.rx_fifo.pop(0) == head, "the host read a different head than the model's"
+            else:
+                self.idle_pops += 1
+        self.push_byte, self.pop_now, self.restart_now, self.reset_now = None, False, False, False
         await ReadOnly()
         rtl, model = top_state(dut), model_top_state(cpu)
-        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+        assert rtl == model, f"edge {self.edges}: RTL={rtl}, model={model}"
         await FallingEdge(dut.clk)
         dut.tx_push.value = 0
         dut.rx_pop.value = 0
+        dut.restart.value = 0
+        dut.reset.value = 0
         return rtl
 
 
@@ -172,7 +208,7 @@ async def pull_holds_on_an_empty_tx_fifo_until_the_host_pushes_once(dut):
     ls = Lockstep(dut, cpu)
     await ls.edge()  # SET
     frozen = await ls.edge()  # the PULL finds nothing
-    assert cpu.stalled and frozen["pc"] == 1 and frozen["tx_count"] == 0
+    assert cpu.stalled and frozen["pc"] == 1 and frozen["tx"] == []
 
     for _ in range(STALL):
         assert await ls.edge() == frozen
@@ -181,15 +217,15 @@ async def pull_holds_on_an_empty_tx_fifo_until_the_host_pushes_once(dut):
 
     ls.push(0xA3)
     landed = await ls.edge()  # the byte lands; the core saw an empty FIFO on this edge
-    assert cpu.stalled and landed == {**frozen, "tx_count": 1, "tx_head": 0xA3}
+    assert cpu.stalled and landed == {**frozen, "tx": [0xA3]}
     issued = await ls.edge()
     assert not cpu.stalled
-    assert (issued["shift_reg"], issued["tx_count"], issued["gpio"]) == (0xA3, 0, [1, 1, 0, 0])
+    assert (issued["shift_reg"], issued["tx"], issued["gpio"]) == (0xA3, [], [1, 1, 0, 0])
     assert (issued["pc"], issued["counter"]) == (1, 2)
     while not cpu.halted:
         await ls.edge()
     assert ls.pulls == 1
-    assert (top_state(dut)["tx_count"], top_state(dut)["shift_reg"]) == (0, 0xA3 >> 1)
+    assert (top_state(dut)["tx"], top_state(dut)["shift_reg"]) == ([], 0xA3 >> 1)
 
 
 @cocotb.test()
@@ -208,7 +244,7 @@ async def push_holds_on_a_full_rx_fifo_until_the_host_pops_once(dut):
     for _ in range(6):
         await ls.edge()  # SHIFT_IN, four PUSHes, SET
     frozen = await ls.edge()  # the fifth PUSH finds no room
-    assert cpu.stalled and frozen["pc"] == 6 and (frozen["rx_count"], frozen["rx_head"]) == (DEPTH, 0x80)
+    assert cpu.stalled and frozen["pc"] == 6 and frozen["rx"] == [0x80] * DEPTH
 
     for _ in range(STALL):
         assert await ls.edge() == frozen
@@ -217,15 +253,15 @@ async def push_holds_on_a_full_rx_fifo_until_the_host_pops_once(dut):
 
     ls.pop()
     room = await ls.edge()  # the head leaves; the core saw a full FIFO on this edge
-    assert cpu.stalled and room == {**frozen, "rx_count": DEPTH - 1} and ls.popped == [0x80]
+    assert cpu.stalled and room == {**frozen, "rx": [0x80] * (DEPTH - 1)} and ls.popped == [0x80]
     issued = await ls.edge()
     assert not cpu.stalled
-    assert (issued["rx_count"], issued["rx_head"], issued["gpio"]) == (DEPTH, 0x80, [1, 0, 1, 0])
+    assert (issued["rx"], issued["gpio"]) == ([0x80] * DEPTH, [1, 0, 1, 0])
     assert (issued["pc"], issued["counter"]) == (6, 2)
     while not cpu.halted:
         await ls.edge()
     assert ls.pushes == 5
-    assert top_state(dut)["rx_count"] == DEPTH
+    assert top_state(dut)["rx"] == [0x80] * DEPTH
 
 
 @cocotb.test()
@@ -334,7 +370,7 @@ async def shift_out_lsb_first_is_msb_first_of_the_reversed_byte_on_the_pin(dut):
         b = await trace_of(dut, imem, msb, tx=(reverse(byte),), gpio_in=0)
         pin = [[s["gpio"][0] for s in states] for states in (a, b)]
         assert pin[0] == pin[1] == [1, 1] + wire_lsb(byte), f"{byte:#04x}: {pin}"
-        assert (a[-1]["shift_reg"], b[-1]["shift_reg"], a[-1]["tx_count"], b[-1]["tx_count"]) == (0, 0, 0, 0)
+        assert (a[-1]["shift_reg"], b[-1]["shift_reg"], a[-1]["tx"], b[-1]["tx"]) == (0, 0, [], [])
 
 
 SIDE = (  # a bare word, the same word with a side effect, and the pin and value that adds
@@ -468,8 +504,8 @@ TEMPERAMENTS = (0.0, 0.05, 0.3, 0.8)  # how often a host acts per edge: from nev
 async def random_programs_under_host_pressure_match_the_model(dut):
     """SEEDS random programs, each for CYCLES clocks or until it halts,
     against the golden CPU with a DEPTH-deep RX FIFO, edge for edge: the
-    core's registers, both FIFOs' count and head after every edge, and
-    every byte the host pops. The outside world is the same seed on both
+    core's registers, every byte in both FIFOs after every edge, and every
+    byte the host pops. The outside world is the same seed on both
     sides. Each seed draws a host temperament: how often it pushes when the
     TX FIFO is not full and how often it pops when the RX FIFO is not
     empty, from never to most edges, so some runs starve the PULLs and
