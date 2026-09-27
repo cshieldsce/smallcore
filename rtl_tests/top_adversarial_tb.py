@@ -992,3 +992,70 @@ async def a_restart_keeps_every_queued_byte_and_a_reset_drops_them(dut):
         ls.push(0x11)
         getattr(ls, kind)()
         assert (await ls.edge())["tx"] == tx, kind
+
+
+# --- The FIFOs -------------------------------------------------------------------------
+
+BYTES = (0x96, 0x53, 0x3C, 0xC3, 0x69, 0x5A, 0x1E, 0xE1, 0x87, 0x78, 0x2D, 0xD2)  # twelve, all different
+LEVELS = (1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0)  # twelve samples LSB first: twelve different in_shift_regs
+
+
+def wrapped(fifo, name, last):
+    """1 if the pointer `name` of `fifo` went back to 0 since `last`, and the pointer now."""
+    ptr = int(getattr(fifo, name).value)
+    return int(ptr < last), ptr
+
+
+@cocotb.test()
+async def the_fifos_wrap_around_under_pull_and_push(dut):
+    """TX: four bytes fill the ring and twelve PULLs take them, the host
+    refilling whenever two are gone, so the write pointer passes the last
+    slot twice more and the read pointer three times; every byte lands in
+    shift_reg in order and the queue matches the model after every edge.
+    RX the same way round: SHIFT_INs make twelve different bytes, PUSHes
+    fill the ring and stall on it, the host pops two whenever it is full,
+    and gets all twelve in order, both pointers wrapping three times."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    program = assemble("PULL\n" * 12)
+    await begin(dut, imem, program, tx=BYTES[:4])
+    ls = Lockstep(dut, CPU(program, tx_data=BYTES[:4], rx_depth=DEPTH))
+    given, taken, wraps, ptrs = 4, [], [0, 0], [0, 0]
+    while not ls.cpu.halted:
+        if len(ls.cpu.tx_fifo) <= 2 and given < 12:
+            ls.push(BYTES[given])
+            given += 1
+        state = await ls.edge()
+        if state["shift_reg"] != (taken[-1] if taken else 0):
+            taken.append(state["shift_reg"])
+        for i, name in enumerate(("wr_ptr", "rd_ptr")):
+            w, ptrs[i] = wrapped(dut.tx_fifo, name, ptrs[i])
+            wraps[i] += w
+    assert taken == list(BYTES) and ls.pulls == 12, taken
+    assert wraps == [2, 3], wraps
+
+    program = assemble("SHIFT_IN 0\nPUSH\n" * 12)
+    await begin(dut, imem, program, gpio_in=LEVELS[0])
+    ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+    pushed, pops_left, wraps, ptrs = [], 0, [0, 0], [0, 0]
+    while not ls.cpu.halted:
+        ls.pins(LEVELS[min(ls.pushes, 11)])  # the next SHIFT_IN's sample
+        if len(ls.cpu.rx_fifo) == DEPTH and not pops_left:
+            pops_left = 2
+        if pops_left:
+            ls.pop()
+            pops_left -= 1
+        pushes = ls.pushes
+        state = await ls.edge()
+        if ls.pushes > pushes:
+            pushed.append(state["in_shift_reg"])
+        for i, name in enumerate(("wr_ptr", "rd_ptr")):
+            w, ptrs[i] = wrapped(dut.rx_fifo, name, ptrs[i])
+            wraps[i] += w
+    while ls.cpu.rx_fifo:
+        ls.pop()
+        await ls.edge()
+        w, ptrs[1] = wrapped(dut.rx_fifo, "rd_ptr", ptrs[1])
+        wraps[1] += w
+    assert len(pushed) == len(set(pushed)) == 12 and ls.popped == pushed, (pushed, ls.popped)
+    assert wraps == [3, 3], wraps
