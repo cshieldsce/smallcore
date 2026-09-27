@@ -1362,3 +1362,73 @@ async def words_the_isa_rejects_do_what_their_read_bits_say(dut):
         state = (await run_edges(dut, 1))[0]
         dut.restart.value = 0
         assert state == {**RESET_CORE, "tx": [0x53], "rx": []}, f"{word:#06x} after a restart: {state}"
+
+
+# --- Long random programs under everything at once ------------------------------------
+
+LONG_SEEDS = 150
+LONG_CYCLES = 400
+
+
+def long_program(rng):
+    """Two to sixty-four words, drawn as random_program draws them."""
+    n = rng.randrange(2, 65)
+    ops = RECEIVER if rng.random() < 0.25 else OPS
+    return [encode(random_instruction(rng, n, ops), ISA) for _ in range(n)]
+
+
+@cocotb.test()
+async def long_random_programs_under_a_rude_host_with_restarts_match_the_model(dut):
+    """LONG_SEEDS programs of up to 64 words, each for LONG_CYCLES clocks,
+    under a host that pushes and pops without reading STATUS, restarts the
+    core about once in a hundred clocks and resets the chip about once in
+    four hundred, with new pin levels every edge: every register and every
+    queued byte against the model after every edge, the edges of restarts
+    and resets included, and every byte the host got. The sweep counts what
+    it reached: restarts while stalled, while holding a delay, on the very
+    edge of a PULL and of a PUSH, on an issue edge and after a halt; resets;
+    pushes dropped on a full FIFO; pops of an empty one; every kind of cycle
+    for every kind of word."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    seen = {"stall": set(), "issue": set(), "hold": set()}
+    hit = {k: 0 for k in ("halted", "stalled", "holding", "pull edge", "push edge", "issue", "reset")}
+    dropped = idle_pops = popped = 0
+    for seed in range(LONG_SEEDS):
+        rng = random.Random(1000 + seed)
+        program = long_program(rng)
+        preload = [rng.randrange(256) for _ in range(rng.randrange(DEPTH + 1))]
+        push_often, pop_often = rng.choice(TEMPERAMENTS), rng.choice(TEMPERAMENTS)
+        levels = rng.randrange(16)
+        await begin(dut, imem, program, tx=preload, gpio_in=levels)
+        ls = Lockstep(dut, CPU(program, tx_data=preload, rx_depth=DEPTH))
+        ls.pins(levels)
+        for _ in range(LONG_CYCLES):
+            cpu = ls.cpu
+            op = None if cpu.halted else decode(program[cpu.pc], ISA).op
+            counter, stalled, halted = cpu.counter, cpu.stalled, cpu.halted
+            pull, push = int(dut.core_i.pull_en.value), int(dut.core_i.push_en.value)
+            if rng.random() < push_often:
+                ls.push(rng.randrange(256))
+            if rng.random() < pop_often:
+                ls.pop()
+            roll = rng.random()
+            if roll < 0.01:
+                ls.restart()
+                hit["halted" if halted else "stalled" if stalled else "holding" if counter else "pull edge" if pull
+                    else "push edge" if push else "issue"] += 1
+            elif roll < 0.0125:
+                ls.reset()
+                hit["reset"] += 1
+            ls.pins(rng.randrange(16))
+            try:
+                await ls.edge()
+            except AssertionError as e:
+                raise AssertionError(f"seed {seed}, program {[f'{w:#06x}' for w in program]}: {e}") from e
+            if op and roll >= 0.0125:
+                seen["stall" if ls.cpu.stalled else "issue" if counter == 0 else "hold"].add(op)
+        dropped, idle_pops, popped = dropped + ls.dropped, idle_pops + ls.idle_pops, popped + len(ls.popped)
+    assert seen["stall"] == {"PULL", "PUSH", "WAIT"}, seen
+    assert seen["issue"] == seen["hold"] == set(OPS), seen
+    assert all(hit.values()), hit
+    assert dropped > 0 and idle_pops > 0 and popped > 0, (dropped, idle_pops, popped)
