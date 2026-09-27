@@ -147,8 +147,13 @@ module core(
             end
 
             // PC
-            if (pc_en && (is_nop_set || is_config || is_shift || is_wait)) begin
-                pc <= pc + 9'd1;
+            if (pc_en) begin
+                if (is_jmp) begin
+                    pc <= {1'b0, operand};
+                end
+                else if (is_nop_set || is_config || is_shift || is_wait) begin
+                    pc <= pc + 9'd1;
+                end
             end
 
             // GPIO
