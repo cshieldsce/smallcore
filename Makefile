@@ -13,6 +13,7 @@ test-rtl:  # rtl/core.v under Verilator + cocotb, rtl_tests/; WAVES=1 also write
 
 lint:  # Verilator static checks, no simulation; -Wno-fatal prints warnings without failing while the core is incomplete
 	verilator --lint-only -Wall -Wno-fatal rtl/core.v
+	verilator --lint-only -Wall -Wno-fatal rtl/fifo.v
 
 clean:
 	rm -rf build

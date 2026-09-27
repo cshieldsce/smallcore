@@ -7,8 +7,9 @@ module fifo #(
     output       empty, full
 );
 
-    localparam PUSH  = 2'b10;
-    localparam POP   = 2'b01;
+    // {do_push, do_pop} cases for count
+    localparam COUNT_UP   = 2'b10;
+    localparam COUNT_DOWN = 2'b01;
 
     // DEPTH entries with addresses 0..DEPTH-1
     localparam PTR_W = (DEPTH > 1) ? $clog2(DEPTH) : 1;
@@ -68,9 +69,9 @@ module fifo #(
 
             // Count
             case ({do_push, do_pop})
-                PUSH: count <= count + 1'b1;
-                POP:  count <= count - 1'b1;
-                default: count <= count;
+                COUNT_UP:   count <= count + 1'b1;
+                COUNT_DOWN: count <= count - 1'b1;
+                default:    count <= count;
             endcase
         end
     end
