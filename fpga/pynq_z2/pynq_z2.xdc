@@ -5,6 +5,8 @@
 ## 125 MHz from the Ethernet PHY
 set_property -dict { PACKAGE_PIN H16 IOSTANDARD LVCMOS33 } [get_ports sysclk]
 create_clock -add -name sys_clk_pin -period 8.00 -waveform {0 4} [get_ports sysclk]
+## The core clock is div[1] through a BUFG, sysclk / 4; without this Vivado leaves every smallcore path unconstrained
+create_generated_clock -name core_clk -source [get_pins {div_reg[1]/C}] -divide_by 4 [get_pins {div_reg[1]/Q}]
 
 ## Switches
 set_property -dict { PACKAGE_PIN M20 IOSTANDARD LVCMOS33 } [get_ports {sw[0]}]
