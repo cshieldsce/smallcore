@@ -1234,3 +1234,131 @@ async def the_last_addresses_of_a_full_program(dut):
 
     states = await matched(dut, imem, assemble("SET 0, 0"))
     assert len(states) == 1 and states[-1]["pc"] == 1 and states[-1]["gpio"] == [0, 1, 1, 1]
+
+
+async def run_edges(dut, n):
+    """Cross n rising edges with the host idle, no model; top_state after each."""
+    states = []
+    for _ in range(n):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        states.append(top_state(dut))
+        await FallingEdge(dut.clk)
+    return states
+
+
+# --- Words the ISA rejects --------------------------------------------------------------
+
+
+def canonical(word):
+    """`word` with the operand bits its opcode never reads cleared. An opcode
+    reads its select bit, its operands, the side-effect flag and, when the
+    flag is set, the side-effect operands; nothing else, in isa.yaml or in
+    core.v. None for the free opcode."""
+    for spec in ISA["instructions"].values():
+        select = spec.get("select")
+        if spec["opcode"] != word >> 13 or (select and (word >> select["lsb"]) & 1 != select["value"]):
+            continue
+        used = (1 << select["lsb"]) if select else 0
+        for o in spec["operands"]:
+            used |= ((1 << o["bits"]) - 1) << o["lsb"]
+        if spec.get("side_effect"):
+            used |= 0x80 | (0x70 if word & 0x80 else 0)
+        return word & ~(0xFF & ~used)
+    return None
+
+
+def accepted(word):
+    try:
+        decode(word, ISA)
+    except ValueError:
+        return False
+    return True
+
+
+async def same_run(dut, imem, program, twin, tx=(), gpio_in=0, limit=40):
+    """top on `program` against the model on `twin`, edge for edge to the halt."""
+    await begin(dut, imem, program, tx, gpio_in)
+    ls = Lockstep(dut, CPU(twin, tx_data=tx, rx_depth=DEPTH))
+    ls.pins(gpio_in)
+    states = []
+    while not ls.cpu.halted:
+        states.append(await ls.edge())
+        assert len(states) <= limit, f"{[f'{w:#06x}' for w in program]}: still running after {limit} clocks"
+    return states
+
+
+RESERVED_WORDS = (0xE000, 0xFF00, 0xE080, 0xE0FF)  # bare, delay 31, side effect pin 0 <- 0, every low bit set: pin 3 <- 1
+GARBAGE_WORDS = (0x0040, 0x007F, 0x2005, 0x200D, 0x40FE, 0x400E, 0xA002, 0xA070, 0x8070)  # one of each kind, then random
+
+
+@cocotb.test()
+async def words_the_isa_rejects_do_what_their_read_bits_say(dut):
+    """The 45,312 words decode() refuses, in three kinds, and what core.v
+    makes of each. 33,536 carry garbage in operand bits their opcode never
+    reads: core.v never reads them either, so nine chosen and 400 drawn at
+    random run edge for edge as the model runs the word with those bits
+    cleared. 3,584 are well-formed but out of range: CONFIG's unassigned
+    field 3 changes nothing, a NOP with its side effect kept; a shift_dir
+    value of 2 or 3 writes its low bit; a SHIFT_OUT side effect on pin 0
+    loses to the shift on the same edge, a bare SHIFT_OUT. 8,192 carry the
+    free opcode 111: the core never leaves such a word, it reloads the delay
+    field and counts it down, over and over, and touches nothing but the
+    side-effect pin the word names; a restart is the only way on."""
+    rejected = [w for w in range(1 << 16) if not accepted(w)]
+    reserved = [w for w in rejected if w >> 13 == 7]
+    garbage = [w for w in rejected if canonical(w) not in (None, w) and accepted(canonical(w))]
+    semantic = sorted(set(rejected) - set(reserved) - set(garbage))
+    assert (len(rejected), len(reserved), len(garbage), len(semantic)) == (45312, 8192, 33536, 3584)
+    assert all(w in garbage for w in GARBAGE_WORDS) and all(w in reserved for w in RESERVED_WORDS)
+    imem = Imem(dut, [])
+    start_clock(dut)
+
+    rng = random.Random(1)
+    for word in GARBAGE_WORDS + tuple(rng.sample(garbage, 400)):
+        instr = decode(canonical(word), ISA)
+        gpio_in = instr.args[1] << instr.args[0] if instr.op == "WAIT" else 0b1010
+        await same_run(dut, imem, [word], [canonical(word)], tx=(0x96, 0x53), gpio_in=gpio_in)
+
+    tail = assemble("PULL\nSHIFT_OUT")  # makes shift_dir show on pin 0: 0x96 is 0 at bit 0 and 1 at bit 7
+    for value in range(4):
+        for side in (0x00, 0x90):  # none, or pin 0 <- 1
+            word = 0x8000 | side | 0xC | value  # CONFIG field 3
+            twin = assemble("SET 0, 1" if side else "NOP")
+            assert word in semantic
+            await same_run(dut, imem, [word] + tail, twin + tail, tx=(0x96,))
+    for value in (2, 3):
+        for side in (0x00, 0x90):
+            word = 0x8000 | side | value  # CONFIG shift_dir, 2 or 3
+            twin = assemble(f"CONFIG shift_dir, {value & 1}" + (", 0, 1" if side else ""))
+            assert word in semantic
+            states = await same_run(dut, imem, [word] + tail, twin + tail, tx=(0x96,))
+            assert states[-1]["gpio"][0] == value & 1, "the direction is the low bit of the value"
+    for byte in (0x96, 0x69):
+        for value in (0, 1):
+            word = 0x2080 | value << 4  # SHIFT_OUT with a side effect on pin 0
+            assert word in semantic
+            states = await same_run(dut, imem, assemble("PULL") + [word], assemble("PULL\nSHIFT_OUT"), tx=(byte,))
+            assert states[-1]["gpio"][0] == byte & 1, "the shift wins the pin"
+
+    prefix = assemble("SHIFT_IN 1\nPULL 3, 0")  # state to keep: in_shift_reg 0x80, shift_reg 0x96, pin 3 low, 0x53 queued
+    for word in RESERVED_WORDS:
+        program = prefix + [word] + assemble("SET 0, 0")
+        await begin(dut, imem, program, tx=(0x96, 0x53), gpio_in=0b0010)
+        await run_edges(dut, 2)
+        delay = (word >> 8) & DELAY_MAX
+        gpio = [1, 1, 1, 0]
+        if word & 0x80:
+            gpio[(word >> 5) & 3] = (word >> 4) & 1  # the side-effect bits are honoured
+        for k in range(70):
+            state = (await run_edges(dut, 1))[0]
+            expected = {
+                "pc": 2, "counter": delay - k % (delay + 1), "halted": False, "shift_dir": 0, "open_drain": [0, 0, 0, 0],
+                "gpio": gpio, "gpio_oe": [1, 1, 1, 1], "shift_reg": 0x96,
+                "in_shift_reg": 0x80, "tx": [0x53], "rx": [],
+            }
+            assert state == expected, f"{word:#06x} edge {k}: {state}"
+        dut.restart.value = 1
+        state = (await run_edges(dut, 1))[0]
+        dut.restart.value = 0
+        assert state == {**RESET_CORE, "tx": [0x53], "rx": []}, f"{word:#06x} after a restart: {state}"
