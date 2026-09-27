@@ -3,15 +3,21 @@ core.v. Run through test_fifo.py, not directly.
 
 Inputs change on the falling edge and are checked just after the rising edge,
 once the nonblocking assignments have settled, so every check sees exactly one
-edge's worth of change. DEPTH is the default 4.
+edge's worth of change. test_fifo.py builds the FIFO at more than one DEPTH and
+passes it in FIFO_DEPTH, so every test sizes itself from DEPTH: 4 is the power
+of two a plain pointer overflow would get right by accident, 3 is not.
 """
+
+import os
 
 import cocotb
 from cocotb.triggers import FallingEdge, ReadOnly, RisingEdge
 
 from tb import reset, start_clock
 
-DEPTH = 4
+DEPTH = int(os.environ["FIFO_DEPTH"])
+FILL = [0x11 * (i + 1) for i in range(DEPTH)]  # 11 22 33 ..., one per slot
+NEXT = 0x11 * (DEPTH + 1)  # the byte after FILL: 44 at DEPTH 3
 
 
 async def start(dut):
@@ -85,7 +91,7 @@ async def fifo_ordering(dut):
 
     for byte in (0x11, 0x22, 0x33):
         await edge(dut, push=1, data=byte)
-    assert state(dut) == {"empty": 0, "full": 0, "count": 3}
+    assert state(dut) == {"empty": 0, "full": int(DEPTH == 3), "count": 3}
 
     assert await drain(dut) == [0x11, 0x22, 0x33]
 
@@ -96,8 +102,7 @@ async def push_when_full_ignored(dut):
     the original bytes still drain out in order."""
     await start(dut)
 
-    data = [0x11, 0x22, 0x33, 0x44]
-    for byte in data:
+    for byte in FILL:
         await edge(dut, push=1, data=byte)
     assert state(dut) == {"empty": 0, "full": 1, "count": DEPTH}
     wr_ptr = int(dut.wr_ptr.value)
@@ -105,25 +110,61 @@ async def push_when_full_ignored(dut):
     await edge(dut, push=1, data=0xEE)
     assert state(dut) == {"empty": 0, "full": 1, "count": DEPTH}
     assert int(dut.wr_ptr.value) == wr_ptr
-    assert int(dut.head_data.value) == 0x11
+    assert int(dut.head_data.value) == FILL[0]
 
-    assert await drain(dut) == data
+    assert await drain(dut) == FILL
 
 
 @cocotb.test()
 async def push_pop_while_full(dut):
     """Full, then push and pop on the same edge: the head leaves, the new byte
-    lands in the slot it frees, and the FIFO stays full. With DEPTH 4 and both
-    pointers at 0, the write wraps onto slot 0 as the read moves to slot 1, so
-    this proves the circular buffer, not just single pushes and pops."""
+    lands in the slot it frees, and the FIFO stays full. Both pointers are at
+    0, so the write wraps onto slot 0 as the read moves to slot 1: this proves
+    the circular buffer, not just single pushes and pops."""
     await start(dut)
 
-    for byte in (0x11, 0x22, 0x33, 0x44):
+    for byte in FILL:
         await edge(dut, push=1, data=byte)
     assert state(dut) == {"empty": 0, "full": 1, "count": DEPTH}
 
     await edge(dut, push=1, pop=1, data=0x55)
     assert state(dut) == {"empty": 0, "full": 1, "count": DEPTH}
-    assert int(dut.head_data.value) == 0x22
+    assert int(dut.head_data.value) == FILL[1]
 
-    assert await drain(dut) == [0x22, 0x33, 0x44, 0x55]
+    assert await drain(dut) == FILL[1:] + [0x55]
+
+
+@cocotb.test()
+async def push_pop_while_empty_is_push(dut):
+    """Empty, then push and pop on the same edge: there is nothing to pop, so
+    it is a push only. The byte is at the head and counted."""
+    await start(dut)
+    assert state(dut) == {"empty": 1, "full": 0, "count": 0}
+
+    await edge(dut, push=1, pop=1, data=0xA5)
+    assert state(dut) == {"empty": 0, "full": 0, "count": 1}
+    assert int(dut.head_data.value) == 0xA5
+
+    assert await drain(dut) == [0xA5]
+
+
+@cocotb.test()
+async def pointers_wrap_at_depth(dut):
+    """Fill, pop one, push one: the write pointer must go LAST -> 0, not on to
+    DEPTH. At DEPTH 3 that is 11 22 33, pop 11, push 44, drain 22 33 44; a
+    pointer that just overflows would sit at the nonexistent slot 3. Draining
+    then wraps the read pointer the same way."""
+    await start(dut)
+
+    for byte in FILL:
+        await edge(dut, push=1, data=byte)
+    assert int(dut.wr_ptr.value) == 0  # wrapped after the last slot
+
+    await edge(dut, pop=1)
+    assert int(dut.rd_ptr.value) == 1
+    await edge(dut, push=1, data=NEXT)
+    assert int(dut.wr_ptr.value) == 1
+    assert state(dut) == {"empty": 0, "full": 1, "count": DEPTH}
+
+    assert await drain(dut) == FILL[1:] + [NEXT]
+    assert int(dut.rd_ptr.value) == 1  # read pointer wrapped too
