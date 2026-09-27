@@ -111,6 +111,13 @@ module core(
 
     assign gpio_oe = ~(open_drain & gpio_out);
 
+    wire      shift_en;  
+    wire      shift_bit;
+    reg [7:0] shift_reg;
+
+    assign shift_bit = (shift_dir == 0) ? shift_reg[0] : shift_reg[7];
+    assign shift_en  = issue && is_shift && !shift_select;
+
     always @(posedge clk) begin
         if (reset) begin            
             // Reset sets PC=0, Counter=0, GPIO=1111 
@@ -119,6 +126,8 @@ module core(
             gpio_out      <= 4'b1111;
             shift_dir     <= 1'b0;
             open_drain    <= 4'b0000;
+            shift_reg     <= 8'd0;
+
         end
         else begin
             // Counter
@@ -130,7 +139,7 @@ module core(
             end
 
             // PC
-            if (pc_en && (is_nop_set || is_config)) begin
+            if (pc_en && (is_nop_set || is_config || (is_shift && !shift_select))) begin
                 pc <= pc + 9'd1;
             end
 
@@ -154,6 +163,17 @@ module core(
                     default: begin
                     end
                 endcase
+            end
+
+            // Shift
+            if (shift_en) begin
+                gpio_out[0] <= shift_bit;
+
+                if (shift_dir == 1'b0) begin
+                    shift_reg <= {1'b0, shift_reg[7:1]};
+                end else begin
+                    shift_reg <= {shift_reg[6:0], 1'b0};
+                end
             end
         end
     end
