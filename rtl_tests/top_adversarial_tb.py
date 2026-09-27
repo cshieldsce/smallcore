@@ -546,3 +546,123 @@ async def random_programs_under_host_pressure_match_the_model(dut):
     assert seen["stall"] == {"PULL", "PUSH", "WAIT"}, seen
     assert seen["issue"] == seen["hold"] == set(OPS), seen
     assert pushed > 0 and popped > 0 and 0 < halted < SEEDS, (pushed, popped, halted)
+
+
+# --- Stalls against delays ---------------------------------------------------------
+
+# A word that stalls, with a side effect and a delay, and what releases it.
+STALLED = (("PULL 2, 0 [7]", "push"), ("PUSH 1, 0 [7]", "pop"), ("WAIT 2, 1, 1, 0 [7]", "level"))
+FILL_RX = "SHIFT_IN 0\nPUSH\nPUSH\nPUSH\nPUSH\n"  # with gpio_in[0] high: four 0x80s, the RX FIFO full
+
+
+@cocotb.test()
+async def a_stall_and_a_delay_never_share_a_cycle(dut):
+    """Three things a stall and a delay must not do to each other, for a
+    PULL, a PUSH and a WAIT with a side effect and a [7]. The stall does not
+    eat the delay: held STALL clocks, the word still holds its full 7 after
+    it issues, and the pins change on three edges only, the SET before it,
+    its own issue edge and the SET after. The delay does not re-check the
+    stall: the byte, the room or the level the word issued on is gone during
+    its hold, and the hold runs out on time. And a hold ending on a word that
+    must stall: the stall begins on the edge after the hold's last, the pc
+    on the stalling word and the counter at 0, and the release issues it
+    once."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+
+    # (1) SET 3, 0, the word stalled STALL clocks, released, then SET 0, 0.
+    for line, release in STALLED:
+        program = assemble(f"{FILL_RX if release == 'pop' else ''}SET 3, 0\n{line}\nSET 0, 0")
+        await begin(dut, imem, program, gpio_in=0b0001)  # pin 0 high for the fill, the WAIT's pin 2 low
+        ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+        ls.pins(0b0001)
+        changes, previous = [], top_state(dut)["gpio"]
+
+        async def step():
+            nonlocal previous
+            state = await ls.edge()
+            if state["gpio"] != previous:
+                changes.append(ls.edges)
+            previous = state["gpio"]
+            return state
+
+        n = len(program) - 2  # the stalling word's address, and the edges before it
+        for _ in range(n):
+            await step()
+        frozen = await step()
+        assert ls.cpu.stalled and (frozen["pc"], frozen["counter"]) == (n, 0), line
+        for _ in range(STALL):
+            assert await step() == frozen and ls.cpu.stalled, line
+        if release == "push":
+            ls.push(0x96)
+            assert await step() == {**frozen, "tx": [0x96]} and ls.cpu.stalled, line
+        elif release == "pop":
+            ls.pop()
+            assert await step() == {**frozen, "rx": [0x80] * (DEPTH - 1)} and ls.cpu.stalled, line
+        else:
+            ls.pins(0b0101)
+        issued = await step()
+        issue_edge = ls.edges
+        assert not ls.cpu.stalled and (issued["pc"], issued["counter"]) == (n, 7), line
+        for i in range(7):
+            state = await step()
+            assert held(state) == held(issued), f"{line}: hold edge {i} moved {state}"
+            assert (state["pc"], state["counter"]) == ((n, 6 - i) if i < 6 else (n + 1, 0)), f"{line}: hold edge {i}"
+        last = await step()
+        assert last["halted"], line
+        assert changes == [n, issue_edge, ls.edges], f"{line}: the pins changed on edges {changes}"
+        assert (ls.pulls, ls.pushes) == ((1, 0) if release == "push" else (0, 5) if release == "pop" else (0, 0)), line
+
+    # (2) The word issues, then what it waited for goes away during its hold.
+    gone = (
+        ("WAIT 2, 1 [7]\nSET 0, 0", (), 0b0100, 0),  # the level leaves on the first hold edge
+        ("PULL [7]\nSET 0, 0", (0x96,), 0, 0),  # the only byte is taken: the FIFO is empty through the hold
+        ("SHIFT_IN 0\nPUSH\nPUSH\nPUSH\nPUSH [7]\nSET 0, 0", (), 0b0001, 4),  # the fourth PUSH fills the FIFO on its edge and holds against it full
+    )
+    for source, tx, gpio_in, n in gone:
+        program = assemble(source)
+        await begin(dut, imem, program, tx=tx, gpio_in=gpio_in)
+        ls = Lockstep(dut, CPU(program, tx_data=tx, rx_depth=DEPTH))
+        ls.pins(gpio_in)
+        for _ in range(n):
+            await ls.edge()
+        issued = await ls.edge()
+        assert not ls.cpu.stalled and (issued["pc"], issued["counter"]) == (n, 7), source
+        ls.pins(0)
+        for i in range(7):
+            state = await ls.edge()
+            assert held(state) == held(issued), f"{source}: hold edge {i} moved {state}"
+            assert (state["pc"], state["counter"]) == ((n, 6 - i) if i < 6 else (n + 1, 0)), f"{source}: hold edge {i}"
+        assert (await ls.edge())["halted"], source
+
+    # (3) NOP [3] then a word that must stall: the stall starts where the hold ends.
+    for line, release in (("PULL", "push"), ("PUSH", "pop"), ("WAIT 2, 1", "level")):
+        program = assemble(f"{FILL_RX if release == 'pop' else ''}NOP [3]\n{line}\nSET 0, 0")
+        await begin(dut, imem, program, gpio_in=0b0001)
+        ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+        ls.pins(0b0001)
+        f = len(program) - 3  # the NOP's address
+        for _ in range(f):
+            await ls.edge()
+        state = await ls.edge()
+        assert (state["pc"], state["counter"]) == (f, 3), line
+        for i in range(3):
+            state = await ls.edge()
+            assert (state["pc"], state["counter"]) == ((f, 2 - i) if i < 2 else (f + 1, 0)), f"{line}: hold edge {i}"
+        assert not ls.cpu.stalled, line
+        frozen = await ls.edge()
+        assert ls.cpu.stalled and core(frozen) == core(state), f"{line}: the stall changed {frozen}"
+        for _ in range(STALL):
+            assert await ls.edge() == frozen and ls.cpu.stalled, line
+        if release == "push":
+            ls.push(0x96)
+            await ls.edge()
+        elif release == "pop":
+            ls.pop()
+            await ls.edge()
+        else:
+            ls.pins(0b0101)
+        issued = await ls.edge()
+        assert not ls.cpu.stalled and (issued["pc"], issued["counter"]) == (f + 2, 0), line
+        assert (await ls.edge())["halted"], line
+        assert (ls.pulls, ls.pushes) == ((1, 0) if release == "push" else (0, 5) if release == "pop" else (0, 0)), line
