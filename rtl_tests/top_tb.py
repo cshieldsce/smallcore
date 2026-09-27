@@ -740,3 +740,84 @@ async def i2c_write_host_byte_to_bus_nack_to_host(dut):
     dut.rx_pop.value = 0
     await ReadOnly()
     assert int(dut.rx_empty.value) == 1
+
+
+@cocotb.test()
+async def i2c_write_addr_data_both_acked(dut):
+    """programs/i2c_write_addr_data.asm end to end with a slave that ACKs:
+    address byte 0xA0 (0x50 written), data byte 0x3C, one START and STOP.
+    The host preloads both bytes. After the address's ACK clock the sample
+    sits in in_shift_reg bit 0 and SKIP 0, 0 reads it there: a 0 steps over
+    the JMP to the STOP, so the second PULL takes the data byte. The slave's
+    electrical answer decides what the core fetches next. Both ACKs reach
+    the host through the RX FIFO, popped as a host would, head first."""
+    program = load_program(PROGRAMS / "i2c_write_addr_data.asm")
+    address, data = 0xA0, 0x3C  # 0x50 << 1 | write
+    slave = I2cSlave()
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0011  # the bus idles high
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.rx_empty.value) == 1
+
+    # Host pushes both bytes on consecutive edges with the core halted, then
+    # releases it on the next falling edge.
+    await FallingEdge(dut.clk)
+    dut.tx_data.value = address
+    dut.tx_push.value = 1
+    await FallingEdge(dut.clk)
+    dut.tx_data.value = data
+    await FallingEdge(dut.clk)
+    dut.tx_push.value = 0
+    await ReadOnly()
+    assert int(dut.tx_fifo.count.value) == 2
+    await FallingEdge(dut.clk)
+    dut.program_words.value = len(program)
+
+    sda, scl, pad_sda_low = await i2c_bus(dut, slave)
+
+    # The slave saw one transaction of two bytes.
+    assert slave.events == ["START", address, data, "STOP"]
+
+    # On the wire: nineteen clocks between START and STOP, nine per byte
+    # (eight bits and the ACK), a fall ending the last ACK clock and the
+    # STOP's rise, which stays high.
+    (start,), (stop,) = i2c_starts(sda, scl), i2c_stops(sda, scl)
+    rises = [e for e in rising_edges(scl) if start < e < stop]
+    falls = [e for e in falling_edges(scl) if start < e < stop]
+    assert len(rises) == 19 and len(falls) == 19, f"SCL rose at {rises}, fell at {falls}"
+    assert all(f < r for f, r in zip(falls, rises)) and all(r < f for r, f in zip(rises, falls[1:]))
+    assert [sda[e] for e in rises[0:8]] == [1, 0, 1, 0, 0, 0, 0, 0]  # 0xA0 MSB first
+    assert [sda[e] for e in rises[9:17]] == [0, 0, 1, 1, 1, 1, 0, 0]  # 0x3C MSB first
+
+    # Both ACK clocks: the slave holds SDA low, the pad has let go.
+    for ack in (rises[8], rises[17]):
+        assert sda[ack] == 0 and not pad_sda_low[ack]
+
+    # Bus free, both lines let go.
+    assert sda[-1] == 1 and scl[-1] == 1
+    assert int(dut.gpio_oe.value) & 0b11 == 0
+
+    # Both bytes were consumed; two ACKs wait for the host, address's first.
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.rx_fifo.count.value) == 2
+    assert int(dut.rx_data.value) == 0
+
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 1
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 0
+    await ReadOnly()
+    assert int(dut.rx_fifo.count.value) == 1
+    assert int(dut.rx_data.value) == 0
+
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 1
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 0
+    await ReadOnly()
+    assert int(dut.rx_empty.value) == 1
