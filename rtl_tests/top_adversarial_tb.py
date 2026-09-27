@@ -1,17 +1,25 @@
 """Adversarial cocotb tests for rtl/top.v: the core with its TX and RX FIFOs
 under a hostile outside world. Run through test_top_adversarial.py.
 
-Four families, after tests/test_adversarial.py for the model. Stall
-invariance: an empty TX FIFO holds a PULL, a full RX FIFO holds a PUSH and a
-pin level holds a WAIT for as long as the host likes, nothing moves
-meanwhile, and the missing byte, room or level lets the instruction issue
-exactly once. Delay one-shot: `X [d]` does X once, on its first edge, then
-only holds for d more; a delayed PULL pops one byte, a delayed PUSH pushes
-one. Metamorphic pairs: LSB first of a byte is MSB first of its reversal on
-the pin, a side effect adds one pin to an instruction and nothing else, a
-stall only prepends held cycles to an otherwise identical run. Host
-pressure: seeded random programs under random host pushes and pops and
-random input pins, cycle for cycle against the golden CPU and its FIFOs.
+After tests/test_adversarial.py for the model, every run here is compared
+with the golden CPU edge for edge: every register, every byte in both FIFOs,
+every byte the host gets. Stall invariance: an empty TX FIFO holds a PULL, a
+full RX FIFO holds a PUSH and a pin level holds a WAIT for as long as the
+host likes, nothing moves meanwhile, and the missing byte, room or level
+lets the instruction issue exactly once. Delay one-shot: `X [d]` does X
+once, on its first edge, then only holds for d more. Metamorphic pairs: LSB
+first of a byte is MSB first of its reversal on the pin, a side effect adds
+one pin to an instruction and nothing else, a stall only prepends held
+cycles. Host pressure: seeded random programs under random host pushes and
+pops and random input pins. Then the nasty interactions: a stall against a
+delay, a SKIP right after the sample it reads, branches around a delay's
+last edge, CONFIG next to a pin write, a pin driven, released, sampled and
+driven again on a pad model, an open-drain SDA with a slave on the pad,
+restarts and resets with bytes queued in both FIFOs, the FIFOs wrapping
+around and at their full and empty boundaries under a host that never reads
+STATUS, host traffic while the core is stalled, the last addresses of a
+256-word program, the words the ISA rejects, and long random programs under
+all of it at once.
 
 Every run goes through top's host ports and pins; internals are read only
 to compare them. Runs share one simulation: the clock and the instruction
