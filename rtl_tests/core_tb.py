@@ -462,6 +462,120 @@ async def pull_stall_matches_model(dut):
 
 
 @cocotb.test()
+async def push_matches_model(dut):
+    """PUSH with room in the RX FIFO, cycle by cycle. The FIFO lives outside
+    core.v, so the RTL side is the handshake: push_en high with rx_data 0xA5
+    leading into the issue edge, then low through the [2] so the byte goes
+    out once. The model's rx_fifo gets it on that edge and in_shift_reg keeps
+    it. Running off the end checks halted."""
+    program = assemble("""
+        PUSH [2]
+        SET 0, 0
+    """)
+    cpu = CPU(program)
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program), rx_full=0)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+
+    # SHIFT_IN fills in_shift_reg; seed it on both sides instead.
+    seed = 0xA5
+    cpu.in_shift_reg = seed
+    dut.in_shift_reg.value = seed
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+    assert dut.push_en.value == 1
+    assert int(dut.rx_data.value) == seed
+
+    cpu.step()
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    rtl = rtl_state(dut)
+    assert rtl == model_state(cpu), f"cycle {cpu.cycle}: RTL={rtl}, model={model_state(cpu)}"
+    assert cpu.rx_fifo == [seed]
+    assert int(dut.in_shift_reg.value) == seed
+    assert dut.push_en.value == 0  # the delay does not push again
+
+    while not cpu.halted:
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+    assert cpu.rx_fifo == [seed]
+
+
+@cocotb.test()
+async def push_stall_matches_model(dut):
+    """PUSH against a full RX FIFO, then after room opens. With rx_full high
+    edges go by with nothing moving and push_en low. rx_full drops between
+    edges, push_en rises with rx_data on it, and the next edge completes the
+    PUSH. push_en is checked before that edge: a zero-delay PUSH moves the pc
+    on it, so after it the core is already decoding the SET. Running off the
+    end checks halted."""
+    program = assemble("""
+        PUSH
+        SET 0, 0
+    """)
+    # The model's FIFO holds one byte and is full, like rx_full on the RTL.
+    cpu = CPU(program, rx_depth=1)
+    cpu.rx_fifo = [0x00]
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program), rx_full=1)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+
+    seed = 0xA5
+    cpu.in_shift_reg = seed
+    dut.in_shift_reg.value = seed
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+    # RX FIFO full: every stalled edge changes nothing.
+    for _ in range(2):
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert cpu.stalled
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+        assert (rtl["pc"], rtl["counter"]) == (0, 0)
+        assert dut.push_en.value == 0
+
+    # The outside world pops a byte on the falling edge, between the rising
+    # edges that sample rx_full (the read-only phase forbids writes).
+    await FallingEdge(dut.clk)
+    cpu.rx_fifo.pop(0)
+    dut.rx_full.value = 0
+    await ReadOnly()
+    assert dut.push_en.value == 1
+    assert int(dut.rx_data.value) == seed
+
+    # Release edge: the PUSH completes.
+    cpu.step()
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    rtl = rtl_state(dut)
+    assert not cpu.stalled
+    assert rtl == model_state(cpu), f"cycle {cpu.cycle}: RTL={rtl}, model={model_state(cpu)}"
+    assert cpu.rx_fifo == [seed]
+    assert rtl["pc"] == 1
+
+    while not cpu.halted:
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+
+@cocotb.test()
 async def uart_tx_0x55_matches_model(dut):
     """A real program end to end: programs/uart_tx_0x55.asm, cycle by cycle
     against the model until it halts. Idle, start, 8 data bits and stop is
