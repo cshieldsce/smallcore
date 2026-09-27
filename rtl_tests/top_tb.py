@@ -517,3 +517,163 @@ async def spi_duplex_msb_host_bytes_both_ways(dut):
     await ReadOnly()
     assert int(dut.rx_empty.value) == 1
     assert int(dut.rx_fifo.count.value) == 0
+
+
+# I2C: the bench is the bus. Two open-drain lines with pull-ups, the master's
+# pad on one end and a slave on the other. The bench cannot watch gpio_out
+# alone: the pad drives a line only while gpio_oe says so, and gpio_in has
+# to carry the resolved line back, or the master never sees the slave.
+
+SDA, SCL = 0, 1  # the same pin numbers on gpio_out/gpio_oe (the pad) and gpio_in (the bus)
+
+
+def od_line(out, oe, pin, slave_low):
+    """One line: 0 if the pad pulls it low (gpio_oe set, gpio_out 0) or the
+    slave does, else 1 from the pull-up. A pad driving a 1 against the slave's
+    0 is a fight, which no open-drain master ever has, so it fails here."""
+    driving = (oe >> pin) & 1
+    level = (out >> pin) & 1
+    assert not (driving and level and slave_low), f"pin {pin}: pad drives 1 against the slave's 0"
+    return 0 if (driving and not level) or slave_low else 1
+
+
+class I2cSlave:
+    """A slave that ACKs every byte (or NACKs every byte, with ack=False).
+    Open-drain like the master: it pulls SDA low (sda_low) or lets go. It
+    reads the resolved bus one step behind, the way a real part does: START
+    and STOP are SDA moving while SCL is high, a bit is SDA on a rising edge
+    of SCL. After the eighth bit it takes SDA as SCL falls, before the ninth
+    clock, holds it through that clock and lets go as that clock falls.
+    `events` is what it saw, in bus order: "START", each byte, "STOP"."""
+
+    def __init__(self, ack=True):
+        self.ack = ack
+        self.events = []
+        self.sda = self.scl = 1  # the bus as last seen
+        self.bits = []
+        self.active = self.acking = self.sda_low = False
+
+    def update(self, sda, scl):
+        if scl and self.scl and sda != self.sda:  # SDA moved with SCL high
+            if sda == 0:
+                self.active, self.acking, self.sda_low, self.bits = True, False, False, []
+                self.events.append("START")
+            else:
+                self.active = False
+                self.events.append("STOP")
+        elif self.active and scl and not self.scl:  # SCL rose
+            if not self.acking and len(self.bits) < 8:
+                self.bits.append(sda)
+        elif self.active and not scl and self.scl:  # SCL fell
+            if self.acking:  # the ACK clock is over
+                self.acking, self.sda_low, self.bits = False, False, []
+            elif len(self.bits) == 8:
+                self.events.append(int("".join(map(str, self.bits)), 2))
+                self.acking, self.sda_low = True, self.ack
+        self.sda, self.scl = sda, scl
+
+
+async def i2c_bus(dut, slave, limit=300):
+    """The wire, until the core halts plus a few clocks. On every falling edge
+    of clk it resolves SDA and SCL from the pad and the slave, puts them on
+    gpio_in[1:0] for the master's next edge, and shows them to the slave,
+    whose answer lands on the next resolution. Returns three lists, one level
+    per clock: sda, scl, and whether the pad was holding SDA low."""
+    sda, scl, pad_sda_low = [], [], []
+    tail = 4  # clocks recorded after the halt
+    for _ in range(limit):
+        await FallingEdge(dut.clk)
+        out, oe = int(dut.gpio_out.value), int(dut.gpio_oe.value)
+        s = od_line(out, oe, SDA, slave.sda_low)
+        c = od_line(out, oe, SCL, False)
+        dut.gpio_in.value = (int(dut.gpio_in.value) & ~0b11) | s | (c << SCL)
+        sda.append(s)
+        scl.append(c)
+        pad_sda_low.append(bool((oe >> SDA) & 1 and not (out >> SDA) & 1))
+        slave.update(s, c)
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if int(dut.core_i.halted.value):
+            tail -= 1
+            if tail == 0:
+                return sda, scl, pad_sda_low
+    raise AssertionError(f"core still running after {limit} clocks")
+
+
+def i2c_starts(sda, scl):
+    """Clocks on which SDA fell with SCL high before and after."""
+    return [i for i in falling_edges(sda) if scl[i - 1] == 1 and scl[i] == 1]
+
+
+def i2c_stops(sda, scl):
+    """Clocks on which SDA rose with SCL high before and after."""
+    return [i for i in rising_edges(sda) if scl[i - 1] == 1 and scl[i] == 1]
+
+
+@cocotb.test()
+async def i2c_write_host_byte_to_bus_ack_to_host(dut):
+    """programs/i2c_write.asm end to end with a slave that ACKs. The host
+    pushes 0xA3 into the TX FIFO; the master STARTs, clocks it out MSB first,
+    lets go of SDA for the ninth clock, samples the slave's ACK there, PUSHes
+    that sample to the RX FIFO and STOPs. The bench resolves the bus every
+    clock from gpio_out, gpio_oe and the slave, so the test spans the pad
+    both ways: the byte out through gpio_oe, the ACK back in through gpio_in,
+    SHIFT_IN, in_shift_reg, PUSH and the RX FIFO to rx_data."""
+    program = load_program(PROGRAMS / "i2c_write.asm")
+    byte = 0xA3
+    slave = I2cSlave()
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0011  # the bus idles high
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.rx_empty.value) == 1
+
+    # Host push with the core halted, then release it on the next falling edge.
+    await FallingEdge(dut.clk)
+    dut.tx_data.value = byte
+    dut.tx_push.value = 1
+    await FallingEdge(dut.clk)
+    dut.tx_push.value = 0
+    dut.program_words.value = len(program)
+
+    sda, scl, pad_sda_low = await i2c_bus(dut, slave)
+
+    # The slave saw one transaction: START, the byte, STOP.
+    assert slave.events == ["START", byte, "STOP"]
+
+    # On the wire: one START, one STOP, and between them nine clocks, each a
+    # fall then a rise, eight bits and the ACK; a tenth fall ends the ACK
+    # clock and a tenth rise is the STOP's, which stays high.
+    (start,), (stop,) = i2c_starts(sda, scl), i2c_stops(sda, scl)
+    rises = [e for e in rising_edges(scl) if start < e < stop]
+    falls = [e for e in falling_edges(scl) if start < e < stop]
+    assert len(rises) == 10 and len(falls) == 10, f"SCL rose at {rises}, fell at {falls}"
+    assert all(f < r for f, r in zip(falls, rises)) and all(r < f for r, f in zip(rises, falls[1:]))
+    assert [sda[e] for e in rises[:8]] == [1, 0, 1, 0, 0, 0, 1, 1]  # 0xA3 MSB first
+
+    # The ninth clock is the slave's: SDA is low because the slave holds it,
+    # the pad has let go.
+    assert sda[rises[8]] == 0
+    assert not pad_sda_low[rises[8]]
+
+    # Bus free: both lines high, and high because the pad let go, not drove.
+    assert sda[-1] == 1 and scl[-1] == 1
+    assert int(dut.gpio_oe.value) & 0b11 == 0
+
+    # The byte was consumed once; the ACK, a 0, reached the host.
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.rx_empty.value) == 0
+    assert int(dut.rx_fifo.count.value) == 1
+    assert int(dut.rx_data.value) == 0
+
+    # Host pop, driven on the falling edge.
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 1
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 0
+    await ReadOnly()
+    assert int(dut.rx_empty.value) == 1
