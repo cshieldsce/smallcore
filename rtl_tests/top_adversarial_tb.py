@@ -1186,3 +1186,51 @@ async def host_traffic_while_the_core_is_stalled_moves_only_the_queues(dut):
     assert not ls.cpu.stalled and state["rx"] == [0x80] * 4 and ls.pushes == 5
     while not ls.cpu.halted:
         await ls.edge()
+
+
+# --- The ends of the address space ------------------------------------------------------
+
+FILLER = encode(Instruction("SET", (2, 0)), ISA)  # drops pin 2 if it ever runs
+
+
+def full_program(**words):
+    """256 words of FILLER with `words` at the addresses named w<addr>."""
+    program = [FILLER] * 256
+    for name, line in words.items():
+        program[int(name[1:])] = assemble(line)[0]
+    return program
+
+
+@cocotb.test()
+async def the_last_addresses_of_a_full_program(dut):
+    """A 256-word program, as far as an 8-bit JMP reaches, every word a
+    SET 2, 0 but the ones under test, so a word that runs by mistake shows
+    on pin 2. JMP 255 lands on the last word, which runs and falls off the
+    end: halted at 256 after two edges. JMP 0 at 255 loops the whole way
+    round and never halts. A SKIP at 254 that is taken steps to 256: halted,
+    word 255 never runs; not taken, word 255 runs first. A SKIP at 255 halts
+    taken or not, the pc it leaves, 257 or 256, counting as halted. And the
+    smallest program, one word, halts after one edge."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    states = await matched(dut, imem, full_program(w0="JMP 255", w255="SET 1, 0"))
+    assert [s["pc"] for s in states] == [255, 256] and states[-1]["gpio"] == [1, 0, 1, 1]
+
+    program = full_program(w0="JMP 255", w255="JMP 0")
+    await begin(dut, imem, program)
+    ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+    for i in range(6):
+        state = await ls.edge()
+        assert (state["pc"], state["halted"], state["gpio"]) == ((255, 0)[i % 2], False, [1, 1, 1, 1]), i
+
+    for level, pcs, gpio in ((1, [1, 254, 256], [1, 1, 1, 1]), (0, [1, 254, 255, 256], [1, 0, 1, 1])):
+        program = full_program(w0="SHIFT_IN 0", w1="JMP 254", w254="SKIP 7, 1", w255="SET 1, 0")
+        states = await matched(dut, imem, program, gpio_in=level)
+        assert [s["pc"] for s in states] == pcs and states[-1]["gpio"] == gpio, level
+    for level, pc in ((1, 257), (0, 256)):
+        program = full_program(w0="SHIFT_IN 0", w1="JMP 255", w255="SKIP 7, 1")
+        states = await matched(dut, imem, program, gpio_in=level)
+        assert [s["pc"] for s in states] == [1, 255, pc] and states[-1]["halted"] and states[-1]["gpio"] == [1, 1, 1, 1], level
+
+    states = await matched(dut, imem, assemble("SET 0, 0"))
+    assert len(states) == 1 and states[-1]["pc"] == 1 and states[-1]["gpio"] == [0, 1, 1, 1]
