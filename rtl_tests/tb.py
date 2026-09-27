@@ -76,6 +76,7 @@ def rtl_state(dut):
         "shift_dir": int(dut.shift_dir.value),
         "open_drain": gpio_bits(dut.open_drain.value),
         "gpio_oe": gpio_bits(dut.gpio_oe.value),
+        "shift_reg": int(dut.shift_reg.value),
     }
 
 
@@ -88,4 +89,5 @@ def model_state(cpu):
         "shift_dir": cpu.shift_dir,
         "open_drain": list(cpu.open_drain),
         "gpio_oe": list(cpu.gpio_oe),
+        "shift_reg": cpu.shift_reg,
     }

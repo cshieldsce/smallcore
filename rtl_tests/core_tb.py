@@ -136,3 +136,40 @@ async def config_matches_model(dut):
         rtl = rtl_state(dut)
         model = model_state(cpu)
         assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+
+@cocotb.test()
+async def shift_out_matches_model(dut):
+    """SHIFT_OUT against the model, cycle by cycle. With shift_dir 0 each
+    SHIFT_OUT drives shift_reg[0] onto gpio[0] and shifts right; the [2] holds
+    everything through the delay. CONFIG shift_dir, 1 moves the wire end to
+    bit 7, so the last two shift left. Running off the end checks halted."""
+    program = assemble("""
+        SHIFT_OUT
+        SHIFT_OUT [2]
+        CONFIG shift_dir, 1
+        SHIFT_OUT
+        SHIFT_OUT
+    """)
+    cpu = CPU(program)
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program))
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+
+    # PULL is not in the RTL yet, so seed the shift register identically on
+    # both sides. Written before ReadOnly: the read-only phase forbids writes.
+    seed = 0b10110001
+    cpu.shift_reg = seed
+    dut.shift_reg.value = seed
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+    while not cpu.halted:
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
