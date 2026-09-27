@@ -1,10 +1,10 @@
-"""cocotb tests for rtl/top.v: the core reading its TX FIFO. Run through
-test_top.py, not directly.
+"""cocotb tests for rtl/top.v: the core between its TX and RX FIFOs. Run
+through test_top.py, not directly.
 
-The bench drives only top's host ports (tx_data, tx_push, ...). core.tx_data
-and core.tx_empty are wires inside top now, fed by the FIFO, so the path under
-test is host -> fifo.v -> core.v. Internals are read hierarchically through
-VPI: dut.core_i.shift_reg, dut.tx_fifo.count.
+The bench drives only top's host ports (tx_data, tx_push, rx_pop, ...). The
+core's FIFO ports are wires inside top, so the paths under test are
+host -> TX fifo.v -> core.v and core.v -> RX fifo.v -> host. Internals are
+read hierarchically through VPI: dut.core_i.shift_reg, dut.tx_fifo.count.
 """
 
 import cocotb
@@ -71,3 +71,47 @@ async def host_push_then_pull(dut):
     assert int(dut.core_i.pc.value) == 1
     assert int(dut.core_i.halted.value) == 1
     assert int(dut.core_i.pull_en.value) == 0
+
+
+@cocotb.test()
+async def push_then_host_pop(dut):
+    """PUSH hands in_shift_reg to the RX FIFO and the host pops it off rx_data.
+    SHIFT_IN fills in_shift_reg; the bench seeds it instead, while program_words
+    is 0 and the core is halted. Raising program_words releases the PUSH, which
+    lands 0xA5 in the FIFO on its edge; one rx_pop empties it again."""
+    program = assemble("""
+        PUSH
+    """)
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert int(dut.rx_empty.value) == 1
+    assert int(dut.core_i.push_en.value) == 0
+
+    # Seed and release the core together, between edges (the read-only phase
+    # forbids writes). The FIFO has room, so push_en rises.
+    await FallingEdge(dut.clk)
+    dut.core_i.in_shift_reg.value = 0xA5
+    dut.program_words.value = len(program)
+    await ReadOnly()
+    assert int(dut.core_i.push_en.value) == 1
+
+    # Issue edge: the byte lands in the RX FIFO, the core halts.
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert int(dut.rx_fifo.count.value) == 1
+    assert int(dut.rx_empty.value) == 0
+    assert int(dut.rx_data.value) == 0xA5
+    assert int(dut.core_i.halted.value) == 1
+    assert int(dut.core_i.push_en.value) == 0  # pushed once
+
+    # Host pop, driven on the falling edge.
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 1
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert int(dut.rx_fifo.count.value) == 0
+    assert int(dut.rx_empty.value) == 1
