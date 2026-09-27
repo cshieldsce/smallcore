@@ -1,10 +1,16 @@
 """SWD host checks, staged the way SPI and I2C were: the smallest piece of the
 protocol first, and the core is assumed able until a piece proves otherwise.
-Stage 1, programs/swd_request.asm: the host owns SWDIO and clocks the 8-bit
-request out, LSB first, and nothing else. No turnaround, no ACK, no data, no
-parity from the core: the host composes the whole request byte. The bench is
-the target: it samples SWDIO on every rising edge of SWCLK and reads what it
-saw as a request packet, start, stop and park bits and the parity included."""
+programs/swd_request.asm grows one stage at a time:
+
+  1. the request: the host owns SWDIO and clocks the 8-bit request out, LSB
+     first, the host having composed the byte, parity and all;
+  2. the turnaround: after the park bit the host lets go of SWDIO for one
+     clock, so the target can take the line.
+
+No ACK, no data yet. The bench is the wire and the target. The wire is SWDIO
+resolved every cycle from the pad (gpio and gpio_oe) and a pull-up; the
+target samples it on every rising edge of SWCLK and reads what it saw as a
+request packet, start, stop and park bits and the parity included."""
 
 from pathlib import Path
 from typing import NamedTuple
@@ -15,9 +21,10 @@ from cpu import CPU, decode, load_isa, load_program
 
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
 REQUEST = PROGRAMS / "swd_request.asm"
-SWDIO, SWCLK = 0, 1  # gpio pins the program drives: SWDIO is the shift pin
+SWDIO, SWCLK = 0, 1  # the same pin numbers on gpio (the pad) and gpio_in (the wire): SWDIO is the shift pin
 HIGH = 4  # cycles SWCLK is high per bit, and low
 BIT = 2 * HIGH
+CLOCKS = 8 + 1  # rises of SWCLK: the request's eight and the turnaround's
 
 
 def request(apndp, rnw, a):
@@ -60,16 +67,25 @@ REQUESTS = [(apndp, rnw, a) for apndp in (0, 1) for rnw in (0, 1) for a in range
 
 
 class Run(NamedTuple):
-    swdio: list  # one level per cycle, as the host drove it
-    swclk: list
+    swdio: list  # the wire, one level per cycle: the pad while it drives, else the pull-up
+    swclk: list  # one level per cycle, as the host drove it
+    owned: list  # one per cycle: was the pad driving SWDIO
     cpu: CPU
 
 
 def run(byte):
-    """Run the program to its end with `byte` waiting in the TX FIFO."""
-    cpu = CPU(load_program(REQUEST), tx_data=[byte])
-    cpu.run()
-    return Run(cpu.pin_trace(SWDIO), cpu.pin_trace(SWCLK), cpu)
+    """Run the program to its end with `byte` waiting in the TX FIFO, the wire
+    resolved after every cycle and fed back to gpio_in for the next."""
+    cpu = CPU(load_program(REQUEST), gpio_in=1, tx_data=[byte])
+    swdio, owned = [], []
+    while not cpu.halted:
+        cpu.step()
+        driving = cpu.gpio_oe[SWDIO] == 1
+        level = cpu.gpio[SWDIO] if driving else 1
+        cpu.gpio_in[SWDIO] = level
+        swdio.append(level)
+        owned.append(driving)
+    return Run(swdio, cpu.pin_trace(SWCLK), owned, cpu)
 
 
 def rising_edges(trace):
@@ -81,15 +97,17 @@ def falling_edges(trace):
 
 
 def sampled(swdio, swclk):
-    """What the target shifts in: SWDIO on every rising edge of SWCLK, in order."""
+    """What the target sees: SWDIO on every rising edge of SWCLK, in order. The
+    first eight are the request, the ninth is the turnaround's."""
     return [swdio[e] for e in rising_edges(swclk)]
 
 
 def show(wave, r):
     wave.add("swclk", r.swclk, group="host drives")
-    wave.add("swdio", r.swdio, group="host drives")
+    wave.add("swdio", r.swdio, group="wire")
+    wave.add("host owns", [int(o) for o in r.owned], group="wire")
     labels = ["-"] * len(r.swdio)
-    for name, edge in zip(FIELDS, rising_edges(r.swclk)):
+    for name, edge in zip(FIELDS + ("trn",), rising_edges(r.swclk)):
         labels[edge] = name
     wave.add("target samples", labels)
 
@@ -97,6 +115,9 @@ def show(wave, r):
 @pytest.fixture(params=REQUESTS, ids=lambda r: f"{'ap' if r[0] else 'dp'}_{'read' if r[1] else 'write'}_a{r[2]:02b}")
 def packet(request):
     return Packet(*request.param)
+
+
+# --- stage 1: the request ------------------------------------------------------
 
 
 def test_target_samples_the_request_lsb_first(packet, wave):
@@ -107,7 +128,7 @@ def test_target_samples_the_request_lsb_first(packet, wave):
     byte = request(*packet)
     r = run(byte)
     show(wave, r)
-    bits = sampled(r.swdio, r.swclk)
+    bits = sampled(r.swdio, r.swclk)[:8]
     assert bits == wire_bits(byte)
     assert target_decode(bits) == packet
 
@@ -118,50 +139,31 @@ def test_dp_write_to_a01_is_0xa9_on_the_wire():
     byte 0xA9 = 1010_1001 read from bit 0. Backwards it is 1 0 1 0 1 0 0 1: a
     bit-order slip cannot pass."""
     assert request(0, 0, 0b01) == 0xA9
-    assert sampled(*run(0xA9)[:2]) == [1, 0, 0, 1, 0, 1, 0, 1]
+    assert sampled(*run(0xA9)[:2])[:8] == [1, 0, 0, 1, 0, 1, 0, 1]
 
 
-def test_swclk_rises_eight_times_and_idles_low():
-    """One rising edge per request bit and no other: SWCLK is low before the
-    first bit, low again after the last, and stays there."""
+def test_swclk_rises_once_per_bit_and_once_for_the_turnaround_then_idles_low():
+    """Nine rising edges, eight for the request and one for the turnaround, and
+    no other: SWCLK is low before the first, low again after the last, and
+    stays there."""
     r = run(0xA9)
     ups, downs = rising_edges(r.swclk), falling_edges(r.swclk)
-    assert len(ups) == 8, f"SWCLK rose at {ups}"
-    assert len(downs) == 8 and all(u < d for u, d in zip(ups, downs)), "each rise has its fall"
+    assert len(ups) == CLOCKS, f"SWCLK rose at {ups}"
+    assert len(downs) == CLOCKS and all(u < d for u, d in zip(ups, downs)), "each rise has its fall"
     assert r.swclk[0] == 0, "SWCLK idle low before the request"
-    assert set(r.swclk[downs[-1]:]) == {0}, "SWCLK idle low after the request"
-
-
-def test_swdio_idles_high_and_is_left_high():
-    """The host owns SWDIO throughout. It is high before the request (the start
-    bit is a 1, so the line does not move for it), and after the park bit the
-    host leaves it high: the place the turnaround will go."""
-    r = run(0xA9)
-    first, last = rising_edges(r.swclk)[0], rising_edges(r.swclk)[-1]
-    assert set(r.swdio[:first]) == {1}, "SWDIO high up to the start bit's sample"
-    assert set(r.swdio[last:]) == {1}, "SWDIO high from the park bit on"
-    assert r.cpu.gpio_oe[SWDIO] == 1 and r.cpu.gpio_oe[SWCLK] == 1, "both pins driven at the end"
-
-
-def test_host_drives_swdio_every_cycle():
-    """No turnaround yet: gpio_oe[SWDIO] is 1 on every cycle of the run. The
-    test stage 2 will have to change."""
-    cpu = CPU(load_program(REQUEST), tx_data=[0xA9])
-    while not cpu.halted:
-        assert cpu.gpio_oe[SWDIO] == 1 and cpu.gpio_oe[SWCLK] == 1
-        cpu.step()
-    assert cpu.gpio_oe[SWDIO] == 1
+    assert set(r.swclk[downs[-1]:]) == {0}, "SWCLK idle low after the turnaround"
 
 
 @pytest.mark.parametrize("byte", (0xA9, request(1, 1, 0b11), request(0, 1, 0b00)), ids=lambda b: f"{b:#04x}")
 def test_each_bit_is_on_swdio_through_the_low_half_and_the_rising_edge(byte):
     """The target samples on the rise, so the bit must be there before it and
     hold through it: on SWDIO for the 4 low cycles before its rising edge and
-    the cycle of the edge. Bits are 8 cycles apart, 4 low, 4 high."""
+    the cycle of the edge. Bits are 8 cycles apart, 4 low, 4 high, and the
+    turnaround clock keeps the beat."""
     r = run(byte)
     ups, downs = rising_edges(r.swclk), falling_edges(r.swclk)
-    assert [b - a for a, b in zip(ups, ups[1:])] == [BIT] * 7
-    assert [d - u for u, d in zip(ups, downs)] == [HIGH] * 8, "high half"
+    assert [b - a for a, b in zip(ups, ups[1:])] == [BIT] * (CLOCKS - 1)
+    assert [d - u for u, d in zip(ups, downs)] == [HIGH] * CLOCKS, "high half"
     for i, (bit, up) in enumerate(zip(wire_bits(byte), ups)):
         assert r.swdio[up - HIGH:up + 1] == [bit] * (HIGH + 1), f"bit {i} ({FIELDS[i]}) on the wire"
         if i:
@@ -178,20 +180,67 @@ def test_swdio_is_stable_while_swclk_is_high():
 def test_program_waits_for_the_request_with_the_line_idle():
     """Nothing happens until the host writes a request: the program stalls on
     its PULL with SWCLK low and SWDIO high, then sends the byte that arrives."""
-    cpu = CPU(load_program(REQUEST))
+    cpu = CPU(load_program(REQUEST), gpio_in=1)
     cpu.run_cycles(20)
-    assert cpu.stalled and cpu.gpio[SWCLK] == 0 and cpu.gpio[SWDIO] == 1
+    assert cpu.stalled and cpu.gpio[SWCLK] == 0 and cpu.gpio[SWDIO] == 1 and cpu.gpio_oe[SWDIO] == 1
     cpu.tx_fifo.append(0xA9)
     cpu.run()
-    assert sampled(cpu.pin_trace(SWDIO), cpu.pin_trace(SWCLK)) == wire_bits(0xA9)
+    assert [cpu.pin_trace(SWDIO)[e] for e in rising_edges(cpu.pin_trace(SWCLK))][:8] == wire_bits(0xA9)
 
 
-def test_program_is_two_words_per_bit_lsb_first():
-    """Stage 1 costs the core nothing new: SPI's two words per bit, SHIFT_OUT
-    with the clock low and SET with it high, LSB first as the core resets."""
+# --- stage 2: the turnaround ---------------------------------------------------
+
+
+def test_host_owns_swdio_through_the_park_bit_and_lets_go_as_that_clock_falls(wave):
+    """The host drives SWDIO on every cycle of the request, through the park
+    bit's rising edge and its high half, and lets go on the edge that drops
+    SWCLK after it: from there the pad is not driving, and it stays that way.
+    The line reads high meanwhile, from the pull-up, so a bench that only
+    watched levels could not tell: `owned` is gpio_oe."""
+    r = run(0xA9)
+    show(wave, r)
+    ups, downs = rising_edges(r.swclk), falling_edges(r.swclk)
+    release = downs[7]  # the clock after the park bit drops
+    assert release == ups[7] + HIGH
+    assert all(r.owned[:release]), "the host let go before the park bit was clocked"
+    assert not any(r.owned[release:]), "the host took the line back"
+    assert set(r.swdio[release:]) == {1}, "the pull-up holds the line high while nobody drives"
+
+
+def test_turnaround_is_one_clock_with_nobody_driving():
+    """The ninth rising edge of SWCLK is the turnaround's: the host is not
+    driving on the cycles around it, and it is the last clock the host gives
+    before it halts, SWCLK back at idle."""
+    r = run(0xA9)
+    ups = rising_edges(r.swclk)
+    trn = ups[8]
+    assert not any(r.owned[trn - HIGH:trn + HIGH]), "the host drove SWDIO around the turnaround clock"
+    assert r.swdio[trn] == 1
+    assert len(ups) == 9 and r.cpu.gpio[SWCLK] == 0 and r.cpu.gpio_oe[SWDIO] == 0
+
+
+def test_letting_go_is_open_drain_with_a_one_the_park_bit_left():
+    """How the host lets go: one CONFIG word makes SWDIO open-drain, and the 1
+    the park bit left on gpio[0] is what an open-drain pin does not drive. The
+    same word drops SWCLK. Nothing is written to the pin itself."""
     isa = load_isa()
     words = [decode(w, isa) for w in load_program(REQUEST)]
-    assert len(words) == 2 + 8 * 2 + 2  # clock low, pull; 8 x (shift + clock low, clock high); clock low, line high
-    assert not any(w.op == "CONFIG" for w in words), "the reset configuration is the SWD one"
+    od01 = isa["config"]["open_drain01"]["field"]
+    (release,) = [i for i, w in enumerate(words) if w.op == "CONFIG"]
+    assert words[release].args == (od01, 1) and words[release].side == (SWCLK, 0)
+    assert words[release - 1].op == "SET" and words[release - 1].args == (SWCLK, 1), "right after the park bit's clock"
+    assert not any(w.op == "SET" and w.args[0] == SWDIO for w in words), "no SET on SWDIO: SHIFT_OUT and the pad mode do it all"
+
+
+def test_program_is_two_words_per_bit_lsb_first_plus_the_turnaround():
+    """Two words per bit, SHIFT_OUT with the clock low and SET with it high, as
+    in SPI; no CONFIG shift_dir because the reset configuration, LSB first, is
+    SWD's. The turnaround adds two words, let go and clock, and one returns
+    the clock to idle."""
+    isa = load_isa()
+    words = [decode(w, isa) for w in load_program(REQUEST)]
+    assert len(words) == 2 + 8 * 2 + 3  # clock low, pull; 8 x (shift + clock low, clock high); let go + clock low, clock high, clock low
+    shift_dir = isa["config"]["shift_dir"]["field"]
+    assert not any(w.op == "CONFIG" and w.args[0] == shift_dir for w in words)
     shifts = [w for w in words if w.op == "SHIFT_OUT"]
     assert len(shifts) == 8 and all(w.side == (SWCLK, 0) for w in shifts)

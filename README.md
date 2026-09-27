@@ -99,7 +99,7 @@ python sim/cpu.py programs/spi_tx_msb.asm 0xA3      # same words except CONFIG s
 python sim/cpu.py programs/spi_duplex_msb.asm 0xA3  # also samples MISO on gpio_in 3 and PUSHes the byte (the CLI holds inputs at 0)
 python -m pytest tests/test_uart_rx.py -v           # UART RX: uart_rx.asm fed by uart_tx_loop.asm over a wire, waves in build/waves/uart_rx/
 python -m pytest tests/test_i2c.py -v               # I2C master write on a bus model with a slave: one byte, clock stretching, address + data
-python sim/cpu.py programs/swd_request.asm 0xA9    # SWD stage 1, the request alone: SWDIO on gpio 0, SWCLK on gpio 1, the byte is the request
+python sim/cpu.py programs/swd_request.asm 0xA9    # SWD: the request then the turnaround, SWDIO on gpio 0, SWCLK on gpio 1, the byte is the request
 python -m pytest tests/test_swd.py -v               # SWD: a target on the pins decodes every request the host can make
 python tools/render_docs.py                         # docs/*.mmd -> .svg (needs mermaid-cli)
 make lint                                           # verilator --lint-only -Wall -Wno-fatal rtl/core.v
@@ -133,7 +133,8 @@ What the protocols have asked of the core, in order. Open items stay open until 
 | per-pin idle level | SPI, one `SET` for SCLK | open, not hurting yet |
 | configurable shift-output pin | SPI | open, fixed `gpio[0]` has not failed |
 | listen on a pad that is push-pull high at reset | the chip: `gpio_in` is the pad readback | one `CONFIG` word releases the pin, `uart_rx`, `spi_duplex_*`; the I²C programs already did |
-| clock a request out, the target sampling on the rise | SWD stage 1, the request alone | nothing new: `swd_request.asm` is `spi_tx_lsb.asm`'s two words per bit without CS, LSB first as the core resets; the turnaround, ACK and data phases come next, one at a time |
+| clock a request out, the target sampling on the rise | SWD stage 1, the request alone | nothing new: `swd_request.asm` is `spi_tx_lsb.asm`'s two words per bit without CS, LSB first as the core resets |
+| let go of the line for one clock: the turnaround | SWD stage 2 | nothing new: `CONFIG open_drain01, 1` with the park bit's 1 on the pin, the word's side effect dropping SWCLK, so the release is one word on the beat, as I²C's ACK clock was; the ACK and data phases come next, one at a time |
 
 Three kinds of state: instruction (`pc`, the delay counter), stream (the shift registers and FIFOs) and configuration (`shift_dir`, `open_drain`), each a `CONFIG` field. A shift pin or input pin would join the third kind as the last field.
 
