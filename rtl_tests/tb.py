@@ -26,7 +26,7 @@ async def reset(dut, cycles=2):
     dut.reset.value = 0
 
 
-def drive_inputs(dut, program_words, tx_empty=0, rx_full=0, gpio_in=0):
+def drive_inputs(dut, program_words, tx_empty=0, rx_full=0, gpio_in=0, tx_data=0):
     """Drive every input besides clk, reset and imem_word so none is X. The
     defaults are a non-blocking environment: nothing waits on a FIFO flag or a
     pin. A WAIT or FIFO test passes its own values."""
@@ -34,6 +34,7 @@ def drive_inputs(dut, program_words, tx_empty=0, rx_full=0, gpio_in=0):
     dut.tx_empty.value = tx_empty
     dut.rx_full.value = rx_full
     dut.gpio_in.value = gpio_in
+    dut.tx_data.value = tx_data
 
 
 class Imem:
