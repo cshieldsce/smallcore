@@ -8,6 +8,7 @@ module core(
     output     [7:0]  rx_data,
     output            pull_en,
     output            push_en,
+    output            halted,
     output     [7:0]  imem_addr,
     output     [3:0]  gpio_oe,
     output reg [3:0]  gpio_out
@@ -84,7 +85,6 @@ module core(
     assign skip_bit     = own[3:1];
     assign level        = own[0];
 
-    wire halted;
     wire issue;
     wire stall;
     wire last;

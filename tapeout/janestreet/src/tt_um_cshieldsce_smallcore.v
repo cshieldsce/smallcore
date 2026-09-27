@@ -34,6 +34,7 @@ module tt_um_cshieldsce_smallcore (
   top top_i (
       .clk           (clk),
       .reset         (!rst_n),           // TT reset is active low, top's is active high
+      .restart       (1'b0),             // the host's core-only restart comes with the host interface
       // PROVISIONAL, elaboration only: keeps every top input driven by a pin
       .imem_word     ({uio_in, ui_in}),  // 16-bit instruction word
       .program_words ({ui_in[1], uio_in}),
@@ -46,7 +47,8 @@ module tt_um_cshieldsce_smallcore (
       .rx_empty      (rx_empty),
       .imem_addr     (imem_addr),
       .gpio_out      (gpio_out),
-      .gpio_oe       (gpio_oe)
+      .gpio_oe       (gpio_oe),
+      .halted        ()
   );
 
   assign uo_out  = imem_addr;

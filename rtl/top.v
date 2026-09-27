@@ -1,6 +1,7 @@
 module top (
     input             clk,
     input             reset,
+    input             restart,   // resets the core only; the FIFOs keep their bytes
 
     input      [15:0] imem_word,
     input      [8:0]  program_words,
@@ -16,7 +17,8 @@ module top (
 
     output     [7:0]  imem_addr,
     output     [3:0]  gpio_out,
-    output     [3:0]  gpio_oe
+    output     [3:0]  gpio_oe,
+    output            halted
 );
 
     wire [7:0] core_tx_data;
@@ -59,10 +61,11 @@ module top (
 
     core core_i (
         .clk           (clk),
-        .reset         (reset),
+        .reset         (reset | restart),
 
         .tx_empty      (tx_empty),
         .rx_full       (rx_full),
+        .halted        (halted),
 
         .imem_word     (imem_word),
         .program_words (program_words),

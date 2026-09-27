@@ -39,8 +39,9 @@ def drive_inputs(dut, program_words, tx_empty=0, rx_full=0, gpio_in=0, tx_data=0
 
 def drive_host(dut, program_words):
     """top.v's inputs besides clk, reset and imem_word, with the host idle:
-    nothing pushed, nothing popped, the input pins low. The FIFO flags are
-    top's own wires; the host sees tx_full and rx_empty."""
+    nothing pushed, nothing popped, no restart, the input pins low. The FIFO
+    flags are top's own wires; the host sees tx_full and rx_empty."""
+    dut.restart.value = 0
     dut.program_words.value = program_words
     dut.gpio_in.value = 0
     dut.tx_data.value = 0
