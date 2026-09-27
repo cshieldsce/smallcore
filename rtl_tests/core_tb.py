@@ -298,6 +298,75 @@ async def jmp_matches_model(dut):
 
 
 @cocotb.test()
+async def skip_taken_matches_model(dut):
+    """SKIP with its condition true, cycle by cycle. in_shift_reg bit 3 is 1,
+    so SKIP 3, 1 [2] holds the pc through its delay and then steps it by 2 on
+    its last cycle: SET 0, 0 never runs. Running off the end checks halted."""
+    program = assemble("""
+        SKIP 3, 1 [2]
+        SET 0, 0
+        SET 1, 0
+    """)
+    cpu = CPU(program)
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program))
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+
+    # Only bit 3 set: testing the wrong bit reads 0 and falls through.
+    seed = 0b00001000
+    cpu.in_shift_reg = seed
+    dut.in_shift_reg.value = seed
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+    while not cpu.halted:
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+    assert gpio_bits(dut.gpio_out.value)[:2] == [1, 0]  # SET 0, 0 skipped, SET 1, 0 ran
+
+
+@cocotb.test()
+async def skip_not_taken_matches_model(dut):
+    """The same SKIP with its condition false: in_shift_reg bit 3 is 0, so
+    after the delay the pc steps by 1 and both SETs run."""
+    program = assemble("""
+        SKIP 3, 1 [2]
+        SET 0, 0
+        SET 1, 0
+    """)
+    cpu = CPU(program)
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program))
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+
+    # Every bit but 3 set: testing the wrong bit reads 1 and skips.
+    seed = 0b11110111
+    cpu.in_shift_reg = seed
+    dut.in_shift_reg.value = seed
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+    while not cpu.halted:
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+    assert gpio_bits(dut.gpio_out.value)[:2] == [0, 0]  # both SETs ran
+
+
+@cocotb.test()
 async def uart_tx_0x55_matches_model(dut):
     """A real program end to end: programs/uart_tx_0x55.asm, cycle by cycle
     against the model until it halts. Idle, start, 8 data bits and stop is
