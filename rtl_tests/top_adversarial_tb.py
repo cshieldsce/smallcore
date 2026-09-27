@@ -259,3 +259,49 @@ async def wait_holds_on_a_pin_level_until_it_arrives_then_issues_once(dut):
         previous = state
     assert falls == 0, "gpio[1] fell once, on the issue edge, and not again"
     assert top_state(dut)["gpio"] == [0, 0, 1, 0]
+
+
+# --- Delay one-shot --------------------------------------------------------------
+
+# Every run below starts the same way: PULL 3, 0 takes 0xA5 into shift_reg
+# and drops gpio[3], SHIFT_IN 1 with gpio_in[1] high puts 0x80 into
+# in_shift_reg, and a second byte, 0x3C, waits in the TX FIFO. The word
+# under test comes third, at address 2, and is the last word.
+PREFIX = "PULL 3, 0\nSHIFT_IN 1\n"
+PRELOAD = (0xA5, 0x3C)
+GPIO_IN = 0b0010
+AT = 2  # the edge the word under test issues on
+
+ONE_SHOT = (
+    "PULL", "PULL 2, 0", "PUSH", "PUSH 1, 0", "SHIFT_OUT", "SHIFT_OUT 2, 0", "SHIFT_IN 2", "SHIFT_IN 2, 1, 0",
+    "SET 0, 0", "CONFIG shift_dir, 1", "CONFIG open_drain01, 3", "WAIT 1, 1", "SKIP 7, 1", "NOP", "JMP 3",
+)
+
+
+async def trace_of(dut, imem, program, tx=PRELOAD, gpio_in=GPIO_IN):
+    await begin(dut, imem, program, tx, gpio_in)
+    return await run(dut)
+
+
+@cocotb.test()
+async def a_delay_does_the_operation_once_then_only_holds(dut):
+    """`X [d]` against `X`, from the same state, for every kind of X and
+    d in 1, 7 and 31. On X's edge the two agree on everything but the pc
+    and the counter: the operation, the pin write, the FIFO pop or push,
+    all land there. For d more edges nothing moves but the counter: the
+    FIFO counts in particular, so a delayed PULL pops one byte and a delayed
+    PUSH pushes one. Then the slow run is exactly where the quick one is,
+    d edges later."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    for line in ONE_SHOT:
+        quick = await trace_of(dut, imem, assemble(PREFIX + line))
+        assert len(quick) == AT + 1 and quick[-1]["halted"], f"{line}: the word under test must be the last edge"
+        for delay in (1, 7, DELAY_MAX):
+            slow = await trace_of(dut, imem, assemble(f"{PREFIX}{line} [{delay}]"))
+            assert len(slow) == len(quick) + delay, f"{line} [{delay}]"
+            assert slow[:AT] == quick[:AT]
+            for j in range(AT, AT + delay):
+                assert held(slow[j]) == held(quick[AT]), f"{line} [{delay}] edge {j}: {slow[j]} vs {quick[AT]}"
+                assert (slow[j]["pc"], slow[j]["counter"], slow[j]["halted"]) == (AT, delay - (j - AT), False)
+            assert slow[AT + delay] == quick[AT], f"{line} [{delay}]: not where the quick run ended"
