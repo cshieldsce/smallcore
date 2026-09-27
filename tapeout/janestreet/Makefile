@@ -3,8 +3,9 @@
 #
 # One-time setup (WSL/Linux): make setup            clones tt-support-tools into tt/ and installs the PDK into $(PDK_ROOT)
 #                              python venv with     pip install -r tt/requirements.txt librelane==$(LIBRELANE_VERSION)
-#                              docker               LibreLane runs its tools in ghcr.io/librelane/librelane:$(LIBRELANE_VERSION)
+#                              docker or podman     LibreLane runs its tools in ghcr.io/librelane/librelane:$(LIBRELANE_VERSION)
 PDK_ROOT          ?= $(HOME)/pdk
+VENV              ?= $(HOME)/venvs/tt
 PYTHON            ?= python3
 YOSYS             ?= yosys
 LIBRELANE_VERSION ?= 3.1.0.dev3
@@ -13,6 +14,13 @@ TT                 = $(PYTHON) tt/tt_tool.py --ihp
 RTL                = ../../rtl
 
 export PDK_ROOT
+# tt_tool.py shells out to yowasp-yosys by name, so the venv's bin/ has to be on PATH, not just its python
+ifneq ($(wildcard $(VENV)/bin/python),)
+export PATH := $(VENV)/bin:$(PATH)
+endif
+# Rootless podman under SELinux (Fedora): LibreLane mounts $HOME and the PDK without :z, so the container can't read
+# them. This override turns off SELinux labelling for these containers only; docker ignores it
+export CONTAINERS_CONF_OVERRIDE = $(CURDIR)/scripts/containers.conf
 export PDK = ihp-sg13cmos5l
 
 .PHONY: sync check synth synth-top config harden stats test setup clean
