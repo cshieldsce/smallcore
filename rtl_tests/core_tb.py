@@ -10,7 +10,7 @@ step the RTL and the model together, one cycle at a time, comparing state.
 from pathlib import Path
 
 import cocotb
-from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge
+from cocotb.triggers import ClockCycles, FallingEdge, ReadOnly, RisingEdge
 
 from cpu import CPU, assemble, load_program  # sim/cpu.py, the golden model
 from tb import Imem, drive_inputs, gpio_bits, model_state, reset, rtl_state, start_clock
@@ -200,6 +200,61 @@ async def shift_in_matches_model(dut):
     Imem(dut, program)
     await ReadOnly()
     assert rtl_state(dut) == model_state(cpu)
+
+    while not cpu.halted:
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+
+@cocotb.test()
+async def wait_stall_matches_model(dut):
+    """WAIT against the model while the pin disagrees, then after it agrees.
+    WAIT 0, 0 wants pin 0 low with every pin held high, so edges go by with
+    nothing moving. Pin 0 then drops between edges and the WAIT issues like
+    any instruction: the stall does not count toward its [2], it still spends
+    its full delay before the SET. Running off the end checks halted."""
+    program = assemble("""
+        WAIT 0, 0 [2]
+        SET 1, 0
+    """)
+    cpu = CPU(program, gpio_in=1)
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program), gpio_in=0b1111)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+    # Pin 0 is high: every stalled edge changes nothing.
+    for _ in range(2):
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert cpu.stalled
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+        assert (rtl["pc"], rtl["counter"]) == (0, 0)
+
+    # Drop pin 0 on the falling edge, between the rising edges that sample it
+    # (the read-only phase forbids writes).
+    await FallingEdge(dut.clk)
+    cpu.gpio_in[0] = 0
+    dut.gpio_in.value = 0b1110
+
+    # Release edge: the WAIT issues and loads its full delay.
+    cpu.step()
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    rtl = rtl_state(dut)
+    assert not cpu.stalled
+    assert rtl == model_state(cpu), f"cycle {cpu.cycle}: RTL={rtl}, model={model_state(cpu)}"
+    assert (rtl["pc"], rtl["counter"]) == (0, 2)
 
     while not cpu.halted:
         cpu.step()
