@@ -111,12 +111,20 @@ module core(
 
     assign gpio_oe = ~(open_drain & gpio_out);
 
-    wire      shift_en;  
-    wire      shift_bit;
-    reg [7:0] shift_reg;
+    wire       shift_en;  
+    wire       shift_bit;
+    reg  [7:0] shift_reg;
 
     assign shift_bit = (shift_dir == 0) ? shift_reg[0] : shift_reg[7];
     assign shift_en  = issue && is_shift && !shift_select;
+
+    wire       shift_in_en;
+    wire       in_bit;
+    reg  [7:0] in_shift_reg;
+
+    assign input_pin = own[3:2];
+    assign in_bit      = gpio_in[input_pin];
+    assign shift_in_en = issue && is_shift && shift_select;
 
     always @(posedge clk) begin
         if (reset) begin            
@@ -127,6 +135,7 @@ module core(
             shift_dir     <= 1'b0;
             open_drain    <= 4'b0000;
             shift_reg     <= 8'd0;
+            in_shift_reg  <= 8'd0;
 
         end
         else begin
@@ -139,7 +148,7 @@ module core(
             end
 
             // PC
-            if (pc_en && (is_nop_set || is_config || (is_shift && !shift_select))) begin
+            if (pc_en && (is_nop_set || is_config || is_shift)) begin
                 pc <= pc + 9'd1;
             end
 
@@ -165,7 +174,7 @@ module core(
                 endcase
             end
 
-            // Shift
+            // Shift out
             if (shift_en) begin
                 gpio_out[0] <= shift_bit;
 
@@ -173,6 +182,16 @@ module core(
                     shift_reg <= {1'b0, shift_reg[7:1]};
                 end else begin
                     shift_reg <= {shift_reg[6:0], 1'b0};
+                end
+            end
+
+            // Shift in
+            if (shift_in_en) begin
+                if (shift_dir == 1'b0) begin
+                    in_shift_reg <= {in_bit, in_shift_reg[7:1]};
+                end
+                else begin
+                    in_shift_reg <= {in_shift_reg[6:0], in_bit};
                 end
             end
         end
