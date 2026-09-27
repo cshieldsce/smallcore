@@ -39,14 +39,30 @@ module top (
     );
 
     wire [7:0] core_rx_data;
+    wire       rx_full;
     wire       push_en;
+
+    fifo #(
+        .DEPTH(4)
+    ) rx_fifo (
+        .clk       (clk),
+        .reset     (reset),
+
+        .push      (push_en),
+        .pop       (rx_pop),
+        .push_data (core_rx_data),
+
+        .head_data (rx_data),
+        .empty     (rx_empty),
+        .full      (rx_full)
+    );
 
     core core_i (
         .clk           (clk),
         .reset         (reset),
 
         .tx_empty      (tx_empty),
-        .rx_full       (1'b0),
+        .rx_full       (rx_full),
 
         .imem_word     (imem_word),
         .program_words (program_words),
@@ -62,8 +78,5 @@ module top (
         .gpio_oe       (gpio_oe),
         .gpio_out      (gpio_out)
     );
-
-    assign rx_data  = 8'd0;
-    assign rx_empty = 1'b1;
 
 endmodule
