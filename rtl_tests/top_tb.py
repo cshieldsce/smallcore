@@ -7,11 +7,16 @@ host -> TX fifo.v -> core.v and core.v -> RX fifo.v -> host. Internals are
 read hierarchically through VPI: dut.core_i.shift_reg, dut.tx_fifo.count.
 """
 
+from pathlib import Path
+
 import cocotb
 from cocotb.triggers import FallingEdge, ReadOnly, RisingEdge
 
-from cpu import assemble  # sim/cpu.py
+from cpu import assemble, load_program  # sim/cpu.py
 from tb import Imem, reset, start_clock
+
+PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
+BIT = 8  # clocks per UART bit in uart_tx_pull.asm and uart_rx.asm
 
 
 def drive_host(dut, program_words):
@@ -22,6 +27,28 @@ def drive_host(dut, program_words):
     dut.tx_data.value = 0
     dut.tx_push.value = 0
     dut.rx_pop.value = 0
+
+
+def uart_frame(byte):
+    """One 8N1 frame as line levels, one per bit: start, d0..d7 LSB first, stop."""
+    return [0] + [(byte >> bit) & 1 for bit in range(8)] + [1]
+
+
+def uart_decode(levels):
+    """Decode one 8N1 frame from a line sampled once per clock. The line must
+    idle high up to the start bit, and every bit must hold its level for
+    exactly BIT clocks, so a glitch or a wrong bit time fails here rather than
+    decoding by luck."""
+    start = levels.index(0)
+    assert start > 0 and all(levels[:start]), "line not idle high before the start bit"
+    bits = []
+    for i in range(10):
+        cell = levels[start + i * BIT : start + (i + 1) * BIT]
+        assert len(cell) == BIT, f"line ends inside bit {i}"
+        assert len(set(cell)) == 1, f"bit {i} not held for {BIT} clocks: {cell}"
+        bits.append(cell[0])
+    assert bits[0] == 0 and bits[9] == 1, f"bad start/stop: {bits}"
+    return sum(bit << i for i, bit in enumerate(bits[1:9]))
 
 
 @cocotb.test()
@@ -114,4 +141,85 @@ async def push_then_host_pop(dut):
     await RisingEdge(dut.clk)
     await ReadOnly()
     assert int(dut.rx_fifo.count.value) == 0
+    assert int(dut.rx_empty.value) == 1
+
+
+@cocotb.test()
+async def uart_tx_host_byte_to_pin(dut):
+    """programs/uart_tx_pull.asm end to end. The host pushes 0xA5 into the TX
+    FIFO while the program sends its idle bit; the PULL takes it and the
+    SHIFT_OUTs send it. The bench sees only top's pins: it samples
+    gpio_out[0] once per clock and decodes that as a UART line."""
+    program = load_program(PROGRAMS / "uart_tx_pull.asm")
+    byte = 0xA5
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=len(program))
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+
+    # Host push on the first falling edge, one clock into the idle bit; the
+    # PULL does not issue until BIT clocks in.
+    await FallingEdge(dut.clk)
+    dut.tx_data.value = byte
+    dut.tx_push.value = 1
+    await FallingEdge(dut.clk)
+    dut.tx_push.value = 0
+
+    # Idle, 10 frame bits, and a bit time of the line resting high after the
+    # program halts.
+    levels = []
+    for _ in range(12 * BIT):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        levels.append(int(dut.gpio_out.value) & 1)
+
+    assert uart_decode(levels) == byte
+    assert levels[-BIT:] == [1] * BIT  # idle after the stop bit
+    assert int(dut.gpio_oe.value) & 1 == 1  # pin 0 driven, not released
+    assert int(dut.tx_full.value) == 0
+    assert int(dut.tx_fifo.empty.value) == 1  # the byte was consumed once
+
+
+@cocotb.test()
+async def uart_rx_pin_to_host_byte(dut):
+    """programs/uart_rx.asm end to end, the mirror of the TX test. The bench
+    drives one 8N1 frame of 0xA5 onto gpio_in[0] and reads the result only
+    from top's host port: rx_empty, rx_data, rx_pop."""
+    program = load_program(PROGRAMS / "uart_rx.asm")
+    byte = 0xA5
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=len(program))
+    dut.gpio_in.value = 0b1111  # RX idles high
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+
+    async def drive_rx(level, clocks):
+        """Hold gpio_in[0] at level for `clocks` rising edges, changing it on
+        the falling edge (the read-only phase forbids writes)."""
+        for _ in range(clocks):
+            await FallingEdge(dut.clk)
+            dut.gpio_in.value = 0b1110 | level
+            await RisingEdge(dut.clk)
+
+    await drive_rx(1, 2 * BIT)  # idle: the WAIT stalls
+    await ReadOnly()
+    assert int(dut.rx_empty.value) == 1
+
+    for level in uart_frame(byte):
+        await drive_rx(level, BIT)
+    await drive_rx(1, BIT)  # idle after the frame
+    await ReadOnly()
+
+    # PUSH ran once, mid stop bit: exactly one byte for the host.
+    assert int(dut.rx_empty.value) == 0
+    assert int(dut.rx_fifo.count.value) == 1
+    assert int(dut.rx_data.value) == byte
+
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 1
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 0
+    await ReadOnly()
     assert int(dut.rx_empty.value) == 1
