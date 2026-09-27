@@ -266,6 +266,38 @@ async def wait_stall_matches_model(dut):
 
 
 @cocotb.test()
+async def jmp_matches_model(dut):
+    """JMP against the model, cycle by cycle. The JMP holds the pc through its
+    [2], then loads the target on its last cycle, so the SET 1, 0 at address 2
+    never runs. Running off the end after target checks halted."""
+    program = assemble("""
+        SET 0, 0
+        JMP target [2]
+        SET 1, 0
+    target:
+        SET 2, 0
+    """)
+    cpu = CPU(program)
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program))
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+    while not cpu.halted:
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+    assert gpio_bits(dut.gpio_out.value)[1] == 1  # the skipped SET 1, 0 never ran
+
+
+@cocotb.test()
 async def uart_tx_0x55_matches_model(dut):
     """A real program end to end: programs/uart_tx_0x55.asm, cycle by cycle
     against the model until it halts. Idle, start, 8 data bits and stop is
