@@ -65,7 +65,7 @@ def gpio_bits(value):
 # (pc, delay_counter) are read straight out of the design: cocotb's Verilator
 # build uses --public-flat-rw, which keeps every signal visible, so no debug
 # ports. Add a key to both functions as the core grows (shift_reg,
-# in_shift_reg, shift_dir, open_drain, ...).
+# in_shift_reg, ...).
 
 def rtl_state(dut):
     return {
@@ -73,6 +73,9 @@ def rtl_state(dut):
         "counter": int(dut.delay_counter.value),
         "gpio": gpio_bits(dut.gpio_out.value),
         "halted": bool(dut.halted.value),
+        "shift_dir": int(dut.shift_dir.value),
+        "open_drain": gpio_bits(dut.open_drain.value),
+        "gpio_oe": gpio_bits(dut.gpio_oe.value),
     }
 
 
@@ -82,4 +85,7 @@ def model_state(cpu):
         "counter": cpu.counter,
         "gpio": list(cpu.gpio),
         "halted": cpu.halted,
+        "shift_dir": cpu.shift_dir,
+        "open_drain": list(cpu.open_drain),
+        "gpio_oe": list(cpu.gpio_oe),
     }

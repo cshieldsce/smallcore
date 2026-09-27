@@ -106,3 +106,33 @@ async def set_timing_matches_model(dut):
         rtl = rtl_state(dut)
         model = model_state(cpu)
         assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+
+
+@cocotb.test()
+async def config_matches_model(dut):
+    """CONFIG against the model, cycle by cycle. Each write lands on its issue
+    edge; open_drain01 = 3 with every pin reset high releases pins 0 and 1, so
+    gpio_oe drops to 1100 combinationally. The [2] holds the state through the
+    delay, and running off the end checks halted."""
+    program = assemble("""
+        CONFIG shift_dir, 1
+        CONFIG open_drain01, 3
+        CONFIG open_drain23, 1
+        CONFIG shift_dir, 0 [2]
+    """)
+    cpu = CPU(program)
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=len(program))
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+    while not cpu.halted:
+        cpu.step()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        model = model_state(cpu)
+        assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
