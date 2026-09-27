@@ -305,3 +305,117 @@ async def a_delay_does_the_operation_once_then_only_holds(dut):
                 assert held(slow[j]) == held(quick[AT]), f"{line} [{delay}] edge {j}: {slow[j]} vs {quick[AT]}"
                 assert (slow[j]["pc"], slow[j]["counter"], slow[j]["halted"]) == (AT, delay - (j - AT), False)
             assert slow[AT + delay] == quick[AT], f"{line} [{delay}]: not where the quick run ended"
+
+
+# --- Metamorphic pairs -----------------------------------------------------------
+
+
+def reverse(byte):
+    return int(f"{byte:08b}"[::-1], 2)
+
+
+def wire_lsb(byte):
+    return [(byte >> i) & 1 for i in range(8)]
+
+
+@cocotb.test()
+async def shift_out_lsb_first_is_msb_first_of_the_reversed_byte_on_the_pin(dut):
+    """For every byte: CONFIG shift_dir 0, PULL, eight SHIFT_OUTs put the
+    same levels on gpio[0], edge for edge, as shift_dir 1 does with the
+    byte's bit reversal: the reset 1 through CONFIG and PULL, then the bits
+    from bit 0 up. Both leave shift_reg empty and the byte consumed."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    lsb, msb = (assemble(f"CONFIG shift_dir, {d}\nPULL\n" + "SHIFT_OUT\n" * 8) for d in (0, 1))
+    for byte in range(256):
+        a = await trace_of(dut, imem, lsb, tx=(byte,), gpio_in=0)
+        b = await trace_of(dut, imem, msb, tx=(reverse(byte),), gpio_in=0)
+        pin = [[s["gpio"][0] for s in states] for states in (a, b)]
+        assert pin[0] == pin[1] == [1, 1] + wire_lsb(byte), f"{byte:#04x}: {pin}"
+        assert (a[-1]["shift_reg"], b[-1]["shift_reg"], a[-1]["tx_count"], b[-1]["tx_count"]) == (0, 0, 0, 0)
+
+
+SIDE = (  # a bare word, the same word with a side effect, and the pin and value that adds
+    ("PULL", "PULL 2, 0", 2, 0), ("PUSH", "PUSH 1, 0", 1, 0), ("SHIFT_OUT", "SHIFT_OUT 2, 0", 2, 0),
+    ("SHIFT_IN 2", "SHIFT_IN 2, 3, 1", 3, 1), ("WAIT 1, 1", "WAIT 1, 1, 0, 0", 0, 0), ("SKIP 7, 1", "SKIP 7, 1, 2, 0", 2, 0),
+    ("CONFIG shift_dir, 1", "CONFIG shift_dir, 1, 1, 0", 1, 0), ("NOP", "SET 0, 0", 0, 0),
+)
+
+
+@cocotb.test()
+async def a_side_effect_adds_exactly_one_pin_and_nothing_else(dut):
+    """`SHIFT_IN 2, 3, 1` runs exactly like `SHIFT_IN 2` and differs only in
+    gpio[3], from its edge on; SET is NOP plus the pin. For every kind of
+    word, with and without a delay, top's state edge for edge is the bare
+    run's with that one pin written and gpio_oe following it."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    for bare, side, pin, value in SIDE:
+        for delay in (0, 5):
+            plain = await trace_of(dut, imem, assemble(f"{PREFIX}{bare} [{delay}]"))
+            extra = await trace_of(dut, imem, assemble(f"{PREFIX}{side} [{delay}]"))
+            expected = [dict(s) for s in plain]
+            for s in expected[AT:]:
+                s["gpio"] = list(s["gpio"])
+                s["gpio"][pin] = value
+                s["gpio_oe"] = [0 if od and level else 1 for od, level in zip(s["open_drain"], s["gpio"])]
+            assert extra == expected, f"{side} [{delay}]"
+
+
+def prepends(prompt, late, s, k):
+    """`late` is `prompt` with k held edges before edge s: the same pins with
+    the levels after edge s - 1 repeated k times, the core frozen through
+    them, and every state from the release on the prompt run's, k edges
+    later."""
+    gp = [[st["gpio"] for st in states] for states in (prompt, late)]
+    assert len(late) == len(prompt) + k
+    assert gp[1] == gp[0][:s] + [gp[0][s - 1]] * k + gp[0][s:]
+    assert all(core(st) == core(late[s - 1]) for st in late[s:s + k])
+    assert late[s + k:] == prompt[s:]
+
+
+@cocotb.test()
+async def a_stall_only_prepends_held_cycles(dut):
+    """A PULL whose byte the host pushes k stall cycles in ends where one
+    whose byte was preloaded ends, k edges later, its pins the same after k
+    copies of the held levels. Same for a PUSH and the room the host makes
+    by popping, and a WAIT and the level that arrives. The stalled core is
+    frozen meanwhile; the delay and the words after run unchanged."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    for k in (1, 3, 17):
+        # PULL at address 1: the byte preloaded, or pushed to land on edge s + k - 1.
+        program, s = assemble("SET 1, 0\nPULL 2, 0 [2]\nSHIFT_OUT 3, 1\nSHIFT_IN 0"), 1
+        await begin(dut, imem, program, tx=(0xA3,))
+        prompt = await run(dut)
+
+        def push(i, t=s + k - 1):
+            dut.tx_push.value = i == t
+            dut.tx_data.value = 0xA3
+
+        await begin(dut, imem, program)
+        prepends(prompt, await run(dut, before=push), s, k)
+
+        # PUSH at address 6, after four PUSHes fill the FIFO: the host pops on
+        # the SET's edge, or k stall cycles in.
+        program, s = assemble("SHIFT_IN 0\nPUSH\nPUSH\nPUSH\nPUSH\nSET 1, 0\nPUSH 2, 0 [2]\nSHIFT_OUT 3, 1\nSHIFT_IN 0"), 6
+
+        def pop(i, t):
+            dut.rx_pop.value = i == t
+
+        await begin(dut, imem, program, gpio_in=0b0001)
+        prompt = await run(dut, before=lambda i: pop(i, s - 1))
+        await begin(dut, imem, program, gpio_in=0b0001)
+        prepends(prompt, await run(dut, before=lambda i, t=s + k - 1: pop(i, t)), s, k)
+
+        # WAIT at address 1: the level there from the start, or before edge s + k.
+        program, s = assemble("SET 1, 0\nWAIT 3, 1, 2, 0 [2]\nSHIFT_OUT 3, 1\nSHIFT_IN 0"), 1
+        await begin(dut, imem, program, gpio_in=0b1000)
+        prompt = await run(dut)
+
+        def level(i, t=s + k):
+            if i == t:
+                dut.gpio_in.value = 0b1000
+
+        await begin(dut, imem, program, gpio_in=0)
+        prepends(prompt, await run(dut, before=level), s, k)
