@@ -111,6 +111,7 @@ module core(
 
     assign gpio_oe = ~(open_drain & gpio_out);
 
+    // shift out
     wire       shift_en;  
     wire       shift_bit;
     reg  [7:0] shift_reg;
@@ -118,12 +119,17 @@ module core(
     assign shift_bit = (shift_dir == 0) ? shift_reg[0] : shift_reg[7];
     assign shift_en  = issue && is_shift && !shift_select;
 
+    // shift in
     wire       shift_in_en;
     wire       in_bit;
     reg  [7:0] in_shift_reg;
 
     assign in_bit      = gpio_in[input_pin];
     assign shift_in_en = issue && is_shift && shift_select;
+
+    // skip
+    wire   skip_taken;
+    assign skip_taken = is_skip && (in_shift_reg[skip_bit] == level);
 
     always @(posedge clk) begin
         if (reset) begin            
@@ -150,6 +156,9 @@ module core(
             if (pc_en) begin
                 if (is_jmp) begin
                     pc <= {1'b0, operand};
+                end
+                else if (is_skip) begin
+                    pc <= pc + (skip_taken ? 9'd2 : 9'd1);
                 end
                 else if (is_nop_set || is_config || is_shift || is_wait) begin
                     pc <= pc + 9'd1;
