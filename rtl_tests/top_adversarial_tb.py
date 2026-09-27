@@ -1059,3 +1059,51 @@ async def the_fifos_wrap_around_under_pull_and_push(dut):
         wraps[1] += w
     assert len(pushed) == len(set(pushed)) == 12 and ls.popped == pushed, (pushed, ls.popped)
     assert wraps == [3, 3], wraps
+
+
+@cocotb.test()
+async def the_fifos_at_their_boundaries_under_a_rude_host(dut):
+    """fifo.v's rules at top's ports, under a host that never reads STATUS.
+    TX full: a push while the core holds a NOP is dropped and the queue is
+    untouched; a push on the very edge a PULL takes the head lands in the
+    slot it frees, the FIFO full before and after, and the bytes still come
+    out in order. RX: a pop while it is empty is nothing; a pop on the very
+    edge the first PUSH lands takes nothing and the byte stays; a pop on the
+    edge the second lands takes the first and leaves the second; with three
+    in, a pop on the edge the fifth lands leaves three, in order. The model
+    follows the same rules, so every edge still matches."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    program = assemble("NOP [2]\nPULL\nPULL\nPULL\nPULL\nPULL")
+    await begin(dut, imem, program, tx=BYTES[:4])
+    ls = Lockstep(dut, CPU(program, tx_data=BYTES[:4], rx_depth=DEPTH))
+    await ls.edge()  # the NOP issues
+    ls.push(0x11)  # full, no PULL on this edge: dropped
+    state = await ls.edge()
+    assert state["tx"] == list(BYTES[:4]) and ls.dropped == 1 and int(dut.tx_full.value) == 1
+    await ls.edge()  # the NOP's last hold edge
+    assert int(dut.core_i.pull_en.value) == 1  # the coming edge is the first PULL's
+    ls.push(0x22)  # on that edge: into the slot the head frees
+    state = await ls.edge()
+    assert state["tx"] == list(BYTES[1:4]) + [0x22] and state["shift_reg"] == BYTES[0] and ls.dropped == 1
+    assert int(dut.tx_full.value) == 1
+    taken = [state["shift_reg"]]
+    while not ls.cpu.halted:
+        taken.append((await ls.edge())["shift_reg"])
+    assert taken == list(BYTES[:4]) + [0x22] and ls.pulls == 5, taken
+
+    program = assemble("SHIFT_IN 0\nPUSH\n" * 5)
+    await begin(dut, imem, program, gpio_in=1)
+    ls = Lockstep(dut, CPU(program, rx_depth=DEPTH))
+    b = (0x80, 0x40, 0xA0, 0xD0, 0x68)  # in_shift_reg after samples 1, 0, 1, 1, 0
+    after = ([b[0]], [b[1]], [b[1], b[2]], [b[1], b[2], b[3]], [b[2], b[3], b[4]])
+    for k, level in enumerate((1, 0, 1, 1, 0)):
+        ls.pins(level)
+        if k == 0:
+            ls.pop()  # empty: nothing
+        await ls.edge()  # the SHIFT_IN
+        if k in (0, 1, 4):
+            ls.pop()  # on the PUSH's edge, with none, one and three in
+        state = await ls.edge()
+        assert state["rx"] == after[k], (k, state["rx"])
+    assert ls.cpu.halted and ls.idle_pops == 2 and ls.popped == [b[0], b[1]] and ls.pushes == 5
