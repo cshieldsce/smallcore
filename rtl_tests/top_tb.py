@@ -369,3 +369,146 @@ async def spi_tx_msb_host_byte_to_pins(dut):
     assert int(dut.gpio_oe.value) & 0b111 == 0b111
     assert int(dut.tx_fifo.empty.value) == 1
     assert int(dut.tx_full.value) == 0
+
+
+# Full duplex: the bench also answers on MISO. The slave is a background task
+# that sees CS and SCLK on gpio_out and drives gpio_in[MISO], nothing else.
+
+MISO = 3  # gpio_in pin spi_duplex_lsb.asm and spi_duplex_msb.asm sample
+
+
+def bits_lsb(byte):
+    """The bits of `byte`, bit 0 first: the wire order of an LSB-first
+    transfer. Reversed, the order of an MSB-first one."""
+    return [(byte >> bit) & 1 for bit in range(8)]
+
+
+async def mode0_slave(dut, bits):
+    """Drive gpio_in[MISO] like a mode 0 slave sending `bits` in order. A bit
+    goes on the pin on a falling edge of clk while CS is low and SCLK is low,
+    so it is stable before the rising edge of SCLK on which the master
+    samples; seeing that edge, the slave moves on to the next bit. After the
+    last bit the pin holds. Nothing inside the core is read."""
+    i = 0
+    prev_sclk = None  # no seed: the first sample is only a level
+    while i < len(bits):
+        await FallingEdge(dut.clk)
+        pins = int(dut.gpio_out.value)
+        if (pins >> CS) & 1 == 0 and (pins >> SCLK) & 1 == 0:
+            dut.gpio_in.value = bits[i] << MISO
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        pins = int(dut.gpio_out.value)
+        sclk = (pins >> SCLK) & 1
+        if (pins >> CS) & 1 == 0 and prev_sclk == 0 and sclk == 1:
+            i += 1  # the master took this bit on that edge
+        prev_sclk = sclk
+
+
+@cocotb.test()
+async def spi_duplex_lsb_host_bytes_both_ways(dut):
+    """programs/spi_duplex_lsb.asm end to end, both directions in one frame.
+    The host pushes 0x96 into the TX FIFO; a mode 0 slave on gpio_in[3] sends
+    0x53 while the master clocks 0x96 out. One transfer runs the TX FIFO,
+    PULL, SHIFT_OUT, MOSI, SCLK, CS, MISO, SHIFT_IN, in_shift_reg, PUSH, the
+    RX FIFO and the host pop. 0x96 and 0x53 differ and neither is a
+    palindrome, so a crossed direction or a bit-order slip cannot pass."""
+    program = load_program(PROGRAMS / "spi_duplex_lsb.asm")
+    master_byte, slave_byte = 0x96, 0x53
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    cocotb.start_soon(mode0_slave(dut, bits_lsb(slave_byte)))  # 1 1 0 0 1 0 1 0
+    await ReadOnly()
+    assert (int(dut.gpio_out.value) >> CS) & 1 == 1  # CS idle high out of reset
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.rx_empty.value) == 1
+
+    # Host push with the core halted, then release it on the next falling edge.
+    await FallingEdge(dut.clk)
+    dut.tx_data.value = master_byte
+    dut.tx_push.value = 1
+    await FallingEdge(dut.clk)
+    dut.tx_push.value = 0
+    dut.program_words.value = len(program)
+
+    mosi, sclk, cs = await spi_pin_trace(dut)
+
+    # Master to slave: one frame, eight clocks, 0x96 LSB first on MOSI, as in
+    # the transmit-only test.
+    (start,), (end,) = falling_edges(cs), rising_edges(cs)
+    edges = rising_edges(sclk)
+    assert len(edges) == 8 and all(start < e < end for e in edges), f"rising edges of SCLK at {edges}"
+    assert mode0_sampled(mosi, sclk, cs) == [0, 1, 1, 0, 1, 0, 0, 1]
+    assert sclk[end:] == [0] * len(sclk[end:])
+    assert int(dut.tx_fifo.empty.value) == 1
+
+    # Slave to master: the PUSH on the edge that raised CS put 0x53 in the RX
+    # FIFO, rebuilt in normal order from the eight MISO samples.
+    assert int(dut.rx_empty.value) == 0
+    assert int(dut.rx_fifo.count.value) == 1
+    assert int(dut.rx_data.value) == slave_byte
+
+    # Host pop, driven on the falling edge.
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 1
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 0
+    await ReadOnly()
+    assert int(dut.rx_empty.value) == 1
+    assert int(dut.rx_fifo.count.value) == 0
+
+
+@cocotb.test()
+async def spi_duplex_msb_host_bytes_both_ways(dut):
+    """programs/spi_duplex_msb.asm end to end: the LSB duplex test with the
+    other program and a slave that sends MSB first. The same two bytes must
+    cross with both wire orders reversed, and the host must still read 0x53:
+    SHIFT_IN under CONFIG shift_dir 1 fills in_shift_reg from the other end,
+    so eight MSB-first samples land in normal order."""
+    program = load_program(PROGRAMS / "spi_duplex_msb.asm")
+    master_byte, slave_byte = 0x96, 0x53
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    cocotb.start_soon(mode0_slave(dut, bits_lsb(slave_byte)[::-1]))  # 0 1 0 1 0 0 1 1
+    await ReadOnly()
+    assert (int(dut.gpio_out.value) >> CS) & 1 == 1  # CS idle high out of reset
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.rx_empty.value) == 1
+
+    # Host push with the core halted, then release it on the next falling edge.
+    await FallingEdge(dut.clk)
+    dut.tx_data.value = master_byte
+    dut.tx_push.value = 1
+    await FallingEdge(dut.clk)
+    dut.tx_push.value = 0
+    dut.program_words.value = len(program)
+
+    mosi, sclk, cs = await spi_pin_trace(dut)
+
+    # Master to slave: 0x96 MSB first on MOSI.
+    (start,), (end,) = falling_edges(cs), rising_edges(cs)
+    edges = rising_edges(sclk)
+    assert len(edges) == 8 and all(start < e < end for e in edges), f"rising edges of SCLK at {edges}"
+    assert mode0_sampled(mosi, sclk, cs) == [1, 0, 0, 1, 0, 1, 1, 0]
+    assert sclk[end:] == [0] * len(sclk[end:])
+    assert int(dut.tx_fifo.empty.value) == 1
+
+    # Slave to master: 0x53 arrives whole whichever end went first.
+    assert int(dut.rx_empty.value) == 0
+    assert int(dut.rx_fifo.count.value) == 1
+    assert int(dut.rx_data.value) == slave_byte
+
+    # Host pop, driven on the falling edge.
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 1
+    await FallingEdge(dut.clk)
+    dut.rx_pop.value = 0
+    await ReadOnly()
+    assert int(dut.rx_empty.value) == 1
+    assert int(dut.rx_fifo.count.value) == 0
