@@ -1,14 +1,17 @@
 // Host register block: the developer's side of the chip. Four registers on
 // a 2-bit address, a write strobe and a read strobe, both taken as rising
 // edges so a host on GPIO that holds a line for a few clocks makes exactly
-// one transaction. Timing rules: a strobe is held >= 3 clocks high and >= 3
+// one transaction. Timing rules: a strobe is held >= 4 clocks high and >= 3
 // low between strobes, and low for >= 3 clocks after reset before the first
-// one; wdata and addr are set before it rises and held until it falls. rdata
-// is combinational on addr.
+// one; wdata and addr are set before it rises and held until it falls. The
+// transaction decodes addr and wdata straight from the pins on the second
+// clock after the strobe is first captured, so a strobe that rose just after
+// an edge and lasted 3 clocks would fall on that very clock: 4 leaves one.
+// rdata is combinational on addr.
 //
 //   addr  write (we rises)                      read (rdata)
 //   0     TX_DATA: push wdata, dropped if full    0
-//   1     RX_DATA: -                              RX head; re rising pops it
+//   1     RX_DATA: -                              RX head, 0 while empty; re rising pops it
 //   2     STATUS:  -                              {5'b0, halted, tx_full, rx_empty}
 //   3     CONTROL: sel <= wdata[3:0], restart     {4'b0, sel}
 module host (
@@ -50,7 +53,7 @@ module host (
     always @* begin
         case (addr)
             TX_DATA: rdata = 8'h00;
-            RX_DATA: rdata = rx_data;
+            RX_DATA: rdata = rx_empty ? 8'h00 : rx_data;  // never the FIFO's memory: 0 while empty
             STATUS:  rdata = {5'b0, halted, tx_full, rx_empty};
             CONTROL: rdata = {4'b0, sel};
         endcase
