@@ -18,7 +18,7 @@ lint:  # Verilator static checks, no simulation; -Wno-fatal prints warnings with
 clean:
 	rm -rf build
 
-tapeout-sync:  # stage rtl/core.v into tapeout/janestreet/src/ for the Tiny Tapeout CMOS5L build, see tapeout/janestreet/README.md
+tapeout-sync:  # stage rtl/{top,core,fifo}.v into tapeout/janestreet/src/ for the Tiny Tapeout CMOS5L build, see tapeout/janestreet/README.md
 	$(MAKE) -C tapeout/janestreet sync
 
 tapeout-check:  # fail if the staged copy has drifted from rtl/

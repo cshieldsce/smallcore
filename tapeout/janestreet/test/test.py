@@ -18,7 +18,7 @@ async def test_wrapper(dut):
 
     # provisional mapping: imem_word = {uio_in, ui_in} = NOP [0], program_words = {ui_in[1], uio_in} = 0
     assert dut.uio_oe.value == 0x0F
-    assert dut.uio_out.value == 0x0F  # gpio_out resets to 1111
+    assert int(dut.uio_out.value) & 0x0F == 0x0F  # gpio_out resets to 1111; [7:4] fold in FIFO storage, not reset
     assert dut.uo_out.value == 0      # pc = 0
 
     dut.rst_n.value = 1

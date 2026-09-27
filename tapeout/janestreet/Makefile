@@ -1,5 +1,5 @@
 # Tiny Tapeout IHP CMOS5L packaging for the Jane Street protocol emulator competition.
-# The RTL lives in ../../rtl; `make sync` stages it into src/. Nothing in src/core.v is edited by hand.
+# The RTL lives in ../../rtl; `make sync` stages it into src/. Nothing in src/core.v, top.v, fifo.v is edited by hand.
 #
 # One-time setup (WSL/Linux): make setup            clones tt-support-tools into tt/ and installs the PDK into $(PDK_ROOT)
 #                              python venv with     pip install -r tt/requirements.txt librelane==$(LIBRELANE_VERSION)
@@ -12,6 +12,7 @@ LIBRELANE_VERSION ?= 3.1.0.dev3
 TT_TOOLS_REF      ?= ihp-sg13cmos5l
 TT                 = $(PYTHON) tt/tt_tool.py --ihp
 RTL                = ../../rtl
+RTL_FILES          = top.v core.v fifo.v
 
 export PDK_ROOT
 # tt_tool.py shells out to yowasp-yosys by name, so the venv's bin/ has to be on PATH, not just its python
@@ -23,13 +24,13 @@ endif
 export CONTAINERS_CONF_OVERRIDE = $(CURDIR)/scripts/containers.conf
 export PDK = ihp-sg13cmos5l
 
-.PHONY: sync check synth synth-top config harden stats test setup clean
+.PHONY: sync check synth synth-top synth-breakdown config harden stats test setup clean
 
 sync:  # stage the canonical RTL into src/ for the physical build
-	cp $(RTL)/core.v src/core.v
+	cp $(addprefix $(RTL)/,$(RTL_FILES)) src/
 
 check:  # fail if src/ has drifted from rtl/
-	diff -q $(RTL)/core.v src/core.v
+	for f in $(RTL_FILES); do diff -q $(RTL)/$$f src/$$f || exit 1; done
 
 synth: sync  # quick yosys mapping of the core alone against the typ lib: cells and cell area, seconds not minutes
 	mkdir -p build/synth
@@ -40,6 +41,17 @@ synth-top: sync  # same for the TT wrapper + core, what LibreLane's synthesis st
 	mkdir -p build/synth
 	TOP=tt_um_cshieldsce_smallcore $(YOSYS) -q -c scripts/synth_core.tcl
 	grep -E " cells$$|Chip area" build/synth/tt_um_cshieldsce_smallcore_stat.txt
+
+synth-breakdown: sync  # cells, area and flops for core, top and wrapper, one row of docs/physical-results.md's breakdown table
+	mkdir -p build/synth
+	@for t in core top tt_um_cshieldsce_smallcore; do \
+	  TOP=$$t $(YOSYS) -q -c scripts/synth_core.tcl || exit 1; \
+	  f=build/synth/$${t}_stat.txt; \
+	  printf '%-28s cells %6s  area %10s um2  flops %4s\n' $$t \
+	    "$$(awk '/ cells$$/ {print $$1; exit}' $$f)" \
+	    "$$(awk '/Chip area/ {printf "%.0f", $$NF}' $$f)" \
+	    "$$(awk '/dfrbp/ {n += $$1} END {print n+0}' $$f)"; \
+	done
 
 config: sync  # src/user_config.json + src/config_merged.json from info.yaml (6x4 die area, def template)
 	$(TT) --create-user-config
@@ -55,7 +67,7 @@ stats:  # after harden: LibreLane's routing summary, cell categories, yosys warn
 	$(TT) --print-warnings
 
 test: sync  # cocotb smoke test of the wrapper, test/. The template defaults to icarus; Verilator is what rtl_tests/ uses
-	$(MAKE) -C test SIM=verilator EXTRA_ARGS="--timing -Wno-fatal"
+	cd test && $(MAKE) SIM=verilator EXTRA_ARGS="--timing -Wno-fatal"
 
 setup:
 	test -d tt || git clone -b $(TT_TOOLS_REF) https://github.com/TinyTapeout/tt-support-tools tt

@@ -16,7 +16,9 @@ project:
   # Source files live in ./src. core.v is staged from ../../rtl/core.v by `make sync`; do not edit it here.
   source_files:
     - "tt_um_cshieldsce_smallcore.v"
+    - "top.v"
     - "core.v"
+    - "fifo.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # PROVISIONAL: this mapping only lets the flow elaborate the current core. It is not the final pinout.

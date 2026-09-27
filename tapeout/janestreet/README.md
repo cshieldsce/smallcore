@@ -2,12 +2,12 @@
 
 Packaging for the Jane Street protocol emulator competition: Tiny Tapeout's IHP 130 nm CMOS5L flow, 6x4 tiles. Laid out like the official [ttihp-verilog-template](https://github.com/TinyTapeout/ttihp-verilog-template/tree/cmos5l) (`cmos5l` branch) so the same tools and GitHub action apply.
 
-This directory is packaging, not a source tree. The RTL is `rtl/core.v` at the repository root; `make sync` copies it into `src/`, `make check` fails if the two have drifted. The staged copy is committed because the Tiny Tapeout action builds from the repository, so run `make sync` before committing an RTL change (or `make tapeout-sync` from the root).
+This directory is packaging, not a source tree. The RTL is `rtl/top.v`, `rtl/core.v` and `rtl/fifo.v` at the repository root; `make sync` copies them into `src/`, `make check` fails if the two have drifted. The staged copy is committed because the Tiny Tapeout action builds from the repository, so run `make sync` before committing an RTL change (or `make tapeout-sync` from the root).
 
 ```
 info.yaml                       project metadata, tiles: "6x4", top module, source list, provisional pinout
-src/tt_um_cshieldsce_smallcore.v  TT wrapper: pins, active-low reset, core instance. Provisional, elaboration only
-src/core.v                      staged from ../../rtl/core.v, do not edit here
+src/tt_um_cshieldsce_smallcore.v  TT wrapper: pins, active-low reset, top instance. Provisional, elaboration only
+src/{top,core,fifo}.v           staged from ../../rtl/, do not edit here
 src/config.json                 LibreLane config from the template, unchanged
 test/                           cocotb smoke test of the wrapper (template layout)
 docs/info.md                    datasheet source
@@ -30,10 +30,11 @@ docker pull ghcr.io/librelane/librelane:3.1.0.dev3    # LibreLane runs OpenROAD 
 ## Commands
 
 ```
-make sync         # rtl/core.v -> src/core.v
+make sync         # rtl/{top,core,fifo}.v -> src/
 make check        # diff, fails on drift
 make synth        # yosys: cells and cell area of core alone, build/synth/core_stat.txt
-make synth-top    # same for wrapper + core
+make synth-top    # same for wrapper + top
+make synth-breakdown  # core, top, wrapper: cells, area, flops for the breakdown table in docs/physical-results.md
 make harden       # LibreLane, runs/wokwi/, what the GitHub action does
 make stats        # after harden: utilization, cell categories, yosys warnings
 make test         # cocotb smoke test under icarus
