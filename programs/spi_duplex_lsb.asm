@@ -3,7 +3,11 @@
 # spi_tx_lsb.asm with SHIFT_IN 3, 1, 1 raising SCLK and sampling MISO on the same
 # edge instead of SET 1, 1, and PUSH 2, 1 moving the byte to the RX FIFO on
 # the edge that raises CS. Receiving costs no instructions and no cycles.
+# Pin 3 is released first: on a bidirectional pad it is the MISO wire, and
+# every pin is push-pull high out of reset.
 
+        CONFIG open_drain23, 2  # MISO is a pad we listen on: pin 3 open-drain, and
+                                # gpio[3] is 1 out of reset, so the pad lets go
         CONFIG shift_dir, 0 # LSB first, for both shift registers
         SET 1, 0            # SCLK idle low
         PULL 2, 0 [3]       # shift_reg = the byte (stalls while the FIFO is empty),

@@ -4,8 +4,10 @@
 # eight SHIFT_INs sample the data bits mid-bit, 12 + 8 i cycles after the
 # edge. PUSH hands the byte over during the stop bit, JMP is back at the WAIT
 # 80 cycles after the edge, in time for a frame that follows back to back.
-# Any idle between frames is spent in the WAIT. Never halts.
+# Any idle between frames is spent in the WAIT. Never halts. Pin 0 is released
+# first: on a bidirectional pad it is the line the transmitter drives.
 
+        CONFIG open_drain01, 1  # RX is a pad we listen on: pin 0 open-drain, released
 loop:
         WAIT 0, 0 [11]  # start bit: hold until RX falls, then skip it and half of d0
         SHIFT_IN 0 [7]  # d0, 12 cycles after the start bit

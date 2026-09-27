@@ -21,6 +21,7 @@ TRANSMITTER = PROGRAMS / "uart_tx_loop.asm"
 BYTES = (0x00, 0x01, 0x55, 0x80, 0xA3, 0xFF)
 STREAM = (0xA3, 0x5C, 0x3C, 0x96, 0x0F, 0xF0, 0x81, 0x7E)
 SAMPLE_AT = 12  # cycles after the start bit falls that d0 is sampled: mid-bit
+LISTENS_FROM = 1  # the first cycle the WAIT is up: word 0 lets go of the RX pad
 
 
 def frame(byte):
@@ -97,8 +98,24 @@ def waiting(cpu):
     return cpu.stalled and decode(cpu.program[cpu.pc], cpu.isa).op == "WAIT"
 
 
+def test_receiver_lets_go_of_the_rx_pin_before_it_waits():
+    """On a bidirectional pad the receiver's pin 0 is the line the far
+    transmitter drives. The program releases it, open-drain with a 1
+    written, before the first WAIT, and never drives it after."""
+    cpu = CPU(load_program(RECEIVER), gpio_in=1)
+    cpu.step()  # the first word
+    assert cpu.gpio_oe[RX] == 0 and cpu.gpio[RX] == 1
+    assert cpu.pc == 1 and decode(cpu.program[1], cpu.isa).op == "WAIT"
+    for _ in range(200):
+        cpu.step()
+        assert cpu.gpio_oe[RX] == 0
+
+
 @pytest.mark.parametrize("byte", BYTES, ids=lambda b: f"{b:#04x}")
 def test_receiver_decodes_a_frame_from_any_start_cycle(byte, wave):
+    """A start bit on cycle 0 is already low when the WAIT comes up on cycle
+    1, a level not an edge, so that one frame is sampled a cycle late: still
+    mid-bit, still the right byte."""
     for start in range(0, 48):
         levels, starts = line([(start, byte)])
         r = run(RECEIVER, levels, start + 100)
@@ -106,7 +123,8 @@ def test_receiver_decodes_a_frame_from_any_start_cycle(byte, wave):
             wave.add("rx", r.rx, group="in")
             wave.add("sample", labels(r.samples, len(r.rx)))
         assert r.received == [byte], f"start bit at cycle {start}"
-        assert r.samples == sample_cycles(starts), "mid-bit, one per data bit, from the edge"
+        seen = [max(s, LISTENS_FROM) for s in starts]
+        assert r.samples == sample_cycles(seen), "mid-bit, one per data bit, from the edge"
         assert waiting(r.cpu), "back in the WAIT with the line idle"
 
 
@@ -128,19 +146,21 @@ def test_receiver_takes_a_stream_with_any_idle_between_frames(wave):
 def test_wait_is_what_makes_the_receiver_asynchronous():
     """The same program with `NOP [11]` in place of `WAIT 0, 0 [11]` samples at
     fixed cycles and decodes only a frame that falls within one bit of where it
-    assumes, 3 cycles early to 4 late. With the WAIT any start cycle decodes,
-    and so does a start bit still low at reset."""
+    assumes, 3 cycles early to 4 late around cycle 1, where the NOP issues
+    after the word that lets go of the pad. With the WAIT any start cycle
+    decodes, and so does a start bit still low at reset, up to 2 cycles in:
+    at 3 the sample lands in d1."""
     isa = load_isa()
     words = load_program(RECEIVER, isa)
-    assert decode(words[0], isa) == Instruction("WAIT", (0, 0), 11)
-    fixed = [encode(Instruction("NOP", (), 11), isa)] + words[1:]
+    assert decode(words[1], isa) == Instruction("WAIT", (0, 0), 11)
+    fixed = words[:1] + [encode(Instruction("NOP", (), 11), isa)] + words[2:]
 
     def good(program):
         return {start for start in range(-12, 20)
                 if all(run(program, shifted(line([(0, byte)])[0], start), 100).received == [byte] for byte in BYTES)}
 
-    assert good(fixed) == set(range(-3, 5))
-    assert good(words) == set(range(-3, 20))
+    assert good(fixed) == set(range(LISTENS_FROM - 3, LISTENS_FROM + 5))
+    assert good(words) == set(range(LISTENS_FROM - 3, 20))
 
 
 def test_a_frame_under_way_at_reset_is_lost_and_the_next_one_is_not():

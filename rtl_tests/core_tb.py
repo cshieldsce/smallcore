@@ -610,7 +610,8 @@ async def uart_rx_0xa5_matches_model(dut):
     8 clocks per bit. The WAIT stalls while the line idles high, issues on the
     start edge, the eight SHIFT_INs sample mid-bit, PUSH hands 0xA5 out once
     during the stop bit, and the JMP is back at the WAIT 80 clocks after the
-    edge, one frame. The program never halts, so the bench stops it there."""
+    edge, one frame. The program never halts, so the bench stops it there.
+    Word 0 lets go of the RX pad first, so the loop is at pc 1."""
     program = load_program(PROGRAMS / "uart_rx.asm")
     cpu = CPU(program, gpio_in=1)
     dut.imem_word.value = 0
@@ -640,11 +641,13 @@ async def uart_rx_0xa5_matches_model(dut):
         assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
         return rtl
 
-    # Idle high: the WAIT stalls.
+    # Word 0 lets go of the RX pad, then, idle high, the WAIT at 1 stalls.
+    rtl = await cycle(1)
+    assert rtl["pc"] == 1 and rtl["gpio_oe"][0] == 0
     for _ in range(2):
         rtl = await cycle(1)
         assert cpu.stalled
-        assert (rtl["pc"], rtl["counter"]) == (0, 0)
+        assert (rtl["pc"], rtl["counter"]) == (1, 0)
 
     byte = 0xA5
     frame = [0] + [(byte >> bit) & 1 for bit in range(8)] + [1]  # start, d0..d7 LSB first, stop
@@ -662,4 +665,4 @@ async def uart_rx_0xa5_matches_model(dut):
     # Idle again: the WAIT stalls for the next start bit.
     rtl = await cycle(1)
     assert cpu.stalled
-    assert (rtl["pc"], rtl["counter"]) == (0, 0)
+    assert (rtl["pc"], rtl["counter"]) == (1, 0)

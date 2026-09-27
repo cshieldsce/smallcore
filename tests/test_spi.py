@@ -189,17 +189,20 @@ def test_programs_differ_only_in_the_config_shift_dir_value(pair):
 
 def test_program_is_two_instructions_per_bit(program):
     words = load_program(program)
-    assert len(words) == 3 + 8 * 2 + 2  # config, clock low, pull + CS low; 8 x (shift + clock low, clock high); teardown
+    setup = 4 if program in DUPLEX else 3  # (release MISO,) config, clock low, pull + CS low
+    assert len(words) == setup + 8 * 2 + 2  # setup; 8 x (shift + clock low, clock high); teardown
 
 
 @pytest.mark.parametrize("tx, duplex", tuple(zip(TX, DUPLEX)), ids=("lsb", "msb"))
 def test_duplex_program_is_the_tx_program_with_shift_in_raising_the_clock(tx, duplex):
-    """Receiving costs no instructions: the eight `SET 1, 1 [3]` become
-    `SHIFT_IN 3, 1, 1 [3]`, sampling MISO on the edge that already existed,
-    and the closing `SET 2, 1` becomes `PUSH 2, 1`, handing the byte to the
-    RX FIFO on the edge that raises CS."""
+    """Receiving costs no instructions beyond letting go of the MISO pad: the
+    eight `SET 1, 1 [3]` become `SHIFT_IN 3, 1, 1 [3]`, sampling MISO on the
+    edge that already existed, and the closing `SET 2, 1` becomes `PUSH 2, 1`,
+    handing the byte to the RX FIFO on the edge that raises CS."""
     isa = load_isa()
     tx, duplex = load_program(tx), load_program(duplex)
+    assert decode(duplex[0], isa) == Instruction("CONFIG", (2, 2), 0)  # open_drain23, 2: pin 3 let go
+    duplex = duplex[1:]
     assert len(tx) == len(duplex)
     changed = [(decode(a, isa), decode(b, isa)) for a, b in zip(tx, duplex) if a != b]
     assert len(changed) == 9
@@ -287,11 +290,13 @@ def test_miso_is_sampled_exactly_on_the_rising_edge_cycle(duplex, rx):
 
 
 def test_duplex_timing_is_the_tx_timing(duplex):
-    """SHIFT_IN raising the clock costs no cycles: the pin traces of a duplex
-    program are those of its transmit-only twin, cycle for cycle."""
+    """SHIFT_IN raising the clock costs no cycles: after the one word that
+    lets go of MISO, the pin traces of a duplex program are those of its
+    transmit-only twin, cycle for cycle."""
     twin = TX[DUPLEX.index(duplex)]
     for byte in BYTES:
-        assert run(duplex, [byte], mode0_slave(0x96, is_msb(duplex)))[:3] == run(twin, [byte])[:3]
+        ours = run(duplex, [byte], mode0_slave(0x96, is_msb(duplex)))[:3]
+        assert [trace[1:] for trace in ours] == list(run(twin, [byte])[:3])
 
 
 def test_only_shift_in_fills_the_input_register_and_only_push_the_rx_fifo(program):
@@ -314,3 +319,21 @@ def test_byte_is_pushed_on_the_edge_cs_rises(duplex):
     (rise,) = rising_edges(cpu.pin_trace(CS))
     assert all(fifo == [] for _, fifo in seen[:rise])
     assert seen[rise] == (1, [0x5C]) and seen[-1] == (1, [0x5C])
+
+
+def test_duplex_program_lets_go_of_miso_before_cs_falls(duplex):
+    """On a bidirectional pad gpio 3 and gpio_in 3 are one wire, MISO. The pad
+    is push-pull high out of reset, so the program must release it (open-drain
+    with a 1 written) before the slave starts driving, which is when CS falls.
+    The transmit-only twin never listens and keeps driving pin 3."""
+    cpu = CPU(load_program(duplex), tx_data=[0x96])
+    while cpu.gpio[CS] == 1 and not cpu.halted:
+        cpu.step()
+    assert cpu.gpio[CS] == 0, "CS never fell"
+    assert cpu.gpio_oe[MISO] == 0 and cpu.gpio[MISO] == 1, "pin 3 released as CS falls"
+    while not cpu.halted:
+        assert cpu.gpio_oe[MISO] == 0
+        cpu.step()
+    twin = CPU(load_program(TX[DUPLEX.index(duplex)]), tx_data=[0x96])
+    twin.run()
+    assert twin.gpio_oe[MISO] == 1

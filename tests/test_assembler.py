@@ -264,8 +264,9 @@ def test_loop_uart_program_jumps_back_to_its_pull():
 def test_rx_uart_program_waits_for_the_start_bit_then_samples_each_bit_once():
     words = load_program(PROGRAMS / "uart_rx.asm")
     isa = load_isa()
-    assert len(words) == 1 + 8 + 1 + 1  # WAIT through the start bit, 8 samples, PUSH, JMP
-    assert decode(words[0], isa) == Instruction("WAIT", (0, 0), 11)
-    assert all(decode(w, isa) == Instruction("SHIFT_IN", (0,), 7) for w in words[1:9])
-    assert decode(words[9], isa) == Instruction("PUSH", (), 2)
-    assert decode(words[-1], isa) == Instruction("JMP", (0,), 0)
+    assert len(words) == 1 + 1 + 8 + 1 + 1  # release the pad, WAIT through the start bit, 8 samples, PUSH, JMP
+    assert decode(words[0], isa) == Instruction("CONFIG", (1, 1), 0)  # open_drain01, 1: pin 0 let go
+    assert decode(words[1], isa) == Instruction("WAIT", (0, 0), 11)
+    assert all(decode(w, isa) == Instruction("SHIFT_IN", (0,), 7) for w in words[2:10])
+    assert decode(words[10], isa) == Instruction("PUSH", (), 2)
+    assert decode(words[-1], isa) == Instruction("JMP", (1,), 0)  # back to the WAIT, not the CONFIG
