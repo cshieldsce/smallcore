@@ -1,5 +1,5 @@
 # Smoke test of the wrapper: pins reach smallcore. Reset, STATUS says halted;
-# a CONTROL write held 3 clocks selects spi_duplex_msb and STATUS says running.
+# a CONTROL write held 4 clocks selects spi_duplex_msb and STATUS says running.
 # The cycle-accurate tests live in rtl_tests/ against sim/cpu.py.
 import cocotb
 from cocotb.clock import Clock
@@ -34,7 +34,7 @@ async def test_wrapper(dut):
 
     dut.ui_in.value = SPI_DUPLEX_MSB
     dut.uio_in.value = uio(CONTROL, we=1)
-    await ClockCycles(dut.clk, 3)
+    await ClockCycles(dut.clk, 4)
     dut.uio_in.value = uio(STATUS)
     await ClockCycles(dut.clk, 6)
     assert int(dut.uo_out.value) == RX_EMPTY, "running, stalled on PULL"

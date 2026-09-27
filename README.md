@@ -49,11 +49,11 @@ build/        generated: test waveforms, caches (safe to delete)
 | addr | write (`host_we` rises) | read (`host_rdata`) |
 |---|---|---|
 | 0 TX_DATA | push `host_wdata` into the TX FIFO; dropped if full, check STATUS first | 0 |
-| 1 RX_DATA | – | RX FIFO head; `host_re` rising here pops it, nothing if empty |
+| 1 RX_DATA | – | RX FIFO head, 0 while empty; `host_re` rising here pops it, nothing if empty |
 | 2 STATUS | – | `{5'b0, halted, tx_full, rx_empty}` |
 | 3 CONTROL | `sel <= host_wdata[3:0]`, the core restarts at pc 0 in that slot; both FIFOs keep their bytes | `{4'b0, sel}` |
 
-Rules: a strobe is held at least 3 clocks high and 3 low between strobes, and low for 3 clocks after reset before the first one; `host_wdata` and `host_addr` are set before it rises and held until it falls. Exactly one push, pop or select happens per rising edge, so a host on GPIO pins, an MCU or a button, works. Hard reset clears the core, both FIFOs and `sel`, and slot 0 is no program: a fresh chip sits halted with every pad driven high until the host selects. A CONTROL write while a program runs is an abort and restart, a defined thing: the core resets, its pads return to their reset levels, the FIFOs are untouched, so a byte queued behind the one in flight goes out on the next run. `halted` says execution finished, not that the protocol succeeded; the RX FIFO says what happened (an I²C program halts after a NACK too, with the ACK bit pushed for the host to read).
+Rules: a strobe is held at least 4 clocks high and 3 low between strobes, and low for 3 clocks after reset before the first one; `host_wdata` and `host_addr` are set before it rises and held until it falls (the transaction decodes them from the pins two clocks after the strobe is first captured, so 4 high leaves a clock of margin whatever the strobe's phase). `RX_DATA` reads 0 while the RX FIFO is empty. Exactly one push, pop or select happens per rising edge, so a host on GPIO pins, an MCU or a button, works. Hard reset clears the core, both FIFOs and `sel`, and slot 0 is no program: a fresh chip sits halted with every pad driven high until the host selects. A CONTROL write while a program runs is an abort and restart, a defined thing: the core resets, its pads return to their reset levels, the FIFOs are untouched, even on the clock a PULL or PUSH was about to act, so a byte queued behind the one in flight goes out on the next run. `halted` says execution finished, not that the protocol succeeded; the RX FIFO says what happened (an I²C program halts after a NACK too, with the ACK bit pushed for the host to read).
 
 | slot | program | slot | program | slot | program |
 |---|---|---|---|---|---|

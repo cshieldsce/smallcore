@@ -6,12 +6,12 @@ Tiny Tapeout datasheet source. The architecture, simulator, assembler and tests 
 
 SmallCore is a PIO-style programmable protocol peripheral. A program of 16-bit words runs one word per cycle plus a per-word delay; each word can shift a bit out or in, move a byte between a shift register and a FIFO, wait on an input level, skip on a bit of the received byte, jump, or set configuration, and every word can drive one GPIO pin as a side effect on the same edge. Eleven programs, UART TX and RX, SPI mode 0 in both bit orders with and without receive, and I²C master writes, are in an on-chip ROM; the host picks one by number.
 
-The host talks to four registers over `ui` (write data), `uo` (read data) and `uio[7:4]` (address on 5:4, write strobe on 6, read strobe on 7). A strobe is taken as a rising edge, held at least 3 clocks high and 3 low, and low for 3 clocks after reset before the first one.
+The host talks to four registers over `ui` (write data), `uo` (read data) and `uio[7:4]` (address on 5:4, write strobe on 6, read strobe on 7). A strobe is taken as a rising edge, held at least 4 clocks high and 3 low, and low for 3 clocks after reset before the first one; address and write data are set before it rises and held until it falls.
 
 | addr | write | read |
 |---|---|---|
 | 0 TX_DATA | push the byte into the TX FIFO (dropped if full) | 0 |
-| 1 RX_DATA | – | RX FIFO head; the read strobe pops it |
+| 1 RX_DATA | – | RX FIFO head, 0 while empty; the read strobe pops it |
 | 2 STATUS | – | bit 2 halted, bit 1 tx_full, bit 0 rx_empty |
 | 3 CONTROL | select program slot (bits 3:0) and restart the core at pc 0; the FIFOs keep their bytes | the slot |
 
@@ -21,8 +21,8 @@ Slots: 0 none (halted), 1 uart_tx_0x55, 2 uart_tx_pull, 3 uart_tx_loop, 4 uart_r
 
 ## How to test
 
-1. Reset, then hold the strobes low for 3 clocks. `uo` with `uio[5:4] = 2` reads STATUS = 0b101: halted, RX empty.
-2. Write CONTROL = 8: `ui = 8`, `uio[5:4] = 3`, raise `uio[6]` for 3 clocks, drop it. STATUS now reads 0b001: running, stalled on PULL.
+1. Reset, then hold the strobes low for 3 clocks. Every strobe below is held 4 clocks. `uo` with `uio[5:4] = 2` reads STATUS = 0b101: halted, RX empty.
+2. Write CONTROL = 8: `ui = 8`, `uio[5:4] = 3`, raise `uio[6]` for 4 clocks, drop it. STATUS now reads 0b001: running, stalled on PULL.
 3. Write TX_DATA = 0x96: `ui = 0x96`, `uio[5:4] = 0`, pulse `uio[6]`. One SPI frame leaves on `uio[0..2]`, 8 clocks per bit, MSB first.
 4. Poll STATUS until bit 2 is set. RX_DATA (`uio[5:4] = 1`) reads the byte the slave sent on `uio[3]`; pulse `uio[7]` to pop it.
 
