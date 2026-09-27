@@ -12,7 +12,7 @@ Measured numbers from the Tiny Tapeout IHP CMOS5L flow in `tapeout/janestreet/`,
 | + SHIFT | – | | | | | | |
 | + WAIT/JMP/SKIP | – | | | | | | |
 | + FIFO interface | – | | | | | | |
-| + FIFO storage (top: core + TX/RX FIFOs, DEPTH 4) | 695 | pending | pending | pending | pending | pending | 2026-09-26 |
+| + FIFO storage (top: core + TX/RX FIFOs, DEPTH 4) | 695 | 991 | 16,571 µm² | 1.84% | +10.86 ns | +0.14 ns | 2026-09-26 |
 | + program memory/interface | | | | | | | |
 | final | | | | | | | |
 
@@ -22,9 +22,9 @@ Columns, all from `runs/wokwi/final/metrics.csv` unless noted:
 - Routed cells: `design__instance__count__stdcell` after routing; adds clock-tree, hold and timing-repair buffers. Excludes fill and tap cells.
 - Cell area: `design__instance__area__stdcell`, µm² of standard cells.
 - Util.: `design__instance__utilization`, cell area over the 6x4 core area of 902,417 µm² (die 1289.28 µm x 710.64 µm).
-- Setup and hold slack: `timing__setup__ws` and `timing__hold__ws` at the template's 20 ns clock, typ corner, post-route parasitics.
+- Setup and hold slack: `timing__setup__ws` and `timing__hold__ws` at the template's 20 ns clock, post-route parasitics. These are the worst over the three nom corners, which in practice means setup at slow (1.08 V, 125 °C) and hold at fast (1.32 V, −40 °C). The per-corner values are `timing__*__ws__corner:nom_*`; the notes give typ where it matters.
 
-Every row so far also had zero routing DRC errors, zero Magic DRC errors, zero antenna violations and zero LVS errors; a row that does not will say so.
+Every hardened row so far also had zero routing DRC errors, zero Magic DRC errors, zero antenna violations and zero LVS errors; a row that does not will say so.
 
 ## Synthesis breakdown
 
@@ -62,6 +62,9 @@ Commit `f795664`: `rtl/top.v` with the complete ISA core, a TX FIFO and an RX FI
 - Core flops, 39, match its registers exactly: pc 9, delay_counter 5, gpio_out 4, shift_dir 1, open_drain 4, shift_reg 8, in_shift_reg 8. RTL-0's core was 98 cells and 1,517 µm², so the ISA added about 212 cells and 2,860 µm².
 - The two FIFOs cost about 257 cells and 6,630 µm², 60% of `top`. They have 82 flops: 64 storage, 4 + 4 pointers, 3 + 3 count, and 4 more that appear to be duplicate read-pointer registers from Yosys's memory mapping (2-bit registers driving the read-mux selects). 49 µm² × 82 ≈ 4,020 µm² is flops, the rest is write enables and the read mux. FIFO depth is the biggest area lever so far.
 - Verilator lint in the flow: 0 warnings (RTL-0 had 11 `UNUSEDSIGNAL`).
+- Routed: 991 cells, 16,571 µm², 1.84% of the 6x4 core. Zero routing DRC, Magic DRC, antenna, LVS, setup or hold violations, and no slew or cap violations at any corner.
+- Routed minus synth is 296 cells. 186 of them are `dlygate4sd3_1` hold-fix delays, the same input-path artefact as RTL-0's 27, now much larger because more input pins fan into flops (the FIFO data and push/pop). The rest are buffers from resizing and the clock tree; the ~121 flops plus FIFO fan-out give CTS more to do. The hold fixes will change when the real pin mapping lands.
+- Timing per corner: setup +10.86 ns slow, +12.67 typ, +13.74 fast; hold +0.14 fast, +0.35 typ, +0.70 slow. At RTL-0 slow setup was +12.21, so the full ISA and FIFOs made the worst path about 1.35 ns longer, to about 9.1 ns at the slow corner. 50 MHz still has plenty of margin.
 - Budget: 695 synth cells is under 3% of the ~24K guidance for 6x4.
 - An earlier harden of the core alone, through the old wrapper, finished at 22:54 but was never recorded, and its `runs/wokwi/` was deleted by this run. It would not have been a valid FIFO-interface row anyway, for the pruning reason above.
 
