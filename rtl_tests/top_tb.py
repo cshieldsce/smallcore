@@ -388,9 +388,14 @@ async def mode0_slave(dut, bits):
     goes on the pin on a falling edge of clk while CS is low and SCLK is low,
     so it is stable before the rising edge of SCLK on which the master
     samples; seeing that edge, the slave moves on to the next bit. After the
-    last bit the pin holds. Nothing inside the core is read."""
+    last bit the pin holds. Nothing inside the core is read.
+
+    Until the transfer starts the pin idles at the opposite of bit 0, so a
+    master that samples before the slave has presented bit 0 gets the wrong
+    bit with either first bit, instead of matching an idle level by luck."""
     i = 0
     prev_sclk = None  # no seed: the first sample is only a level
+    dut.gpio_in.value = (1 - bits[0]) << MISO
     while i < len(bits):
         await FallingEdge(dut.clk)
         pins = int(dut.gpio_out.value)
