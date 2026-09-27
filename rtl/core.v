@@ -122,7 +122,6 @@ module core(
     wire       in_bit;
     reg  [7:0] in_shift_reg;
 
-    assign input_pin = own[3:2];
     assign in_bit      = gpio_in[input_pin];
     assign shift_in_en = issue && is_shift && shift_select;
 
@@ -148,7 +147,7 @@ module core(
             end
 
             // PC
-            if (pc_en && (is_nop_set || is_config || is_shift)) begin
+            if (pc_en && (is_nop_set || is_config || is_shift || is_wait)) begin
                 pc <= pc + 9'd1;
             end
 
