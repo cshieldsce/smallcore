@@ -158,8 +158,9 @@ class Lockstep:
         await ReadOnly()  # the inputs as the edge will find them, a pad model's included
         cpu.gpio_in = pins(int(dut.gpio_in.value))
         head, had_rx = int(dut.rx_data.value), bool(cpu.rx_fifo)
-        self.pulls += int(dut.tx_fifo.pop.value)
-        self.pushes += int(dut.rx_fifo.push.value)
+        if not self.reset_now:  # in reset the FIFOs ignore their ports
+            self.pulls += int(dut.tx_fifo.pop.value)
+            self.pushes += int(dut.rx_fifo.push.value)
         if self.reset_now:
             cpu = self.cpu = self.fresh(tx=(), rx=())
         elif self.restart_now:
@@ -911,3 +912,83 @@ async def an_open_drain_pin_releases_samples_and_drives(dut):
         assert [st["gpio"][1] for st in states] == [1, 0, 0, 1, 1, 1, 1, 1, a, a, 1], ack
         assert all(st["gpio_oe"][1] == (1 if st["gpio"][1] == 0 else 0) for st in states), ack
         assert all(st["gpio_oe"][0] == 1 for st in states), ack
+
+
+# --- Restart and reset ----------------------------------------------------------------
+
+RESET_CORE = {
+    "pc": 0, "counter": 0, "gpio": [1, 1, 1, 1], "halted": False, "shift_dir": 0, "open_drain": [0, 0, 0, 0],
+    "gpio_oe": [1, 1, 1, 1], "shift_reg": 0, "in_shift_reg": 0,
+}
+# Pushes twice, pulls four times: with three bytes preloaded it stalls on the fourth PULL.
+TAKES = "SHIFT_IN 0\nPUSH\nPULL 2, 0\nSHIFT_OUT\nPUSH [5]\nPULL\nPULL\nPULL\nSET 1, 0"
+
+
+async def until(ls, when, limit=100):
+    """Edges until `when(state)` holds after one; that state."""
+    for _ in range(limit):
+        state = await ls.edge()
+        if when(state):
+            return state
+    raise AssertionError(f"not reached in {limit} edges")
+
+
+@cocotb.test()
+async def a_restart_keeps_every_queued_byte_and_a_reset_drops_them(dut):
+    """The host restarts the program at five moments: stalled on its fourth
+    PULL, holding the PUSH's [5], on the very edge the PULL 2, 0 issues, on
+    the very edge the first PUSH issues, and once it has halted. On the edge
+    after each the core is at reset and both queues are exactly what they
+    were: the byte the PULL was taking is still at the head, the byte the
+    PUSH was pushing is not in. The run from the top then takes that head
+    into shift_reg on its third edge, and the model built afresh over the
+    same queues agrees edge for edge until the program halts under the
+    host's feeding. A reset at the same five moments empties both queues
+    and the run from the top stalls on an empty FIFO. A push on a restart's
+    edge lands; on a reset's edge it is dropped."""
+    imem = Imem(dut, [])
+    start_clock(dut)
+    program = assemble(TAKES)
+    moments = {
+        "stalled on the PULL": lambda s: ls.cpu.stalled,
+        "holding the PUSH's delay": lambda s: s["pc"] == 4 and s["counter"] == 3,
+        "the PULL's edge": lambda s: s["pc"] == 2 and int(dut.core_i.pull_en.value) == 1,  # the coming edge is it
+        "the PUSH's edge": lambda s: s["pc"] == 1 and int(dut.core_i.push_en.value) == 1,
+        "halted": lambda s: s["halted"],
+    }
+    for name, reached in moments.items():
+        for kind in ("restart", "reset"):
+            preload = (0x96, 0x53, 0x3C, 0xC3) if name == "halted" else (0x96, 0x53, 0x3C)
+            await begin(dut, imem, program, tx=preload, gpio_in=1)
+            ls = Lockstep(dut, CPU(program, tx_data=preload, rx_depth=DEPTH))
+            ls.pins(1)
+            before = await until(ls, reached)
+            if name == "the PULL's edge":
+                assert before["tx"][0] == 0x96 and before["shift_reg"] == 0, name
+            if name == "the PUSH's edge":
+                assert before["rx"] == [] and before["in_shift_reg"] == 0x80, name
+            getattr(ls, kind)()
+            after = await ls.edge()
+            queues = {"tx": before["tx"], "rx": before["rx"]} if kind == "restart" else {"tx": [], "rx": []}
+            assert after == {**RESET_CORE, **queues}, f"{kind} {name}: {after}"
+            assert (ls.pulls, ls.pushes) == (len(preload) - len(before["tx"]), len(before["rx"])), f"{kind} {name}"
+            for i in range(3):
+                state = await ls.edge()
+            if kind == "restart" and before["tx"]:
+                assert state["shift_reg"] == before["tx"][0], f"{name}: the head was not taken again"
+            if kind == "reset":
+                assert ls.cpu.stalled and state["tx"] == [], f"{name}: no byte, so the PULL must stall"
+            for i in range(3, 60):
+                if ls.cpu.halted:
+                    break
+                if i % 9 == 4:
+                    ls.push(0x69 + i)
+                await ls.edge()
+            assert ls.cpu.halted, f"{kind} {name}: still running"
+
+    for kind, tx in (("restart", [0x96, 0x11]), ("reset", [])):
+        await begin(dut, imem, program, tx=(0x96,), gpio_in=1)
+        ls = Lockstep(dut, CPU(program, tx_data=(0x96,), rx_depth=DEPTH))
+        ls.push(0x11)
+        getattr(ls, kind)()
+        assert (await ls.edge())["tx"] == tx, kind
