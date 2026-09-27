@@ -972,14 +972,17 @@ async def i2c_write_stretch_slave_holds_scl_master_waits(dut):
 # it again, FAULT exits, both after a turnaround back that gives the host the
 # line; OK goes on. Stage 5, the read data (swd_read.asm): on OK the target
 # keeps the line and drives 32 data bits and a parity bit; the host PUSHes a
-# byte per eight, the parity in a fifth byte, then takes the line back. The
-# bench resolves SWDIO every clock from the pad (gpio_out, gpio_oe), the
+# byte per eight, the parity in a fifth byte, then takes the line back. Stage
+# 6, the write data (swd_write.asm): on OK, after the turnaround back, the
+# host clocks out 32 data bits and the parity from five more TX FIFO bytes.
+# The bench resolves SWDIO every clock from the pad (gpio_out, gpio_oe), the
 # target and a pull-up, and feeds it back on gpio_in, the pad readback.
 
 SWDIO, SWCLK = 0, 1  # the same pin numbers on gpio_out/gpio_oe (the pad) and gpio_in (the wire): SWDIO is the shift pin
 SWD_OK, SWD_WAIT, SWD_FAULT = 1, 2, 4  # the ACK, ACK[0] first on the wire
 SWD_CLOCKS = 13  # rises of SWCLK in a transaction without data: the request, the turnaround, the ACK, the turnaround back
 SWD_READ_CLOCKS = 46  # in a read the target says OK to: 32 data bits and the parity between the ACK and the turnaround back
+SWD_WRITE_CLOCKS = 46  # in a write the target says OK to: the turnaround back, then 32 data bits and the parity from the host
 
 
 class SwdTarget:
@@ -992,9 +995,12 @@ class SwdTarget:
     ACK[1] and ACK[2] on the next two. Then, for a read (RnW set) it said OK
     to, it drives `data` bit 0 up from the twelfth rise, one bit per rise, the
     parity from the forty-fourth, lets go on the forty-fifth and is ready for
-    the next request after the forty-sixth, the host's turnaround. Otherwise
-    it lets go on the twelfth and is ready after the thirteenth. `drive` is
-    what it puts on the wire: 0, 1 or None."""
+    the next request after the forty-sixth, the host's turnaround. For a
+    write (RnW clear) it said OK to, it lets go on the twelfth, the
+    thirteenth is the host's turnaround, and it samples the host's data bits
+    on the next 32 rises and the parity on the forty-sixth, appending (word,
+    parity ok) to `written`. Otherwise it lets go on the twelfth and is ready
+    after the thirteenth. `drive` is what it puts on the wire: 0, 1 or None."""
 
     def __init__(self, acks=(SWD_OK,), data=0):
         self.acks = list(acks)
@@ -1004,6 +1010,7 @@ class SwdTarget:
         self.rises = 0  # in this transaction
         self.samples = []
         self.requests = []
+        self.written = []
         self.drive = None
 
     def update(self, swdio, swclk):
@@ -1019,7 +1026,8 @@ class SwdTarget:
                     self.requests.append(sum(bit << i for i, bit in enumerate(self.samples)))
             else:
                 ack = self.acks[min(len(self.requests) - 1, len(self.acks) - 1)]
-                reading = (self.requests[-1] >> 2) & 1 == 1 and ack == SWD_OK
+                rnw = (self.requests[-1] >> 2) & 1
+                reading, writing = rnw == 1 and ack == SWD_OK, rnw == 0 and ack == SWD_OK
                 if n <= 11:
                     self.drive = (ack >> (n - 9)) & 1
                 elif reading and n <= 43:
@@ -1028,6 +1036,15 @@ class SwdTarget:
                     self.drive = self.parity
                 elif n == (45 if reading else 12):
                     self.drive = None
+                elif writing and n == 13:
+                    pass  # the host's turnaround back: it takes the line as this clock falls
+                elif writing and n <= 46:
+                    self.samples.append(swdio)  # data bits 0..31 on rises 14..45, the parity on 46
+                    if n == 46:
+                        bits = self.samples[8:]
+                        word = sum(bit << i for i, bit in enumerate(bits[:32]))
+                        self.written.append((word, bits[32] == bin(word).count("1") & 1))
+                        self.rises, self.samples = 0, []
                 else:  # the host's turnaround: whatever comes next is a new request
                     self.rises, self.samples = 0, []
         self.swclk = swclk
@@ -1068,6 +1085,43 @@ async def swd_wire(dut, target, limit=600):
     raise AssertionError(f"core still running after {limit} clocks")
 
 
+async def swd_write_host(dut, request, payload, received):
+    """The host doing one write the way the FIFOs ask. It pushes the request
+    and nothing else, because a WAIT would make the retry PULL a data byte as
+    the request; it pops every byte the core PUSHes into `received`; on a
+    WAIT it queues the request again, on an OK the `payload`, the four data
+    bytes and the parity byte; and it pushes one queued byte per clock while
+    tx_full is low. Runs until cancelled. Pushes and pops are levels on
+    top's ports: held high across a clock, each acts on that clock."""
+    queue = [request]
+    acks = 0
+    while True:
+        await FallingEdge(dut.clk)
+        dut.tx_push.value = 0
+        dut.rx_pop.value = 0
+        if int(dut.rx_empty.value) == 0:
+            received.append(int(dut.rx_data.value))
+            dut.rx_pop.value = 1
+        if len(received) > acks:
+            acks = len(received)
+            ack = received[-1] >> 5
+            if ack == SWD_WAIT:
+                queue.append(request)
+            elif ack == SWD_OK:
+                queue.extend(payload)
+        if queue and int(dut.tx_full.value) == 0:
+            dut.tx_data.value = queue.pop(0)
+            dut.tx_push.value = 1
+
+
+def swd_payload(data, parity=None):
+    """What the host queues after a write request the target said OK to: the
+    four data bytes from bit 0 up and a fifth byte whose bit 0 is the parity,
+    the host's to compute because the core has no XOR."""
+    parity = bin(data).count("1") & 1 if parity is None else parity
+    return [(data >> (8 * i)) & 0xFF for i in range(4)] + [parity]
+
+
 async def swd_host_drain(dut, received):
     """The host at the RX port during a read: whenever a byte is there it reads
     rx_data and pops it, one pop per clock, appending to `received`. Runs
@@ -1082,23 +1136,22 @@ async def swd_host_drain(dut, received):
 
 
 @cocotb.test()
-async def swd_request_host_byte_to_wire_ack_to_host(dut):
-    """programs/swd_request.asm end to end with a target that says OK. The
-    host pushes 0xA9 into the TX FIFO, a DP write to A[3:2] = 01: Start 1,
-    APnDP 0, RnW 0, A2 1, A3 0, parity 1, Stop 0, Park 1. The target on the
-    wire samples SWDIO on each rising edge of SWCLK and must see 1 0 0 1 0 1
-    0 1, bit 0 first (not a palindrome: backwards it is 1 0 1 0 1 0 0 1, so a
-    bit-order slip fails). The host drives SWDIO through the park bit's clock
-    and lets go as that clock falls; the turnaround's rise finds nobody
-    driving, and the target takes the line there with OK, 1 0 0. The host
-    samples the three bits on the next three rises, through the pad readback,
-    SHIFT_IN and in_shift_reg, PUSHes them, gives one more clock with nobody
-    driving and takes the line back as it falls: the host reads 0x20, the ACK
-    in bits 7:5, and the program halts owning an idle line. OK and FAULT are
-    mirror images, so ACK[0] first is proven: FAULT would read 0x80."""
-    program = load_program(PROGRAMS / "swd_request.asm")
-    byte = 0xA9
+async def swd_write_host_word_to_wire(dut):
+    """programs/swd_write.asm end to end with a target that says OK. The host
+    pushes 0xA9, a DP write to A[3:2] = 01: Start 1, APnDP 0, RnW 0, A2 1, A3
+    0, parity 1, Stop 0, Park 1, and, once it has read the OK, the word
+    0xE31D5396 as four bytes from bit 0 up and a fifth with the parity, 1
+    for 17 ones, in bit 0, feeding the 4-deep TX FIFO as room appears. On the
+    wire: the request (1 0 0 1 0 1 0 1, not a palindrome, so a bit-order
+    slip fails), the turnaround, OK, the turnaround back, then the host owns
+    the line and clocks out the 32 data bits and the parity, a PULL per byte
+    in a clock's last high cycle. The target sees the request, then the word
+    with a good parity. The host reads 0x20 and nothing else; 46 clocks; all
+    six bytes consumed; halted owning the line."""
+    program = load_program(PROGRAMS / "swd_write.asm")
+    byte, data = 0xA9, 0xE31D5396
     target = SwdTarget([SWD_OK])
+    received = []
     dut.imem_word.value = 0
     drive_host(dut, program_words=0)
     dut.gpio_in.value = 0b0001  # the wire idles high
@@ -1110,87 +1163,74 @@ async def swd_request_host_byte_to_wire_ack_to_host(dut):
     assert int(dut.tx_fifo.empty.value) == 1
     assert int(dut.rx_empty.value) == 1
 
-    # Host push with the core halted, then release it on the next falling edge.
+    # The host pushes the request, then release the core.
+    host = cocotb.start_soon(swd_write_host(dut, byte, swd_payload(data), received))
     await FallingEdge(dut.clk)
-    dut.tx_data.value = byte
-    dut.tx_push.value = 1
     await FallingEdge(dut.clk)
-    dut.tx_push.value = 0
     dut.program_words.value = len(program)
 
     swdio, swclk, host_drives, target_drives = await swd_wire(dut, target)
+    host.cancel()
 
-    # Thirteen rising edges of SWCLK, eight for the request, one for the
-    # turnaround, three for the ACK and one for the turnaround back, 8 clocks
-    # apart, each held high for 4. The first falling edge is the idle drop
-    # before the request. What a rise takes is the wire as it stood at the
-    # edge, the entry before the one that shows the clock high.
+    # 46 rises: 8 request, the turnaround, 3 ACK, the turnaround back, 32
+    # data, the parity. 8 clocks apart, but for the branch and the first
+    # PULL between the turnaround back and data bit 0. What a rise takes is
+    # the wire as it stood at the edge, the entry before the one that shows
+    # the clock high.
     ups, downs = rising_edges(swclk), falling_edges(swclk)
-    assert len(ups) == SWD_CLOCKS, f"rising edges of SWCLK at {ups}"
-    assert [b - a for a, b in zip(ups, ups[1:])] == [8] * (SWD_CLOCKS - 1)
-    assert [d - u for u, d in zip(ups, [d for d in downs if d > ups[0]])] == [4] * SWD_CLOCKS
+    assert len(ups) == SWD_WRITE_CLOCKS, f"rising edges of SWCLK at {ups}"
+    gaps = [b - a for a, b in zip(ups, ups[1:])]
+    assert gaps[:12] == [8] * 12 and gaps[13:] == [8] * 32
+    assert gaps[12] == 8 + 4 + 3, "the take-back word's low half, two SKIPs, the JMP and the PULL"
+    assert [d - u for u, d in zip(ups, [d for d in downs if d > ups[0]])] == [4] * SWD_WRITE_CLOCKS
     taken = [swdio[e - 1] for e in ups]
 
-    # The target's view of the request: 0xA9 bit 0 first, with the start,
-    # stop and park bits where the protocol puts them and the parity right.
+    # The target's view: the request, OK given, the word and its parity taken.
     assert taken[:8] == [1, 0, 0, 1, 0, 1, 0, 1]
     assert target.requests == [byte]
-
-    # The host owned SWDIO up to the clock after the park bit and let go on
-    # the edge that dropped it. The turnaround's rise finds the pull-up's 1
-    # and nobody driving; the target takes the line on it and keeps it to
-    # the third ACK rise. The turnaround back's rise again finds nobody
-    # driving, and the host takes the line back as that clock drops.
-    release, trn, last, back, retake = ups[7] + 4, ups[8], ups[11], ups[12], ups[12] + 4
-    assert host_drives[:release] == [1] * release, "the host let go before the park bit was clocked"
-    assert host_drives[release:retake] == [0] * (retake - release), "the host took the line back early"
-    assert host_drives[retake:] == [1] * len(host_drives[retake:]), "the host did not take the line back"
-    assert swdio[release:trn] == [1] * (trn - release)
-    assert target_drives[:trn] == [None] * trn
-    assert None not in target_drives[trn:last], "the target let go during the ACK"
-    assert target_drives[last:] == [None] * len(target_drives[last:]), "the target kept the line after the ACK"
-    assert swdio[last:] == [1] * len(swdio[last:]), "the pull-up, then the host's 1"
-
-    # OK on the wire, ACK[0] first, on the three rises after the turnaround.
     assert taken[8] == 1 and taken[12] == 1, "both turnaround edges find the pull-up"
     assert taken[9:12] == [1, 0, 0]
+    assert taken[13:45] == [(data >> i) & 1 for i in range(32)]
+    assert taken[45] == 1, "parity of 17 ones"
+    assert target.written == [(data, True)]
+
+    # Who drove: the host through the park bit and from the turnaround back
+    # to the end, the target from the turnaround's rise to the third ACK
+    # rise, nobody through either turnaround.
+    release, trn, last, retake = ups[7] + 4, ups[8], ups[11], ups[12] + 4
+    assert host_drives[:release] == [1] * release, "the host let go before the park bit was clocked"
+    assert host_drives[release:retake] == [0] * (retake - release), "the host drove while the target had the line"
+    assert host_drives[retake:] == [1] * len(host_drives[retake:]), "the host let go of the line during the data"
+    assert target_drives[:trn] == [None] * trn
+    assert None not in target_drives[trn:last], "the target let go during the ACK"
+    assert target_drives[last:] == [None] * len(target_drives[last:]), "the target drove after the ACK"
     assert swclk[downs[-1]:] == [0] * len(swclk[downs[-1]:]), "SWCLK idle low after the transaction"
 
-    # At the end the pad drives both lines, SWDIO high, SWCLK low.
-    assert int(dut.gpio_oe.value) & 0b11 == 0b11
-    assert int(dut.gpio_out.value) & 0b11 == 0b01
-    assert int(dut.halted.value) == 1
-
-    # The request was consumed once; the ACK reached the host as 0x20.
-    assert int(dut.tx_fifo.empty.value) == 1
-    assert int(dut.tx_full.value) == 0
-    assert int(dut.rx_empty.value) == 0
-    assert int(dut.rx_fifo.count.value) == 1
-    assert int(dut.rx_data.value) == SWD_OK << 5
-
-    # Host pop, driven on the falling edge.
-    await FallingEdge(dut.clk)
-    dut.rx_pop.value = 1
-    await FallingEdge(dut.clk)
-    dut.rx_pop.value = 0
-    await ReadOnly()
+    # The host read the ACK and nothing else; every byte it queued went out.
+    assert received == [SWD_OK << 5]
     assert int(dut.rx_empty.value) == 1
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.halted.value) == 1
+    assert int(dut.gpio_oe.value) & 0b11 == 0b11
+    assert (int(dut.gpio_out.value) >> SWCLK) & 1 == 0
 
 
 @cocotb.test()
-async def swd_wait_sends_the_request_again_ok_ends_it(dut):
-    """programs/swd_request.asm with a target that says WAIT, then OK. The
-    core cannot keep a copy of the request (SHIFT_OUT empties shift_reg and
-    only PULL reloads it), so WAIT is a JMP back to the PULL and the host
-    supplies the request again: here it queued 0xA9 twice up front. On the
-    wire: two whole transactions of thirteen clocks, the same request twice,
-    WAIT then OK, the host owning the line between them and after. The host
-    reads 0x40 then 0x28: OK in bits 7:5 with the WAIT's bit walked down to
-    bit 3, because in_shift_reg keeps shifting; the ACK is the byte >> 5
-    either way. Both requests are consumed and the program halts."""
-    program = load_program(PROGRAMS / "swd_request.asm")
-    byte = 0xA9
+async def swd_write_wait_sends_the_request_again_ok_writes_the_word(dut):
+    """programs/swd_write.asm with a target that says WAIT, then OK. The core
+    cannot keep a copy of the request (SHIFT_OUT empties shift_reg and only
+    PULL reloads it), so WAIT is a JMP back to the PULL and the host supplies
+    the request again; and the host must not have queued the data behind the
+    request, or that retry would PULL data byte 0 as the request: it queues
+    the data only on the OK. On the wire: a 13-clock transaction answered
+    WAIT, the host owning the line between, then a 46-clock one answered OK
+    with the word 0xE31D5396 written. The host reads 0x40 then 0x28: OK in
+    bits 7:5 with the WAIT's bit walked down to bit 3, because in_shift_reg
+    keeps shifting; the ACK is the byte >> 5 either way."""
+    program = load_program(PROGRAMS / "swd_write.asm")
+    byte, data = 0xA9, 0xE31D5396
     target = SwdTarget([SWD_WAIT, SWD_OK])
+    received = []
     dut.imem_word.value = 0
     drive_host(dut, program_words=0)
     dut.gpio_in.value = 0b0001  # the wire idles high
@@ -1201,38 +1241,34 @@ async def swd_wait_sends_the_request_again_ok_ends_it(dut):
     assert int(dut.tx_fifo.empty.value) == 1
     assert int(dut.rx_empty.value) == 1
 
-    # Two requests queued with the core halted, then release it.
-    for _ in range(2):
-        await FallingEdge(dut.clk)
-        dut.tx_data.value = byte
-        dut.tx_push.value = 1
+    host = cocotb.start_soon(swd_write_host(dut, byte, swd_payload(data), received))
     await FallingEdge(dut.clk)
-    dut.tx_push.value = 0
+    await FallingEdge(dut.clk)
     dut.program_words.value = len(program)
 
     swdio, swclk, host_drives, target_drives = await swd_wire(dut, target)
+    host.cancel()
 
-    # Two transactions of thirteen rises each, 8 clocks apart within one.
-    # Between them SWCLK stays low for the turnaround back's low half, the
-    # two SKIPs, the JMP, the PULL and the first SHIFT_OUT: 19 clocks from
-    # rise to rise.
+    # Two transactions: thirteen rises answered WAIT, then 46 answered OK,
+    # SWCLK low between them while the host reads the WAIT and pushes again.
     ups = rising_edges(swclk)
-    assert len(ups) == 2 * SWD_CLOCKS, f"rising edges of SWCLK at {ups}"
+    assert len(ups) == SWD_CLOCKS + SWD_WRITE_CLOCKS, f"rising edges of SWCLK at {ups}"
     gaps = [b - a for a, b in zip(ups, ups[1:])]
-    assert gaps[:12] == [8] * 12 and gaps[13:] == [8] * 12
-    assert gaps[12] == 4 + 3 + 4 + 4 + 4
+    assert gaps[:12] == [8] * 12 and gaps[13:25] == [8] * 12 and gaps[26:] == [8] * 32
     assert swclk[ups[12] + 4:ups[13]] == [0] * (ups[13] - ups[12] - 4), "SWCLK moved between the transactions"
     taken = [swdio[e - 1] for e in ups]
 
-    # The target saw the same request twice and answered WAIT, 0 1 0, then OK, 1 0 0.
+    # The target saw the same request twice, answered WAIT then OK, took the word.
     assert target.requests == [byte, byte]
     assert taken[:8] == taken[13:21] == [1, 0, 0, 1, 0, 1, 0, 1]
     assert taken[9:12] == [0, 1, 0]
     assert taken[22:25] == [1, 0, 0]
+    assert taken[26:58] == [(data >> i) & 1 for i in range(32)] and taken[58] == 1
+    assert target.written == [(data, True)]
 
-    # The host owned the line from the turnaround back of the first
-    # transaction through the second request's park bit, and again from the
-    # second turnaround back to the end; the target drove only its two ACKs.
+    # The host owned the line from the first turnaround back through the
+    # second request's park bit, and from the second turnaround back to the
+    # end; the target drove only its two ACKs.
     retake1, release2, retake2 = ups[12] + 4, ups[20] + 4, ups[25] + 4
     assert host_drives[retake1:release2] == [1] * (release2 - retake1), "the host let go between the transactions"
     assert host_drives[release2:retake2] == [0] * (retake2 - release2)
@@ -1241,28 +1277,15 @@ async def swd_wait_sends_the_request_again_ok_ends_it(dut):
     first, second = [i for i in drove if i < ups[13]], [i for i in drove if i >= ups[13]]
     assert first and first[0] == ups[8] and first[-1] == ups[11] - 1, "first ACK: from the turnaround's rise to the third ACK rise"
     assert second and second[0] == ups[21] and second[-1] == ups[24] - 1, "second ACK"
-    assert len(drove) == len(first) + len(second) == 2 * (ups[11] - ups[8]), "the target drove outside its ACKs"
+    assert len(drove) == len(first) + len(second), "the target drove outside its ACKs"
 
-    # The host reads WAIT then OK; both requests were consumed; halted owning the line.
+    # The host read WAIT then OK; everything it pushed was consumed; halted owning the line.
+    assert received == [SWD_WAIT << 5, SWD_OK << 5 | SWD_WAIT << 2]
+    assert [b >> 5 for b in received] == [SWD_WAIT, SWD_OK]
     assert int(dut.tx_fifo.empty.value) == 1
-    assert int(dut.rx_fifo.count.value) == 2
-    assert int(dut.rx_data.value) == SWD_WAIT << 5
-    await FallingEdge(dut.clk)
-    dut.rx_pop.value = 1
-    await FallingEdge(dut.clk)
-    dut.rx_pop.value = 0
-    await ReadOnly()
-    assert int(dut.rx_data.value) == SWD_OK << 5 | SWD_WAIT << 2
-    assert int(dut.rx_data.value) >> 5 == SWD_OK
-    await FallingEdge(dut.clk)
-    dut.rx_pop.value = 1
-    await FallingEdge(dut.clk)
-    dut.rx_pop.value = 0
-    await ReadOnly()
     assert int(dut.rx_empty.value) == 1
     assert int(dut.halted.value) == 1
     assert int(dut.gpio_oe.value) & 0b11 == 0b11
-    assert int(dut.gpio_out.value) & 0b11 == 0b01
 
 
 @cocotb.test()
