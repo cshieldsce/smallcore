@@ -963,46 +963,56 @@ async def i2c_write_stretch_slave_holds_scl_master_waits(dut):
     assert int(dut.rx_empty.value) == 1
 
 
-# SWD: the bench is the target. Stage 1, the request alone: the host owns
-# SWDIO, so the bench only watches top's pins, one sample per clock, and takes
-# SWDIO on every rising edge of SWCLK the way the target does. No turnaround,
-# no ACK, no data yet.
+# SWD: the bench is the wire and the target. Stage 1, the request: the host
+# owns SWDIO and the target takes it on every rising edge of SWCLK. Stage 2,
+# the turnaround: after the park bit the host lets go of SWDIO for one clock.
+# The bench resolves SWDIO every clock from the pad (gpio_out, gpio_oe) and a
+# pull-up, and feeds it back on gpio_in, the pad readback. No ACK, no data yet.
 
-SWDIO, SWCLK = 0, 1  # gpio_out pins swd_request.asm drives: SWDIO is the shift pin
+SWDIO, SWCLK = 0, 1  # the same pin numbers on gpio_out/gpio_oe (the pad) and gpio_in (the wire): SWDIO is the shift pin
 
 
-async def swd_pin_trace(dut, limit=200):
-    """Sample gpio_out and gpio_oe after every rising edge of clk until the
-    core halts, plus a few clocks after so the idle levels show. Returns
-    swdio, swclk and whether the pad was driving SWDIO, one entry per clock."""
-    swdio, swclk, swdio_oe = [], [], []
+async def swd_wire(dut, limit=200):
+    """The wire, until the core halts plus a few clocks. On every falling edge
+    of clk it resolves SWDIO from the pad and the pull-up, puts it on
+    gpio_in[0] for the host's next edge, and records it. Returns three lists,
+    one entry per clock: swdio (the wire), swclk, and whether the pad was
+    driving SWDIO."""
+    swdio, swclk, host_drives = [], [], []
     tail = 4  # clocks recorded after the halt
     for _ in range(limit):
+        await FallingEdge(dut.clk)
+        out, oe = int(dut.gpio_out.value), int(dut.gpio_oe.value)
+        driving = (oe >> SWDIO) & 1
+        level = (out >> SWDIO) & 1 if driving else 1
+        dut.gpio_in.value = (int(dut.gpio_in.value) & ~(1 << SWDIO)) | (level << SWDIO)
+        swdio.append(level)
+        swclk.append((out >> SWCLK) & 1)
+        host_drives.append(driving)
         await RisingEdge(dut.clk)
         await ReadOnly()
-        pins, oe = int(dut.gpio_out.value), int(dut.gpio_oe.value)
-        swdio.append((pins >> SWDIO) & 1)
-        swclk.append((pins >> SWCLK) & 1)
-        swdio_oe.append((oe >> SWDIO) & 1)
         if int(dut.core_i.halted.value):
             tail -= 1
             if tail == 0:
-                return swdio, swclk, swdio_oe
+                return swdio, swclk, host_drives
     raise AssertionError(f"core still running after {limit} clocks")
 
 
 @cocotb.test()
-async def swd_request_host_byte_to_pins(dut):
+async def swd_request_host_byte_to_pins_then_lets_go(dut):
     """programs/swd_request.asm end to end. The host pushes 0xA9 into the TX
     FIFO, a DP write to A[3:2] = 01: Start 1, APnDP 0, RnW 0, A2 1, A3 0,
-    parity 1, Stop 0, Park 1. The target on the pins samples SWDIO on each
+    parity 1, Stop 0, Park 1. The target on the wire samples SWDIO on each
     rising edge of SWCLK and must see 1 0 0 1 0 1 0 1, bit 0 first. Not a
     palindrome (backwards it is 1 0 1 0 1 0 0 1), so a bit-order slip fails.
-    The host owns SWDIO the whole way: there is no turnaround yet."""
+    The host drives SWDIO through the park bit's clock, lets go as that clock
+    falls, gives one more clock with nobody driving, the turnaround, and
+    halts with the line let go and reading high from the pull-up."""
     program = load_program(PROGRAMS / "swd_request.asm")
     byte = 0xA9
     dut.imem_word.value = 0
     drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001  # the wire idles high
     start_clock(dut)
     await reset(dut)
     Imem(dut, program)
@@ -1018,29 +1028,37 @@ async def swd_request_host_byte_to_pins(dut):
     dut.tx_push.value = 0
     dut.program_words.value = len(program)
 
-    swdio, swclk, swdio_oe = await swd_pin_trace(dut)
+    swdio, swclk, host_drives = await swd_wire(dut)
 
-    # Exactly 8 rising edges of SWCLK, 8 clocks apart, each held high for 4.
-    # The first falling edge is the idle drop before the request.
+    # Nine rising edges of SWCLK, eight for the request and one for the
+    # turnaround, 8 clocks apart, each held high for 4. The first falling
+    # edge is the idle drop before the request.
     ups, downs = rising_edges(swclk), falling_edges(swclk)
-    assert len(ups) == 8, f"rising edges of SWCLK at {ups}"
-    assert [b - a for a, b in zip(ups, ups[1:])] == [8] * 7
-    assert [d - u for u, d in zip(ups, [d for d in downs if d > ups[0]])] == [4] * 8
+    assert len(ups) == 9, f"rising edges of SWCLK at {ups}"
+    assert [b - a for a, b in zip(ups, ups[1:])] == [8] * 8
+    assert [d - u for u, d in zip(ups, [d for d in downs if d > ups[0]])] == [4] * 9
 
     # The target's view of the request: 0xA9 bit 0 first, with the start,
     # stop and park bits where the protocol puts them and the parity right.
-    bits = [swdio[e] for e in ups]
+    bits = [swdio[e] for e in ups[:8]]
     assert bits == [1, 0, 0, 1, 0, 1, 0, 1]
     start, apndp, rnw, a2, a3, parity, stop, park = bits
     assert (start, stop, park) == (1, 0, 1)
     assert parity == apndp ^ rnw ^ a2 ^ a3
 
-    # SWCLK idles low after the request. SWDIO is high from the park bit on,
-    # and the host drove it on every clock: no turnaround.
-    assert swclk[downs[-1]:] == [0] * len(swclk[downs[-1]:])
-    assert swdio[ups[-1]:] == [1] * len(swdio[ups[-1]:])
-    assert swdio_oe == [1] * len(swdio_oe)
-    assert int(dut.gpio_oe.value) & 0b11 == 0b11
+    # The host owned SWDIO up to the clock after the park bit and let go on
+    # the edge that dropped it, for good: the turnaround's rising edge finds
+    # nobody driving and the pull-up's 1 on the wire.
+    release = ups[7] + 4
+    assert host_drives[:release] == [1] * release, "the host let go before the park bit was clocked"
+    assert host_drives[release:] == [0] * len(host_drives[release:]), "the host took the line back"
+    assert swdio[release:] == [1] * len(swdio[release:])
+    assert swclk[downs[-1]:] == [0] * len(swclk[downs[-1]:]), "SWCLK idle low after the turnaround"
+
+    # At the end the pad drives SWCLK, not SWDIO, and what it would drive on
+    # SWDIO is the 1 the park bit left: open-drain letting go.
+    assert int(dut.gpio_oe.value) & 0b11 == 0b10
+    assert int(dut.gpio_out.value) & 0b11 == 0b01
 
     # The request was consumed exactly once.
     assert int(dut.tx_fifo.empty.value) == 1
