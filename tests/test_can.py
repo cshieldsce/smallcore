@@ -814,22 +814,22 @@ def int_bits(value, n):
     return [(value >> i) & 1 for i in range(n - 1, -1, -1)]
 
 
-def frame_bits(ident, data):
+def frame_bits(ident, data, crc=None):
     """The stuffed region of a base-format data frame, before stuffing: the
     SOF, ID[10:0], RTR, IDE, r0, the DLC, the data bytes MSB first, and the
-    CRC over everything before it."""
+    CRC over everything before it, or `crc` as given, wrong or not."""
     assert 0 <= ident < 1 << ID_BITS and len(data) <= 8
     bits = header_bits(ident) + [0] * CONTROL + int_bits(len(data), DLC_BITS)
     for byte in data:
         bits += int_bits(byte, 8)
-    return bits + int_bits(crc15(bits), CRC_BITS)
+    return bits + int_bits(crc15(bits) if crc is None else crc, CRC_BITS)
 
 
-def frame_bytes(ident, data):
+def frame_bytes(ident, data, crc=None):
     """The bytes the host writes for a frame, the stream cut where the
     program's PULLs fall: {SOF, ID[10], ID[9], 00000}, then eight bits a
     byte, the last one padded with zeros: 5 + DLC bytes."""
-    bits = frame_bits(ident, data)
+    bits = frame_bits(ident, data, crc)
     padded = bits[:LEAD] + [0] * (8 - LEAD) + bits[LEAD:]
     padded += [0] * (-len(padded) % 8)
     return [bits_to_int(padded[i : i + 8]) for i in range(0, len(padded), 8)]
