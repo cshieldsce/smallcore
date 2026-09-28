@@ -1756,7 +1756,11 @@ async def swd_with_repeat_is_the_canonical_program_at_the_pins(dut):
 # arbitration (can_tx_arb.asm): a competitor starts on the same SOF with its
 # own identifier, and the node that sent recessive and sees dominant sends
 # nothing more; the node is behind a transceiver, pin 0 TXD with its own
-# readback on gpio_in[0], the bus on gpio_in[1], RXD.
+# readback on gpio_in[0], the bus on gpio_in[1], RXD. Stage 3, the ACK slot
+# (can_tx_ack.asm): stage 1's frame, then the transmitter lets go for one
+# bit, a receiver that took the frame pulls it dominant, the delimiter is
+# recessive; not acked, the transmitter reports, waits out EOF and the
+# intermission and sends the frame again when the host queues it again.
 
 CAN_TX = 0  # the same pin number on gpio_out/gpio_oe (the pad) and gpio_in (the bus, or TXD read back): the shift pin
 CAN_RXD = 1  # gpio_in pin can_tx_arb.asm listens to the bus on
@@ -1764,27 +1768,33 @@ CAN_BIT = 8  # clocks per bit
 CAN_SAMPLE = 6  # the clock of a bit whose level can_tx.asm and a node beside it take: the sixth
 CAN_ARB_SAMPLE = 4  # can_tx_arb.asm's: the fourth, the decision taking the three after it
 CAN_HEADER = 12  # the SOF and the eleven identifier bits
+CAN_ACK_FRAME = CAN_HEADER + 2  # with the ACK slot and the ACK delimiter
+CAN_GAP = 10  # EOF and the intermission, recessive bits
 
 
 class CanNode:
     """An ideal receiver on the bus. `update(line)` is called every clock with
     the bus as it stood at the end of the clock before and returns what the
-    node drives this clock: 0 or None, and this one never drives. Idle, it
-    waits for the bus to fall, the SOF, and counts clocks from that edge: on
-    the `sample`th clock of every bit it takes the level it was handed. When
-    the twelve bits are over it appends the identifier to `seen` and is idle
-    again."""
+    node drives this clock: 0 or None. Idle, it waits for the bus to fall,
+    the SOF, and counts clocks from that edge: on the `sample`th clock of
+    every bit it takes the level it was handed. When the twelve bits are over
+    it appends the identifier to `seen`; then, if it `ack`s the frame (a
+    bool, or one per frame, the last repeating), it pulls the ACK slot
+    dominant and lets go for the delimiter, else it is idle at once."""
 
-    def __init__(self, sample=CAN_SAMPLE):
+    def __init__(self, sample=CAN_SAMPLE, ack=False):
         self.sample = sample
+        self.acks = list(ack) if isinstance(ack, (list, tuple)) else [ack]
         self.line = 1
         self.clock = None
+        self.phase = "idle"
         self.samples = []
         self.seen = []
+        self.frames = 0
 
     def update(self, line):
         if self.clock is None and line == 0 and self.line == 1:
-            self.clock = 0
+            self.clock, self.phase, self.samples = 0, "header", []
         if self.clock is not None:
             self.clock += 1
             if self.clock % CAN_BIT == self.sample:
@@ -1792,10 +1802,19 @@ class CanNode:
                 self.sampled(len(self.samples) - 1, line)
             if self.clock == CAN_HEADER * CAN_BIT:
                 assert self.samples[0] == 0, "the SOF: the edge it synced on"
-                self.seen.append(sum(bit << (10 - i) for i, bit in enumerate(self.samples[1:])))
-                self.samples, self.clock = [], None
+                self.seen.append(sum(bit << (10 - i) for i, bit in enumerate(self.samples[1:CAN_HEADER])))
+                self.phase = "ack" if self.acks[min(self.frames, len(self.acks) - 1)] else "idle"
+            elif self.clock == (CAN_HEADER + 1) * CAN_BIT:
+                self.phase = "delimiter"
+            elif self.clock == CAN_ACK_FRAME * CAN_BIT:
+                self.phase = "idle"
+            if self.phase == "idle":
+                self.clock, self.frames = None, self.frames + 1
         self.line = line
-        return None
+        return self.drive()
+
+    def drive(self):
+        return 0 if self.phase == "ack" else None
 
     def sampled(self, k, level):
         pass
@@ -1812,14 +1831,13 @@ class CanCompetitor(CanNode):
         self.bits = [0] + [(ident >> i) & 1 for i in range(10, -1, -1)]
         self.lost = None
 
-    def update(self, line):
-        super().update(line)
-        if self.clock is None or self.lost is not None:
-            return None
+    def drive(self):
+        if self.clock is None or self.lost is not None or self.phase != "header":
+            return super().drive()
         return 0 if self.bits[self.clock // CAN_BIT] == 0 else None
 
     def sampled(self, k, level):
-        if self.lost is None and self.bits[k] == 1 and level == 0:
+        if self.lost is None and k < CAN_HEADER and self.bits[k] == 1 and level == 0:
             self.lost = k
 
 
@@ -2025,3 +2043,117 @@ async def can_arbitration_lost_and_won_at_the_pins(dut):
             assert received == [0x0F]
         assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.tx_fifo.empty.value) == 1
         assert int(dut.gpio_out.value) & 1 == 1, "TXD recessive at the halt"
+
+
+async def can_ack_host(dut, header, received, late=0):
+    """The host for can_tx_ack.asm: it pops every byte the core pushes into
+    `received` and, when a byte says not acked (bit 0 set), queues the two
+    header bytes again `late` clocks later, one per clock as room appears.
+    Runs until cancelled."""
+    queue, due = [], None
+    while True:
+        await FallingEdge(dut.clk)
+        dut.tx_push.value = 0
+        dut.rx_pop.value = 0
+        if int(dut.rx_empty.value) == 0:
+            byte = int(dut.rx_data.value)
+            received.append(byte)
+            dut.rx_pop.value = 1
+            if byte & 1:
+                due = late
+        if due is not None:
+            if due == 0:
+                queue.extend(header)
+                due = None
+            else:
+                due -= 1
+        if queue and int(dut.tx_full.value) == 0:
+            dut.tx_data.value = queue.pop(0)
+            dut.tx_push.value = 1
+
+
+@cocotb.test()
+async def can_ack_slot_from_the_receiver_at_the_pins(dut):
+    """programs/can_tx_ack.asm, twice. With a receiver that acks: the frame
+    of stage 1, then the pad off the bus for the ACK slot while the receiver
+    pulls it dominant, the delimiter recessive, the host reading 0x46,
+    ID[6:0] of 0x5A3 and the ACK 0, halted as the delimiter ends, 115
+    clocks. With a receiver that acks only the second frame: the slot stays
+    recessive, the host reads 0x47, the bus holds recessive through the
+    delimiter, EOF and the intermission, the host queues the frame again on
+    reading the byte and the second SOF falls 82 clocks after the delimiter,
+    the second frame acked, 0x46; the receiver reads 0x5A3 twice. The bus,
+    the pad enable and the bytes clock for clock the model's on both."""
+    program = load_program(PROGRAMS / "can_tx_ack.asm")
+    ident = 0x5A3
+    header = [ident >> 4, (ident & 0xF) << 4]
+    bits = [0] + [(ident >> i) & 1 for i in range(10, -1, -1)]
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    start_clock(dut)
+    await reset(dut)
+    imem = Imem(dut, program)
+    from cpu import CPU
+    for acks in ((True,), (False, True)):
+        await FallingEdge(dut.clk)
+        imem.load(program)
+        drive_host(dut, program_words=0)
+        dut.gpio_in.value = 0b0001
+        await reset(dut)
+        receiver = CanNode(ack=acks)
+        received = []
+        for byte in header:
+            await FallingEdge(dut.clk)
+            dut.tx_data.value = byte
+            dut.tx_push.value = 1
+        await FallingEdge(dut.clk)
+        dut.tx_push.value = 0
+        host = cocotb.start_soon(can_ack_host(dut, header, received))
+        dut.program_words.value = len(program)
+        bus, pad_drives, _ = await can_bus(dut, [receiver], limit=600)
+        host.cancel()
+
+        # The model on the same bus, tests/test_can.py's bench inlined, with the same host.
+        cpu = CPU(program, gpio_in=1, tx_data=list(header))
+        model = CanNode(ack=acks)
+        model_bus, model_drives, model_received, line, again = [], [], [], 1, False
+        while not cpu.halted and cpu.cycle < 600:
+            if model_received and model_received[-1] & 1 and not again:
+                cpu.tx_fifo.extend(header)
+                again = True
+            cpu.step()
+            drive = model.update(line)
+            driving = cpu.gpio_oe[CAN_TX] == 1
+            pad = cpu.gpio[CAN_TX] if driving else None
+            line = 0 if pad == 0 or drive == 0 else 1
+            cpu.gpio_in[CAN_TX] = line
+            model_bus.append(line)
+            model_drives.append(int(driving))
+            if cpu.rx_fifo:
+                model_received.append(cpu.rx_fifo.pop(0))
+        assert cpu.halted
+        sof = bus.index(0)
+        start = sof - model_bus.index(0)
+        assert bus[start : start + len(model_bus)] == model_bus, f"acks {acks}: the bus, clock for clock the model's"
+        assert pad_drives[start : start + len(model_drives)] == model_drives, f"acks {acks}: the pad enable, clock for clock the model's"
+        assert len(bus) - start == cpu.cycle + 2, f"acks {acks}: {len(bus) - start - 2} clocks from release to halt, the model's {cpu.cycle}"
+        assert received == model_received
+
+        slot = slice(sof + CAN_HEADER * CAN_BIT, sof + (CAN_HEADER + 1) * CAN_BIT)
+        cells = [bus[sof + k * CAN_BIT : sof + (k + 1) * CAN_BIT] for k in range(CAN_ACK_FRAME)]
+        assert all(len(set(cell)) == 1 for cell in cells), f"a bit not held for {CAN_BIT} clocks: {cells}"
+        assert pad_drives[slot] == [0] * CAN_BIT, "the pad off the bus for the ACK slot"
+        if acks == (True,):
+            assert [cell[0] for cell in cells] == bits + [0, 1]
+            assert received == [0x46] and cpu.cycle == 115
+        else:
+            assert [cell[0] for cell in cells] == bits + [1, 1], "no ack"
+            sof2 = sof + (CAN_ACK_FRAME + CAN_GAP) * CAN_BIT + 2
+            assert bus[sof + CAN_HEADER * CAN_BIT : sof2] == [1] * (sof2 - sof - CAN_HEADER * CAN_BIT), "recessive through the delimiter, EOF and the intermission"
+            cells2 = [bus[sof2 + k * CAN_BIT : sof2 + (k + 1) * CAN_BIT] for k in range(CAN_ACK_FRAME)]
+            assert all(len(set(cell)) == 1 for cell in cells2) and [cell[0] for cell in cells2] == bits + [0, 1], "the frame again, acked"
+            assert received == [0x47, 0x46]
+        assert receiver.seen == [ident] * len(acks)
+        assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.tx_fifo.empty.value) == 1
+        assert int(dut.gpio_oe.value) & 1 == 0, "the bus let go at the halt"
