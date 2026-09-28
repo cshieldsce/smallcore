@@ -1265,20 +1265,23 @@ async def run_edges(dut, n):
 
 def canonical(word):
     """`word` with the operand bits its opcode never reads cleared. An opcode
-    reads its select bit, its operands, the side-effect flag and, when the
+    reads its select bits, its operands, the side-effect flag and, when the
     flag is set, the side-effect operands; nothing else, in isa.yaml or in
     core.v. Every opcode is assigned since REPEAT took 111, and REPEAT reads
-    its whole operand byte."""
+    its whole operand byte. A word in NOP's hole that is not a run test,
+    bits 7:5 = 001 or 011, reads nothing: a NOP with its delay."""
     for spec in ISA["instructions"].values():
         select = spec.get("select")
-        if spec["opcode"] != word >> 13 or (select and (word >> select["lsb"]) & 1 != select["value"]):
+        if spec["opcode"] != word >> 13 or (select and (word >> select["lsb"]) & ((1 << select["bits"]) - 1) != select["value"]):
             continue
-        used = (1 << select["lsb"]) if select else 0
+        used = (((1 << select["bits"]) - 1) << select["lsb"]) if select else 0
         for o in spec["operands"]:
             used |= ((1 << o["bits"]) - 1) << o["lsb"]
         if spec.get("side_effect"):
             used |= 0x80 | (0x70 if word & 0x80 else 0)
         return word & ~(0xFF & ~used)
+    if word >> 13 == ISA["instructions"]["NOP"]["opcode"] and not word & 0x80:
+        return word & 0xFF00  # NOP's hole outside the run tests: the core reads none of the operand, a NOP
     return None
 
 
@@ -1303,16 +1306,17 @@ async def same_run(dut, imem, program, twin, tx=(), gpio_in=0, limit=40):
 
 
 SELF_WORDS = tuple(0xE000 | count << 8 for count in range(DELAY_MAX + 1))  # REPEAT with back 0: it reaches itself
-GARBAGE_WORDS = (0x0040, 0x007F, 0x2005, 0x200D, 0x40FE, 0x400E, 0xA002, 0xA070, 0x8070)  # one of each kind, then random
+GARBAGE_WORDS = (0x0020, 0x007F, 0x2005, 0x200D, 0x40FE, 0x400E, 0xA002, 0xA070, 0x8070)  # one of each kind, then random
 
 
 @cocotb.test()
 async def words_the_isa_rejects_do_what_their_read_bits_say(dut):
-    """The 37,152 words decode() refuses, in two kinds, and what core.v
-    makes of each. 33,536 carry garbage in operand bits their opcode never
-    reads: core.v never reads them either, so nine chosen and 400 drawn at
-    random run edge for edge as the model runs the word with those bits
-    cleared. 3,616 are well-formed but out of range: CONFIG's unassigned
+    """The 36,128 words decode() refuses, in two kinds, and what core.v
+    makes of each (37,152 before the run tests took 1,024 of NOP's hole,
+    2026-09-28). 32,512 carry garbage in operand bits their opcode never
+    reads, the rest of NOP's hole among them: core.v never reads them
+    either, so nine chosen and 400 drawn at random run edge for edge as
+    the model runs the word with those bits cleared. 3,616 are well-formed but out of range: CONFIG's unassigned
     field 3 changes nothing, a NOP with its side effect kept; a shift_dir
     value of 2 or 3 writes its low bit; a SHIFT_OUT side effect on pin 0
     loses to the shift on the same edge, a bare SHIFT_OUT; a REPEAT with
@@ -1322,7 +1326,7 @@ async def words_the_isa_rejects_do_what_their_read_bits_say(dut):
     rejected = [w for w in range(1 << 16) if not accepted(w)]
     garbage = [w for w in rejected if canonical(w) != w and accepted(canonical(w))]
     semantic = sorted(set(rejected) - set(garbage))
-    assert (len(rejected), len(garbage), len(semantic)) == (37152, 33536, 3616)
+    assert (len(rejected), len(garbage), len(semantic)) == (36128, 32512, 3616)
     assert all(w in garbage for w in GARBAGE_WORDS) and all(w in semantic for w in SELF_WORDS)
     imem = Imem(dut, [])
     start_clock(dut)

@@ -721,6 +721,45 @@ async def bench(dut):
 
 
 @cocotb.test()
+async def run_tests_on_every_run_and_every_break_match_the_model(dut):
+    """SKIP_RUN and SKIP_NORUN, edge for edge against the model: both
+    directions, both senses, n 1..8, both levels, a delay of 0..3, on a
+    register holding the run, the run broken at each of its n positions in
+    turn, and a random value; the word holds through its delay, then the pc
+    steps by 2 or 1 and the SET after it runs or not; the newest n are the
+    low n MSB first and the high n LSB first."""
+    imem = await bench(dut)
+    rng = random.Random(4599)
+    runs = 0
+    for shift_dir in (0, 1):
+        for op in ("SKIP_RUN", "SKIP_NORUN"):
+            for n in range(1, 9):
+                for level in (0, 1):
+                    delay = rng.randrange(4)
+                    program = assemble(f"CONFIG shift_dir, {shift_dir}\n{op} {n}, {level} [{delay}]\nSET 0, 0\nSET 1, 0")
+                    mask = ((1 << n) - 1) if shift_dir else ((1 << n) - 1) << (8 - n)
+                    run = (0xFF if level else 0x00) & mask
+                    seeds = [run | (rng.randrange(256) & ~mask)]
+                    for j in range(n):
+                        bit = j if shift_dir else 7 - j
+                        seeds.append(seeds[0] ^ (1 << bit))
+                    seeds.append(rng.randrange(256))
+                    for seed in seeds:
+                        cpu = CPU(program)
+                        await load(dut, imem, program, cpu)
+                        await FallingEdge(dut.clk)
+                        cpu.in_shift_reg = seed
+                        dut.in_shift_reg.value = seed
+                        await cross(dut, cpu)
+                        while not cpu.halted:
+                            await follow(dut, cpu)
+                        skipped = ((seed & mask) == run) == (op == "SKIP_RUN")
+                        assert gpio_bits(dut.gpio_out.value)[:2] == ([1, 0] if skipped else [0, 0]), f"{op} {n}, {level} on {seed:#04x}, shift_dir {shift_dir}"
+                        runs += 1
+    assert runs == 2 * 2 * 2 * (8 * 2 + sum(range(1, 9)))
+
+
+@cocotb.test()
 async def repeat_count_1_2_and_32_match_the_model(dut):
     """A UART-shaped byte: a PULL, then a two-word cell, the shift with its
     clock down and the clock up, REPEATed count times, then the clock down.
@@ -795,7 +834,8 @@ async def stalls_inside_a_repeat_body_leave_rc_alone_and_the_repeat_commits_once
 
 def random_line(rng):
     """One body word of any kind but JMP and REPEAT, a delay of 0..3, a side
-    effect half the time on pins 1..3 so a SHIFT_OUT keeps its own pin."""
+    effect half the time on pins 1..3 so a SHIFT_OUT keeps its own pin; the
+    run tests take none."""
     d = rng.choice((0, 0, 1, 2, 3))
     side = rng.choice(("", f", {rng.randrange(1, 4)}, {rng.randrange(2)}"))
     return rng.choice((
@@ -807,6 +847,8 @@ def random_line(rng):
         f"PUSH{side} [{d}]",
         f"WAIT {rng.randrange(4)}, {rng.randrange(2)}{side} [{d}]",
         f"SKIP {rng.randrange(8)}, {rng.randrange(2)}{side} [{d}]",
+        f"SKIP_RUN {rng.randrange(1, 9)}, {rng.randrange(2)} [{d}]",
+        f"SKIP_NORUN {rng.randrange(1, 9)}, {rng.randrange(2)} [{d}]",
         f"CONFIG shift_dir, {rng.randrange(2)}{side} [{d}]",
     ))
 

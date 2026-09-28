@@ -2684,3 +2684,96 @@ async def can_destuffed_stream_to_the_pins_and_the_ack(dut):
         assert sum(pad_drives) == CAN_BIT, "the pad on the bus for the slot alone"
         assert received == model_received == [sum(bit << (7 - i) for i, bit in enumerate(bits[slot - 8 : slot]))]
         assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.gpio_oe.value) & 1 == 0
+
+
+# The run test at the pins: SKIP_RUN and SKIP_NORUN, adopted 2026-09-28,
+# in the programs that earned them. can_tx_stuff_C_loop.asm is stage 4's
+# stuffing at 8 cycles a bit for 16, 46 words for 224; can_rx_bits_C.asm is
+# the receiver's destuffed stream through the RX FIFO at 8 clocks a bit for
+# 9, 27 words for 57.
+
+
+@cocotb.test()
+async def can_bit_stuffing_with_the_run_test_at_the_pins(dut):
+    """experiments/can/can_tx_stuff_C_loop.asm on an idle bus, twice, as
+    can_bit_stuffing_at_the_pins ran the 224-word program: 0x7FF with a
+    dominant stuff bit after the fifth and the tenth recessive bit, fourteen
+    bits of 8 clocks, the host reading the last eight samples, 0x7D; 0x5A3
+    unchanged, twelve bits, 0xA3. The pad drives exactly the dominant bits;
+    the bus, the pad enable and the byte clock for clock the model's."""
+    program = load_program(EXPERIMENTS / "can" / "can_tx_stuff_C_loop.asm")
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    start_clock(dut)
+    await reset(dut)
+    imem = Imem(dut, program)
+    from cpu import CPU
+    for ident, byte in ((0x7FF, 0x7D), (0x5A3, 0xA3)):
+        header = [ident >> 4, (ident & 0xF) << 4]
+        bits = can_stuffed([0] + [(ident >> i) & 1 for i in range(10, -1, -1)])
+        await FallingEdge(dut.clk)
+        imem.load(program)
+        drive_host(dut, program_words=0)
+        dut.gpio_in.value = 0b0001
+        await reset(dut)
+        received = []
+        for value in header:
+            await FallingEdge(dut.clk)
+            dut.tx_data.value = value
+            dut.tx_push.value = 1
+        await FallingEdge(dut.clk)
+        dut.tx_push.value = 0
+        host = cocotb.start_soon(swd_host_drain(dut, received))
+        dut.program_words.value = len(program)
+        bus, pad_drives, _ = await can_bus(dut, [], limit=300)
+        host.cancel()
+
+        cpu = CPU(program, gpio_in=1, tx_data=list(header))
+        model_bus, model_drives = [], []
+        while not cpu.halted:
+            cpu.step()
+            driving = cpu.gpio_oe[CAN_TX] == 1
+            line = cpu.gpio[CAN_TX] if driving else 1
+            cpu.gpio_in[CAN_TX] = line
+            model_bus.append(line)
+            model_drives.append(int(driving))
+        sof = bus.index(0)
+        start = sof - model_bus.index(0)
+        assert bus[start : start + len(model_bus)] == model_bus, f"{ident:03x}: the bus, clock for clock the model's"
+        assert pad_drives[start : start + len(model_drives)] == model_drives, f"{ident:03x}: the pad enable, clock for clock the model's"
+        assert len(bus) - start == cpu.cycle + 2 and cpu.cycle == 3 + len(bits) * CAN_BIT + 1, f"{ident:03x}: {cpu.cycle} clocks from release to halt"
+        cells = [bus[sof + k * CAN_BIT : sof + (k + 1) * CAN_BIT] for k in range(len(bits))]
+        assert all(len(set(cell)) == 1 for cell in cells), f"{ident:03x}: a bit not held for {CAN_BIT} clocks: {cells}"
+        assert [cell[0] for cell in cells] == bits, f"{ident:03x}: the stuffed header at 8 clocks a bit"
+        assert pad_drives == [int(level == 0) for level in bus]
+        assert received == [byte] and cpu.rx_fifo == [byte]
+        assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.tx_fifo.empty.value) == 1
+        assert int(dut.gpio_oe.value) & 1 == 0
+
+
+@cocotb.test()
+async def can_fifo_receiver_with_the_run_test_at_the_pins(dut):
+    """experiments/can/can_rx_bits_C.asm with the bench transmitter sending
+    0x5A3 carrying 0x5A at 8 clocks a bit: a PUSH after every data sample
+    and none after a stuff bit, so bit 0 of the 42 bytes the host reads is
+    the frame's destuffed stream; the ACK slot pulled dominant; the bus, the
+    pad enable and the bytes clock for clock the model's; halted after the
+    intermission with the FIFO drained."""
+    program = load_program(EXPERIMENTS / "can" / "can_rx_bits_C.asm")
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    start_clock(dut)
+    await reset(dut)
+    bits, slot = can_frame_on_the_bus(0x5A3, [0x5A])
+    bus, pad_drives, outs, received, cpu, model_bus, model_drives, model_received, tx = await can_receive(dut, program, bits, slot, 800)
+    sof = bus.index(0)
+    start = sof - model_bus.index(0)
+    assert bus[start : start + len(model_bus)] == model_bus, "the bus, clock for clock the model's"
+    assert pad_drives[start : start + len(model_drives)] == model_drives, "the pad enable, clock for clock the model's"
+    assert received == model_received and len(received) == 42
+    assert [byte & 1 for byte in received] == can_frame_bits(0x5A3, [0x5A]), "the destuffed stream, a bit a byte"
+    ack = slice(sof + slot * CAN_BIT, sof + (slot + 1) * CAN_BIT)
+    assert pad_drives[ack] == [1] * CAN_BIT and bus[ack] == [0] * CAN_BIT and tx.acked, "the ACK slot pulled dominant"
+    assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.gpio_oe.value) & 1 == 0
