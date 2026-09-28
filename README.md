@@ -69,7 +69,7 @@ Rules: a strobe is held at least 4 clocks high and 3 low between strobes, and lo
 | 2 | `uart_tx_pull` | 6 | `spi_tx_msb` | 10 | `i2c_write_stretch` |
 | 3 | `uart_tx_loop` | 7 | `spi_duplex_lsb` | 11 | `i2c_write_addr_data` |
 
-Slots are permanent: a new program takes an unused slot, 12..15 read as slot 0. `rom.v` is one lookup on `{sel, addr}`, so every program keeps its own addresses from 0 and `JMP` targets need no relocation; the whole 272-word library costs about as much as one FIFO. Because `gpio_in[k]` is the readback of pad `k` and every pad is push-pull high out of reset, a program that listens on a pin lets go of it first, the way the I²C programs always did: `uart_rx` opens with `CONFIG open_drain01, 1`, the SPI duplex programs with `CONFIG open_drain23, 2`.
+Slots are permanent: a program keeps its number. 12..15 were taken 2026-09-28 for the SWD read in REPEAT form, CAN stage 6A, the CAN receiver with the CRC in the core and the destuffing receiver on the accumulator, so the chip carries programs that use REPEAT, the run test and the accumulator; no slot is free, and an unnamed one would read as slot 0. `rom.v` is one lookup on `{sel, addr}`, so every program keeps its own addresses from 0 and `JMP` targets need no relocation; the 272-word library of v1.1 cost about as much as one FIFO. Because `gpio_in[k]` is the readback of pad `k` and every pad is push-pull high out of reset, a program that listens on a pin lets go of it first, the way the I²C programs always did: `uart_rx` opens with `CONFIG open_drain01, 1`, the SPI duplex programs with `CONFIG open_drain23, 2`.
 
 ## Status
 
