@@ -1747,16 +1747,22 @@ async def swd_with_repeat_is_the_canonical_program_at_the_pins(dut):
 
 # CAN: the bench is the bus and the other nodes. Classical CAN, standard
 # 11-bit identifiers, one pin, no clock line: a bit is CAN_BIT clocks, driven
-# on its first and sampled on its seventh, the level the bus held through its
-# sixth. Stage 1, the SOF and the identifier (can_tx.asm): the host writes
-# {SOF, ID[10:4]} and {ID[3:0], 0000}, the node drives the twelve bits,
-# dominant 0 driven, recessive 1 let go, and lets go after ID[0]. The bench
-# resolves the bus every clock as a wired AND of the pad (gpio_out, gpio_oe)
-# and the other nodes and feeds it back on gpio_in[0], the pad readback.
+# on its first and sampled on a fixed clock after. Stage 1, the SOF and the
+# identifier (can_tx.asm): the host writes {SOF, ID[10:4]} and {ID[3:0],
+# 0000}, the node drives the twelve bits, dominant 0 driven, recessive 1 let
+# go, and lets go after ID[0]; the pad is on the bus, which the bench
+# resolves every clock as a wired AND of the pad (gpio_out, gpio_oe) and the
+# other nodes and feeds back on gpio_in[0], the pad readback. Stage 2,
+# arbitration (can_tx_arb.asm): a competitor starts on the same SOF with its
+# own identifier, and the node that sent recessive and sees dominant sends
+# nothing more; the node is behind a transceiver, pin 0 TXD with its own
+# readback on gpio_in[0], the bus on gpio_in[1], RXD.
 
-CAN_TX = 0  # the same pin number on gpio_out/gpio_oe (the pad) and gpio_in (the bus): the shift pin
+CAN_TX = 0  # the same pin number on gpio_out/gpio_oe (the pad) and gpio_in (the bus, or TXD read back): the shift pin
+CAN_RXD = 1  # gpio_in pin can_tx_arb.asm listens to the bus on
 CAN_BIT = 8  # clocks per bit
-CAN_SAMPLE = 6  # the clock of a bit whose level a node takes: the sixth
+CAN_SAMPLE = 6  # the clock of a bit whose level can_tx.asm and a node beside it take: the sixth
+CAN_ARB_SAMPLE = 4  # can_tx_arb.asm's: the fourth, the decision taking the three after it
 CAN_HEADER = 12  # the SOF and the eleven identifier bits
 
 
@@ -1765,10 +1771,12 @@ class CanNode:
     the bus as it stood at the end of the clock before and returns what the
     node drives this clock: 0 or None, and this one never drives. Idle, it
     waits for the bus to fall, the SOF, and counts clocks from that edge: on
-    the sixth clock of every bit it takes the level it was handed. After
-    twelve samples it appends the identifier to `seen` and is idle again."""
+    the `sample`th clock of every bit it takes the level it was handed. When
+    the twelve bits are over it appends the identifier to `seen` and is idle
+    again."""
 
-    def __init__(self):
+    def __init__(self, sample=CAN_SAMPLE):
+        self.sample = sample
         self.line = 1
         self.clock = None
         self.samples = []
@@ -1779,25 +1787,54 @@ class CanNode:
             self.clock = 0
         if self.clock is not None:
             self.clock += 1
-            if self.clock % CAN_BIT == CAN_SAMPLE:
+            if self.clock % CAN_BIT == self.sample:
                 self.samples.append(line)
-                if len(self.samples) == CAN_HEADER:
-                    assert self.samples[0] == 0, "the SOF: the edge it synced on"
-                    self.seen.append(sum(bit << (10 - i) for i, bit in enumerate(self.samples[1:])))
-                    self.samples, self.clock = [], None
+                self.sampled(len(self.samples) - 1, line)
+            if self.clock == CAN_HEADER * CAN_BIT:
+                assert self.samples[0] == 0, "the SOF: the edge it synced on"
+                self.seen.append(sum(bit << (10 - i) for i, bit in enumerate(self.samples[1:])))
+                self.samples, self.clock = [], None
         self.line = line
         return None
 
+    def sampled(self, k, level):
+        pass
 
-async def can_bus(dut, nodes, limit=300):
+
+class CanCompetitor(CanNode):
+    """A second transmitter, ideal and synchronized: it starts on the SOF's
+    edge, its own SOF the same dominant bit, and drives bit k of its header
+    through the clocks of bit k, a 0 driven, a 1 let go; when it let go and
+    sampled dominant it has lost, `lost` the bit, and drives nothing more."""
+
+    def __init__(self, ident, sample=CAN_SAMPLE):
+        super().__init__(sample)
+        self.bits = [0] + [(ident >> i) & 1 for i in range(10, -1, -1)]
+        self.lost = None
+
+    def update(self, line):
+        super().update(line)
+        if self.clock is None or self.lost is not None:
+            return None
+        return 0 if self.bits[self.clock // CAN_BIT] == 0 else None
+
+    def sampled(self, k, level):
+        if self.lost is None and self.bits[k] == 1 and level == 0:
+            self.lost = k
+
+
+async def can_bus(dut, nodes, limit=300, rxd=None):
     """The bus, until the core halts plus a few clocks. On every falling edge
     of clk it shows the nodes the bus as it stood for the core's last edge,
-    resolves it as a wired AND of the pad and what the nodes drive, puts it on
-    gpio_in[0] for the core's next edge, and records it. The pad driving a 1
-    against a node's 0 is a fight, which no CAN node has: it fails here.
-    Returns two lists, one entry per clock: the bus and whether the pad was
-    driving it."""
-    bus, pad_drives = [], []
+    resolves it as a wired AND of the node under test and what the nodes
+    drive, puts it on gpio_in for the core's next edge, and records it. With
+    `rxd` None the pad is on the bus: it reads the bus back on gpio_in[0],
+    and driving a 1 against a node's 0 is a fight, which no CAN node has: it
+    fails here. With `rxd` a pin the node is behind a transceiver: pin 0 is
+    TXD, gpio_in[0] its own readback, the bus goes to gpio_in[rxd], and pin
+    rxd must be let go. Returns three lists, one entry per clock: the bus,
+    whether the pad was driving pin 0, and what the node put out, 0 or 1."""
+    bus, pad_drives, txds = [], [], []
     line = 1
     tail = 4  # clocks recorded after the halt
     for _ in range(limit):
@@ -1806,17 +1843,25 @@ async def can_bus(dut, nodes, limit=300):
         drives = [node.update(line) for node in nodes]
         driving = (oe >> CAN_TX) & 1
         pad = (out >> CAN_TX) & 1 if driving else None
-        assert not (pad == 1 and 0 in drives), "the pad drives a 1 against a node's dominant 0"
-        line = 0 if pad == 0 or 0 in drives else 1
-        dut.gpio_in.value = (int(dut.gpio_in.value) & ~(1 << CAN_TX)) | (line << CAN_TX)
+        if rxd is None:
+            assert not (pad == 1 and 0 in drives), "the pad drives a 1 against a node's dominant 0"
+            txd = 0 if pad == 0 else 1
+            line = 0 if txd == 0 or 0 in drives else 1
+            dut.gpio_in.value = (int(dut.gpio_in.value) & ~(1 << CAN_TX)) | (line << CAN_TX)
+        else:
+            assert (oe >> rxd) & 1 == 0, f"pin {rxd} drives against RXD"
+            txd = 1 if pad is None else pad
+            line = 0 if txd == 0 or 0 in drives else 1
+            dut.gpio_in.value = (int(dut.gpio_in.value) & ~(1 << CAN_TX) & ~(1 << rxd)) | (txd << CAN_TX) | (line << rxd)
         bus.append(line)
         pad_drives.append(driving)
+        txds.append(txd)
         await RisingEdge(dut.clk)
         await ReadOnly()
         if int(dut.core_i.halted.value):
             tail -= 1
             if tail == 0:
-                return bus, pad_drives
+                return bus, pad_drives, txds
     raise AssertionError(f"core still running after {limit} clocks")
 
 
@@ -1860,7 +1905,7 @@ async def can_sof_and_identifier_to_the_bus(dut):
     host = cocotb.start_soon(swd_host_drain(dut, received))
     dut.program_words.value = len(program)
 
-    bus, pad_drives = await can_bus(dut, [node])
+    bus, pad_drives, _ = await can_bus(dut, [node])
     host.cancel()
 
     # The model's bench on the same frame: sim/cpu.py on tests/test_can.py's bus.
@@ -1898,3 +1943,85 @@ async def can_sof_and_identifier_to_the_bus(dut):
     assert int(dut.tx_fifo.empty.value) == 1
     assert int(dut.halted.value) == 1
     assert int(dut.gpio_oe.value) & 1 == 0 and int(dut.gpio_out.value) & 1 == 1
+
+
+@cocotb.test()
+async def can_arbitration_lost_and_won_at_the_pins(dut):
+    """programs/can_tx_arb.asm behind the transceiver, twice. Against a
+    competitor sending 0x583, IDENT with ID[5] dominant: the same bits
+    through ID[5], on which the node lets go and sees dominant, so it sends
+    nothing more, TXD recessive from ID[4]'s edge, the second byte PULLed
+    away since its cell never came, halted two clocks after the lost bit,
+    the host reading 0xF2, the pairs (1,1) (1,1) (0,0) (1,0) for ID[8] to
+    ID[5]; the competitor sees no loss. Against 0x7A3, which
+    lets go on ID[9] where the node is dominant: the competitor withdraws
+    there, the node sends 0x5A3 whole, 8 clocks a bit, the receiver reads it,
+    the host reads 0x0F, ID[3:0] each twice, 100 clocks as in stage 1. The
+    bus, TXD and the pushes clock for clock the model's on both."""
+    program = load_program(PROGRAMS / "can_tx_arb.asm")
+    ident = 0x5A3
+    header = [ident >> 4, (ident & 0xF) << 4]
+    bits = [0] + [(ident >> i) & 1 for i in range(10, -1, -1)]
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0011
+    start_clock(dut)
+    await reset(dut)
+    imem = Imem(dut, program)
+    for other, lost_on in ((0x583, 6), (0x7A3, None)):
+        await FallingEdge(dut.clk)
+        imem.load(program)
+        drive_host(dut, program_words=0)
+        dut.gpio_in.value = 0b0011  # TXD read back high, the bus recessive
+        await reset(dut)
+        competitor, receiver = CanCompetitor(other, CAN_ARB_SAMPLE), CanNode(CAN_ARB_SAMPLE)
+        received = []
+        for byte in header:
+            await FallingEdge(dut.clk)
+            dut.tx_data.value = byte
+            dut.tx_push.value = 1
+        await FallingEdge(dut.clk)
+        dut.tx_push.value = 0
+        host = cocotb.start_soon(swd_host_drain(dut, received))
+        dut.program_words.value = len(program)
+        bus, pad_drives, txd = await can_bus(dut, [competitor, receiver], rxd=CAN_RXD)
+        host.cancel()
+
+        # The model on the same bus, tests/test_can.py's bench inlined.
+        from cpu import CPU
+        cpu = CPU(program, gpio_in=1, tx_data=header)
+        model_competitor, model_bus, model_txd = CanCompetitor(other, CAN_ARB_SAMPLE), [], []
+        line = 1
+        while not cpu.halted:
+            cpu.step()
+            drive = model_competitor.update(line)
+            assert cpu.gpio_oe[CAN_RXD] == 0
+            out = cpu.gpio[CAN_TX] if cpu.gpio_oe[CAN_TX] else 1
+            line = 0 if out == 0 or drive == 0 else 1
+            cpu.gpio_in[CAN_TX], cpu.gpio_in[CAN_RXD] = out, line
+            model_bus.append(line)
+            model_txd.append(out)
+        sof = bus.index(0)
+        start = sof - model_bus.index(0)
+        assert bus[start : start + len(model_bus)] == model_bus, f"against {other:03x}: the bus, clock for clock the model's"
+        assert txd[start : start + len(model_txd)] == model_txd, f"against {other:03x}: TXD, clock for clock the model's"
+        assert len(bus) - start == cpu.cycle + 2, f"against {other:03x}: {len(bus) - start - 2} clocks from release to halt, the model's {cpu.cycle}"
+        assert received == cpu.rx_fifo
+        assert pad_drives == [1] * len(pad_drives), "TXD is push-pull throughout"
+
+        if lost_on is not None:
+            assert cpu.cycle == 3 + (lost_on + 1) * CAN_BIT + 2 and cpu.tx_fifo == []
+            assert txd[sof : sof + (lost_on + 1) * CAN_BIT] == [bit for bit in bits[: lost_on + 1] for _ in range(CAN_BIT)]
+            assert txd[sof + (lost_on + 1) * CAN_BIT :] == [1] * len(txd[sof + (lost_on + 1) * CAN_BIT :]), "recessive from the bit after the lost one"
+            assert received == [0xF2]
+            assert competitor.lost is None
+            assert bus[sof : sof + (lost_on + 1) * CAN_BIT] == [bit for bit in competitor.bits[: lost_on + 1] for _ in range(CAN_BIT)]
+        else:
+            assert cpu.cycle == 100
+            cells = [bus[sof + k * CAN_BIT : sof + (k + 1) * CAN_BIT] for k in range(CAN_HEADER)]
+            assert all(len(set(cell)) == 1 for cell in cells) and [cell[0] for cell in cells] == bits
+            assert txd[sof : sof + CAN_HEADER * CAN_BIT] == [bit for bit in bits for _ in range(CAN_BIT)]
+            assert competitor.lost == 2 and competitor.seen == [ident] and receiver.seen == [ident]
+            assert received == [0x0F]
+        assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.tx_fifo.empty.value) == 1
+        assert int(dut.gpio_out.value) & 1 == 1, "TXD recessive at the halt"
