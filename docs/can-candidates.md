@@ -356,6 +356,29 @@ and the 95- and 224-word programs stay as the record of why.
 | Bc, SKIP_SENT | held |
 | C, the run test | held, the strongest. If RX de-stuffing independently says "the last five bits are right here, but asking whether they form a run is killing my timing and my words", both sides of the protocol want the same predicate, and C has earned its word |
 
+### RX's evidence (2026-09-28)
+
+The receive side built on the current ISA, no candidate spliced in
+(`tests/test_can_rx.py`, README "CAN RX by the numbers"), and what it says
+about the three held:
+
+- **C, the run test.** RX de-stuffing asks the same five-bit question, from
+  the same register, and pays the same 23 words a cell for the tree; a run
+  test would make the cell about 12, as it did for TX. But it pays nothing
+  in cycles: a receiver's decision has until the next sample, not the next
+  edge, so the tree fits 8 clocks a bit as it is. C now has two consumers
+  for its words and one for its cycles. It is not what RX is short of.
+- **A, the branch.** Every exit of the tree is again SKIP, JMP, a delay and
+  the next sample, and the JMP into the dominant tree costs that side its
+  sixth cycle; the same shape as TX's, one more pile of it. The dominant
+  tree's longest path is exactly the cycle the FIFO form has no room for.
+- **What RX is short of is state, not a test**: the raw history the run
+  test reads and the destuffed byte the host wants cannot share the one
+  register. The stream leaves on pins for free, through the FIFO at a
+  ninth clock, or the stuff history goes into the pc at 1629 words for the
+  header. None of A, Bc or C touches that, so none of them is what RX asks
+  for, and the call on them still waits, now with RX's numbers beside TX's.
+
 A successful round with nothing merged: the bad directions are known
 without being paid for in the architecture. What follows keeps "can the
 core execute CAN?" apart from "can the core compute CAN's arithmetic?":
