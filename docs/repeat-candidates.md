@@ -23,12 +23,13 @@ they are: they are the baseline and the evidence.
 ## The candidates
 
 **A, `REPEAT count, label`.** A counted backward branch at the end of the body:
-back to `label` until the body has run `count` times. One 5-bit counter, 0
-between loops; the first arrival loads it, every arrival decrements it and
-jumps while it is not yet 0. One word per loop, one cycle per iteration. The
-count sits in bits 12:8, where every other word has its delay: REPEAT has no
-delay of its own and the target takes the operand byte as JMP's does. No
-nesting: one counter.
+back to `label` until the body has run `count` times, 1..32. One counter, 0
+between loops; the first arrival loads it, every arrival takes one off and
+jumps back while the result is not 0. One word per loop, one cycle per
+iteration. `count - 1` sits in bits 12:8, where every other word has its
+delay: REPEAT has no delay of its own; the operand byte is the distance back
+to the label, so the reach is bounded and the program is not. No nesting:
+one counter. The spec as it would be written is below, "REPEAT, the spec".
 
 **B, `REPEAT_NEXT count`.** The next word runs `count` times before pc moves
 on. One 5-bit counter, one cycle once. Bodies of one word only.
@@ -82,7 +83,7 @@ PUSHes and PULLs happen at the same cycles.
 
 | | new opcode | operand bits | other bits | state | words per loop | cycles per iteration |
 |---|---|---|---|---|---|---|
-| A | 111 | target, 8 | bits 12:8 are the count, not a delay | 5-bit counter | 1 | 1, taken from a delay |
+| A | 111 | back, 8: pc - back | bits 12:8 are count - 1, not a delay | 6-bit counter | 1 | 1, taken from a delay |
 | B | 111 | count, 5 | delay bits unused | 5-bit counter | 1 | 0; 1 once |
 | C | 111, two forms on operand bit 7 | LOAD count 5; DJNZ target 7 | delay as ever | 5-bit counter | 2 | 1, taken from a delay |
 | D | none: bit 0 of the SHIFT word | as SHIFT | delay as ever, the half period | 3-bit cell counter, 1-bit half | 0 | 0 |
@@ -123,10 +124,14 @@ repeated PULL empties the FIFO and stalls forever, under C a DJNZ loop does.
 | C | 2687 | 27 | 22 random programs whose 111 words are now LOADs and DJNZs, and the same 5 |
 | D | 2429 | 210 | 165 random programs whose SHIFT words with bit 0 set are now bursts. 40 cases of "a side effect changes exactly one pin and nothing else": a burst writes its side pin twice per cell, sixteen times per word. 5 ISA-as-it-is tests: bad words rejected, the side-effect field, SHIFT one opcode with an in bit, the valid word count, the random walk |
 
-No existing program changes: every program in `programs/` assembles to the
-same words under every candidate and every word decodes to the same
+These are not programs breaking. Every program in `programs/` assembles to
+the same words under every candidate and every word decodes to the same
 instruction (`test_every_existing_program_means_the_same_under_the_candidate`).
-What the candidates disturb is the hardening suite's model of a word: one
+The failing tests encoded assumptions about the whole 16-bit word space: that
+opcode 111 is not an instruction, that bits 12:8 are a delay in every word,
+that a word writes at most one pin. A spec evolution cost, not a regression;
+once a word is adopted those tests are rewritten to the new contract. What
+the candidates disturb is the hardening suite's model of a word: one
 operation on its first cycle, hold 1 + delay, then pc + 1 or the JMP target,
 one pin write at most, and only JMP goes backward. A breaks the meaning of
 bits 12:8 for one word and goes backward; B holds pc on a word that is not
@@ -157,8 +162,9 @@ tests get the same clause.
    compare on pc every cycle; not built.
 
 3. **A over C.** Same counter, same reach; C spends a second word per loop and
-   a select bit, and its 7-bit target caps programs at 128 words, or it takes
-   A's delay-bit trick anyway. C's one gain is that the LOAD floats: the
+   a select bit, and its 7-bit absolute target caps programs at 128 words, or
+   it takes A's delay-bit trick anyway; A's distance back caps the body at
+   255 words and the program at nothing. C's one gain is that the LOAD floats: the
    write's data count loads on the common path, harmlessly, on WAIT and
    FAULT too. A's cost is the one word whose bits 12:8 are not a delay; the
    suite says so 256 times.
@@ -189,18 +195,99 @@ tests get the same clause.
    not "eight": D cannot touch them, A and C fold the ACK's six words to
    three.
 
+## REPEAT, the spec
+
+The word, as isa.yaml would carry it:
+
+```
+  15 14 13 | 12 11 10 9 8 | 7 6 5 4 3 2 1 0
+   1  1  1 |   count - 1  |      back
+```
+
+`REPEAT count, label`: `count` 1..32 total runs of the body, held as
+`count - 1`; `back` 1..255, the body's length in words, the label being
+`back` words before the REPEAT. One cycle. No delay: bits 12:8 are the count.
+No side effect: no bits are left for one, and the assembler refuses one.
+
+The counter `rc`, six bits, is 0 while no loop is under way. It changes on
+the REPEAT's own cycle and at no other time: a REPEAT arriving with `rc` 0
+loads `count`; every arrival takes one off and sets pc to pc - back while
+the result is not 0, else to pc + 1. A body word stalling on a FIFO or a pin
+does nothing to `rc`; a delay does nothing to `rc`; a SKIP or JMP does
+nothing to `rc`. Reset and restart clear it, as they clear the delay
+counter; a slot change is a restart.
+
+Rules the assembler enforces, so that no machinery is spent on odd control
+flow: a body holds no REPEAT (no nesting, no overlapping bodies); a JMP in a
+body lands in it, from the label to the REPEAT; the body's last word is not
+a SKIP, which would step over the REPEAT; nothing outside jumps or skips into
+a body past its label. Entering a body at its label from outside is the
+ordinary entry: the SWD WAIT retry's `JMP request` does it, arriving with
+`rc` 0 because the loop before it finished. Outside the rules the hardware
+still does the one thing above with whatever `rc` holds, deterministically,
+and touches nothing else.
+
+The scheduling rule, for the program author: REPEAT costs a real cycle, so
+when a waveform is to be kept the cycle comes out of a delay next to it, and
+never from the word before a word that can stall (finding 2).
+
+Corners pinned in `tests/test_repeat_candidates.py`, each against the
+unrolled program under random outside worlds: count 1, 2 and 32; a one-word
+body; a 255-word body, the program then 256 words, and a 256-word body
+refused; a PULL as the body's first word and a PUSH as its last, both
+stalling again and again across 32 iterations with `rc` watched every cycle;
+restart at every cycle of a loop, and a slot change at every cycle; each
+assembler rule refused; what the rules allow (a SKIP landing on a label, two
+loops in a row) running as unrolled; no side-effect bits.
+
+## Cross-protocol applicability
+
+REPEAT spliced into every program in the ROM's manifest, the canonical
+programs untouched, each variant held to its canonical program in lockstep
+under ten random outside worlds (the same pins every cycle, the same bytes
+into the TX FIFO at random moments, the same pops), agreeing every cycle on
+the pins, the pads, the stall and both FIFOs.
+
+| program | canonical | with REPEAT | the cell |
+|---|---|---|---|
+| uart_tx_0x55 | 11 | 4 | a high and a low, five times |
+| uart_tx_pull | 11 | 5 | SHIFT_OUT, eight times |
+| uart_tx_loop | 12 | 6 | SHIFT_OUT, eight times |
+| uart_rx | 12 | 6 | SHIFT_IN, eight times |
+| spi_tx_lsb, spi_tx_msb | 21 | 8 | SHIFT_OUT and the clock |
+| spi_duplex_lsb, spi_duplex_msb | 22 | 9 | SHIFT_OUT and a sampling clock |
+| i2c_write | 34 | 14 | SHIFT_OUT, SCL up, SCL down, rotated |
+| i2c_write_stretch | 45 | 18 | the same with a WAIT inside the body |
+| i2c_write_addr_data | 64 | 24 | two bytes, the ACK decision between |
+| swd_read | 103 | 40 | request, ACK, four data bytes |
+| swd_write | 106 | 40 | the same, the PULL leading the body |
+| **the ROM's eleven** | **275** | **111** | |
+
+Four independently written protocol workloads, all with a bounded bit-cell
+repetition, and one control word compresses all of them without changing a
+cycle. The I²C cell had to be rotated (SHIFT_OUT, SCL up, SCL down) so the
+REPEAT's cycle comes from the clock's drop; the stretching variant keeps its
+WAIT inside the body and the count waits with it. The ROM's words folding
+from 275 to 111 is not the point, since the ROM already folds repeated words
+in synthesis; the point is that every program's repetition was the same
+thing.
+
 ## Not decided
 
-Which, if any, goes into the core. The next protocol should get a say: CAN or
-anything with a CRC would ask a different question. If a loop word is chosen,
-its ISA-definition tests are the ones that change, the adversarial suite's
-model of a word gets a clause for it, and the 103- and 106-word programs stay
-in `programs/` as the record of why.
+Which, if any, goes into the core. If A does, in this order: isa.yaml gets
+the word above and the ISA-definition tests their new contract; the
+adversarial suite's model of a word gets its clause (bits 12:8 are a count
+in one word; one word goes backward besides JMP); cpu.py gets the counter,
+core.v gets the counter and the subtract, and the RTL differential tests the
+same corners as above; the 103- and 106-word programs stay in `programs/` as
+the record of why. Opcode 111's accidental self-trap goes with it, which is
+convenient, not a reason.
 
 ## Files
 
 - `experiments/repeat/candidates.py`: the four models; `Candidate` is cpu.CPU's step written out with hooks
 - `experiments/repeat/swd_{read,write}_{A,C,D}.asm`: the splices, commented like the baseline
+- `experiments/repeat/<program>_A.asm`: REPEAT in the ROM's eleven programs
 - `experiments/repeat/uart_tx_{B,D}.asm`: where B applies
 - `experiments/repeat/plugin.py`, `suite.py`: the existing suite on a candidate's model
 - `tests/test_repeat_candidates.py`: the comparison, pinned
