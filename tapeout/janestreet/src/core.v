@@ -72,6 +72,12 @@ module core(
     assign is_skip    = (opcode == OP_SKIP);
     assign is_repeat  = (opcode == OP_REPEAT);
 
+    // run test: 000 in NOP's hole, side clear, operand[6:5] = 10, bit 4 = norun
+    wire is_run;
+    wire run_sense;
+    assign is_run    = is_nop_set && !side && (operand[6:5] == 2'b10);
+    assign run_sense = operand[4];
+
     // own decode
     wire       shift_select;
     wire       fifo_select;
@@ -139,6 +145,18 @@ module core(
     wire   skip_taken;
     assign skip_taken = is_skip && (in_shift_reg[skip_bit] == level);
 
+    // run test: newest n samples all the level, n - 1 in skip_bit
+    wire [7:0] newest;      // newest sample at bit 0 either direction
+    wire [7:0] run_mask;
+    wire       run_all;
+    wire       run_taken;
+    assign newest    = shift_dir ? in_shift_reg
+                                 : {in_shift_reg[0], in_shift_reg[1], in_shift_reg[2], in_shift_reg[3],
+                                    in_shift_reg[4], in_shift_reg[5], in_shift_reg[6], in_shift_reg[7]};
+    assign run_mask  = 8'hFF >> (3'd7 - skip_bit);
+    assign run_all   = (((newest ^ {8{level}}) & run_mask) == 8'd0);
+    assign run_taken = is_run && (run_sense ? !run_all : run_all);
+
     // repeat
     wire [4:0] rc_next;
     assign rc_next = (rc == 5'd0) ? delay : rc - 5'd1;
@@ -177,8 +195,8 @@ module core(
                 if (is_jmp) begin
                     pc <= {1'b0, operand};
                 end
-                else if (is_skip) begin
-                    pc <= pc + (skip_taken ? 9'd2 : 9'd1);
+                else if (is_skip || is_run) begin
+                    pc <= pc + ((skip_taken || run_taken) ? 9'd2 : 9'd1);
                 end
                 else if (is_repeat) begin
                     pc <= (rc_next != 5'd0) ? pc - {1'b0, operand} : pc + 9'd1;
