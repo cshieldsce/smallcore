@@ -2438,3 +2438,97 @@ async def can_data_frame_at_the_pins(dut):
         assert full[0] < sof + CAN_FRAME_BIT and full[-1] == sof + third * CAN_FRAME_BIT + CAN_FRAME_SAMPLE - 2, f"{ident:03x}: the FIFO full until the third PULL, then never: {full[-1] - sof} clocks after the SOF"
         assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.tx_fifo.empty.value) == 1
         assert int(dut.gpio_oe.value) & 1 == 0, "the bus let go at the halt"
+
+
+# CRC-4 on the current ISA (experiments/crc/crc4_lfsr.asm), the second of
+# the three CRC baselines: four host bytes out on pin 0 and back through the
+# pad, the register kept from its input end as a Fibonacci LFSR, the
+# feedback bit put on pin 1 by the parity's paths and sampled back, the
+# CRC-4 to the host in the low nibble of one byte. Both pins are push-pull
+# and read back: the bench feeds gpio_out[1:0] to gpio_in[1:0] every clock.
+
+EXPERIMENTS = PROGRAMS.parent / "experiments"
+
+
+def crc_bits(bits, poly, width):
+    """The spec's register over `bits`, any polynomial: shift, XOR the polynomial in when the bit in and the bit out differ."""
+    top, mask = 1 << (width - 1), (1 << width) - 1
+    c = 0
+    for bit in bits:
+        c = ((c << 1) & mask) ^ (poly if bit != (c & top) >> (width - 1) else 0)
+    return c
+
+
+async def readback(dut, pins, limit=600):
+    """The pads read back: on every falling edge gpio_in[pin] takes
+    gpio_out[pin] for each pin in `pins`, both push-pull, for the core's
+    next edge. Returns the pins' levels per clock and the pad enables, until
+    the core halts plus a few clocks."""
+    levels, enables = [], []
+    tail = 4
+    for _ in range(limit):
+        await FallingEdge(dut.clk)
+        out, oe = int(dut.gpio_out.value), int(dut.gpio_oe.value)
+        gpio_in = int(dut.gpio_in.value)
+        for pin in pins:
+            gpio_in = (gpio_in & ~(1 << pin)) | (((out >> pin) & 1) << pin)
+        dut.gpio_in.value = gpio_in
+        levels.append(tuple((out >> pin) & 1 for pin in pins))
+        enables.append(oe)
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if int(dut.core_i.halted.value):
+            tail -= 1
+            if tail == 0:
+                return levels, enables
+    raise AssertionError(f"core still running after {limit} clocks")
+
+
+@cocotb.test()
+async def crc4_lfsr_at_the_pins(dut):
+    """experiments/crc/crc4_lfsr.asm, twice: 0x5A 0x3A 0x00 0x5A and 0x12
+    0x34 0x56 0x78 from the host, the pads read back, the host reading one
+    byte whose low nibble is the CRC-4 of the 32 bits, x^4 + x + 1, 323 and
+    then the model's clocks from release to halt; pins 0 and 1 clock for
+    clock the model's under the same readback, both driven throughout, the
+    FIFOs empty at the halt."""
+    program = load_program(EXPERIMENTS / "crc" / "crc4_lfsr.asm")
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0
+    start_clock(dut)
+    await reset(dut)
+    imem = Imem(dut, program)
+    from cpu import CPU
+    for bytes_ in ((0x5A, 0x3A, 0x00, 0x5A), (0x12, 0x34, 0x56, 0x78)):
+        bits = [(byte >> i) & 1 for byte in bytes_ for i in range(7, -1, -1)]
+        await FallingEdge(dut.clk)
+        imem.load(program)
+        drive_host(dut, program_words=0)
+        dut.gpio_in.value = 0
+        await reset(dut)
+        received = []
+        for value in bytes_:
+            await FallingEdge(dut.clk)
+            dut.tx_data.value = value
+            dut.tx_push.value = 1
+        await FallingEdge(dut.clk)
+        dut.tx_push.value = 0
+        host = cocotb.start_soon(swd_host_drain(dut, received))
+        dut.program_words.value = len(program)
+        levels, enables = await readback(dut, (0, 1))
+        host.cancel()
+
+        cpu = CPU(program, tx_data=list(bytes_))
+        model = []
+        while not cpu.halted:
+            cpu.step()
+            model.append((cpu.gpio[0], cpu.gpio[1]))
+            cpu.gpio_in[0], cpu.gpio_in[1] = cpu.gpio[0], cpu.gpio[1]
+        start = len(levels) - 2 - len(model)
+        assert levels[start : start + len(model)] == model, f"{bytes_}: pins 0 and 1, clock for clock the model's"
+        assert all(oe & 0b11 == 0b11 for oe in enables), "both pins driven throughout"
+        assert received == [cpu.rx_fifo[0]] and received[0] & 0xF == crc_bits(bits, 0x3, 4), f"{bytes_}: the CRC-4 in the low nibble"
+        if bytes_ == (0x5A, 0x3A, 0x00, 0x5A):
+            assert cpu.cycle == 323
+        assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.tx_fifo.empty.value) == 1
