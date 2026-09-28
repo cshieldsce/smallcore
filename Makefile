@@ -1,5 +1,7 @@
 # Short names for the commands in the README. Each one is a plain command you can run by hand.
 PYTHON ?= python3
+SHELL := /bin/bash
+.SHELLFLAGS := -euo pipefail -c   # a recipe fails if any command in a pipe fails: `pytest | tee` cannot pass on tee's status
 
 .PHONY: test test-model test-rtl lint rom rom-check clean tapeout-sync tapeout-check
 
