@@ -102,6 +102,8 @@ python -m pytest tests/test_i2c.py -v               # I2C master write on a bus 
 python sim/cpu.py programs/swd_write.asm 0xA9      # SWD write: request, turnaround, ACK, turnaround back, branch on the ACK, on OK four data bytes and a parity byte; SWDIO on gpio 0, SWCLK on gpio 1 (the CLI holds inputs at 0: no ACK, the program exits)
 python sim/cpu.py programs/swd_read.asm 0x8D       # SWD read: on OK 32 data bits and the parity follow, six bytes to the host (the CLI holds inputs at 0: no ACK, the program exits)
 python -m pytest tests/test_swd.py -v               # SWD: a target on the wire decodes every request the host can make, answers OK, WAIT or FAULT, sends a word
+python -m pytest tests/test_repeat_candidates.py -v # the repeat candidates (experiments/repeat/) spliced into the SWD programs against the baseline, cycle for cycle
+python experiments/repeat/suite.py                  # the existing model suite run on each candidate's model: what each one disturbs
 python tools/render_docs.py                         # docs/*.mmd -> .svg (needs mermaid-cli)
 make lint                                           # verilator --lint-only -Wall -Wno-fatal rtl/core.v
 make test-rtl                                       # python -m pytest rtl_tests: Verilator builds core.v and top.v into build/rtl/, cocotb runs rtl_tests/*_tb.py
@@ -130,7 +132,7 @@ What the protocols have asked of the core, in order. Open items stay open until 
 | let go of a line: a third output state | I2C | `open_drain[3:0]`, one mode bit per pin: `gpio_oe[k] = !(open_drain[k] & gpio[k])`, an open-drain pin drives its 0 and lets go on a 1; the same words see the ACK and follow the stretch. `CONFIG open_drain01, 3` sets both I2C pins in one word: two 2-bit fields cover the four pins with CONFIG's shape unchanged, field 3 stays free |
 | wait for the clock to really rise | I2C clock stretching | `SET 1, 1` then `WAIT 1, 1 [2]`: the WAIT as built, one more word per clock |
 | act on the ACK: STOP after a NACK | I2C address + data | `SKIP bit, level`, pc + 2 when a bit of the input shift register holds the level: `SKIP 0, 0` then `JMP stop` after the ACK clock, from the register since SDA has let go by then. A conditional JMP on the last sample was one word shorter and could not pick the bit, the polarity or the word it guards; JMP keeps its 8-bit target |
-| compact repetition / bit count | SPI, 16 words per byte; I2C, 3 per bit | open |
+| compact repetition / bit count | SPI, 16 words per byte; I2C, 3 per bit; SWD, 64 of 103 and 106 words | open, the case made: four ways to say "again" spliced into the SWD programs on the model only, `docs/repeat-candidates.md`. A counted backward branch (A) or a load and a decrement-and-branch (C) take the read and the write to 40 or 43 words, cycle for cycle the same wire, and serve every cell shape in the repo; an eight-cell SHIFT (D) takes them to 33 and 36 with no new opcode but only where the cell is a shift and its clock; a one-word repeat (B) has nothing to repeat in SWD. Nothing decided, nothing in the core |
 | per-pin idle level | SPI, one `SET` for SCLK | open, not hurting yet |
 | configurable shift-output pin | SPI | open, fixed `gpio[0]` has not failed |
 | listen on a pad that is push-pull high at reset | the chip: `gpio_in` is the pad readback | one `CONFIG` word releases the pin, `uart_rx`, `spi_duplex_*`; the I²C programs already did |
@@ -171,5 +173,6 @@ From the big picture down to what the Verilog will look like:
 | `docs/control.svg` | the control block: inputs, equations, counter, enables |
 | `docs/states.svg` | the same block as per-cycle states: Issue, Hold, Stall, Halt |
 | `docs/physical-results.md` | cells, area, utilization and timing per RTL milestone from the Tiny Tapeout CMOS5L flow in `tapeout/janestreet/` |
+| `docs/repeat-candidates.md` | the repeat comparison: four candidate words for "again" against the SWD programs, on the model only; words, encoding, state, timing, stalls, restart, what each disturbs |
 
 Diagrams show only hardware that exists in `sim/cpu.py` and passes the tests.
