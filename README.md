@@ -1,6 +1,6 @@
 # core
 
-A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay, four output pins `gpio[3:0]`, each push-pull or open-drain, four input pins `gpio_in[3:0]`, an 8-bit output shift register fed by a TX FIFO, an 8-bit input shift register drained into an RX FIFO, a wait on an input level, a skip on a bit of the input shift register, and two pieces of configuration, `shift_dir` and `open_drain`. Ten mnemonics in seven opcodes, one free. The encoding is in `isa.yaml`.
+A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay, four output pins `gpio[3:0]`, each push-pull or open-drain, four input pins `gpio_in[3:0]`, an 8-bit output shift register fed by a TX FIFO, an 8-bit input shift register drained into an RX FIFO, a wait on an input level, a skip on a bit of the input shift register, a counted repeat of a run of words, and two pieces of configuration, `shift_dir` and `open_drain`. Eleven mnemonics in eight opcodes. The encoding is in `isa.yaml`.
 
 | instruction | does |
 |---|---|
@@ -13,9 +13,10 @@ A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay
 | `WAIT pin, level [d]` | stalls while gpio_in[pin] != level, a level not an edge |
 | `SKIP bit, level [d]` | steps over the next word if in_shift_reg[bit] == level: pc <- pc + 2 |
 | `JMP label [d]` | continue at label |
+| `REPEAT count, label` | back to label until the words from label to here have run count times, 1..32; one cycle, no `[d]`: bits 12:8 hold the count |
 | `CONFIG field, value [d]` | config[field] <- value: `shift_dir` 0 (reset) or 1, LSB or MSB first for both shift registers; `open_drain01` and `open_drain23`, a 2-bit mask for pins 1:0 or 3:2, 1 = open-drain |
 
-`[d]` holds for d extra cycles. Every instruction but `JMP` can take a GPIO side effect, `pin, value` after its own operands, that drives one more pin on the same edge as the operation: `SHIFT_OUT 1, 0` puts the next bit on MOSI and drops the clock, `SHIFT_IN 3, 1, 1` raises the clock and samples MISO, `PULL 2, 0` drops CS the moment a byte arrives, `PUSH 2, 1` raises it as the received byte leaves, and a WAIT's side effect lands on the cycle the level arrives. `SET` is the side effect on its own. The FIFOs are fed and drained from outside the core: by the test bench, the CLI, or the host register bus of `rtl/smallcore.v`, the chip, which also holds every program in a ROM (see Host interface).
+`[d]` holds for d extra cycles. Every instruction but `JMP` and `REPEAT` can take a GPIO side effect, `pin, value` after its own operands, that drives one more pin on the same edge as the operation: `SHIFT_OUT 1, 0` puts the next bit on MOSI and drops the clock, `SHIFT_IN 3, 1, 1` raises the clock and samples MISO, `PULL 2, 0` drops CS the moment a byte arrives, `PUSH 2, 1` raises it as the received byte leaves, and a WAIT's side effect lands on the cycle the level arrives. `SET` is the side effect on its own. The FIFOs are fed and drained from outside the core: by the test bench, the CLI, or the host register bus of `rtl/smallcore.v`, the chip, which also holds every program in a ROM (see Host interface).
 
 ```
 isa.yaml      instruction set: encoding, opcodes, operand ranges
@@ -102,6 +103,7 @@ python -m pytest tests/test_i2c.py -v               # I2C master write on a bus 
 python sim/cpu.py programs/swd_write.asm 0xA9      # SWD write: request, turnaround, ACK, turnaround back, branch on the ACK, on OK four data bytes and a parity byte; SWDIO on gpio 0, SWCLK on gpio 1 (the CLI holds inputs at 0: no ACK, the program exits)
 python sim/cpu.py programs/swd_read.asm 0x8D       # SWD read: on OK 32 data bits and the parity follow, six bytes to the host (the CLI holds inputs at 0: no ACK, the program exits)
 python -m pytest tests/test_swd.py -v               # SWD: a target on the wire decodes every request the host can make, answers OK, WAIT or FAULT, sends a word
+python -m pytest tests/test_repeat.py -v            # REPEAT on the model: count 1..32, one- and 255-word bodies, stalls in the body, restart every cycle, the assembler's rules, every program with REPEAT against its canonical one
 python -m pytest tests/test_repeat_candidates.py -v # the repeat candidates (experiments/repeat/) spliced into the SWD programs against the baseline, cycle for cycle
 python experiments/repeat/suite.py                  # the existing model suite run on each candidate's model: what each one disturbs
 python tools/render_docs.py                         # docs/*.mmd -> .svg (needs mermaid-cli)
@@ -132,7 +134,7 @@ What the protocols have asked of the core, in order. Open items stay open until 
 | let go of a line: a third output state | I2C | `open_drain[3:0]`, one mode bit per pin: `gpio_oe[k] = !(open_drain[k] & gpio[k])`, an open-drain pin drives its 0 and lets go on a 1; the same words see the ACK and follow the stretch. `CONFIG open_drain01, 3` sets both I2C pins in one word: two 2-bit fields cover the four pins with CONFIG's shape unchanged, field 3 stays free |
 | wait for the clock to really rise | I2C clock stretching | `SET 1, 1` then `WAIT 1, 1 [2]`: the WAIT as built, one more word per clock |
 | act on the ACK: STOP after a NACK | I2C address + data | `SKIP bit, level`, pc + 2 when a bit of the input shift register holds the level: `SKIP 0, 0` then `JMP stop` after the ACK clock, from the register since SDA has let go by then. A conditional JMP on the last sample was one word shorter and could not pick the bit, the polarity or the word it guards; JMP keeps its 8-bit target |
-| compact repetition / bit count | SPI, 16 words per byte; I2C, 3 per bit; SWD, 64 of 103 and 106 words | open, the case made: four ways to say "again" spliced into the SWD programs on the model only, `docs/repeat-candidates.md`. A counted backward branch (A) or a load and a decrement-and-branch (C) take the read and the write to 40 or 43 words, cycle for cycle the same wire, and serve every cell shape in the repo; an eight-cell SHIFT (D) takes them to 33 and 36 with no new opcode but only where the cell is a shift and its clock; a one-word repeat (B) has nothing to repeat in SWD. A spliced into the ROM's eleven programs, each held to its canonical program every cycle under random outside worlds: 275 words to 111. Nothing decided, nothing in the core |
+| compact repetition / bit count | SPI, 16 words per byte; I2C, 3 per bit; SWD, 89 of 103 and 90 of 106 words repeat an earlier word | `REPEAT count, label`, opcode 111, the last one: a counted backward branch, count - 1 in the delay bits, the distance back in the operand byte, a 5-bit counter that moves on the REPEAT's cycle only, so stalls and delays inside the body leave it alone. How it was chosen is the method on record: no loop word for four protocols, because their bit cells could be unrolled; SWD made the repetition measurable rather than assumed; four ways to say "again" compared on the model against the real programs, `docs/repeat-candidates.md` (A 40/40, C 43/43, D 33/36 words, B nothing); the smallest general one taken; then run backwards over every earlier protocol and found to serve each without moving a cycle, the ROM's 275 words to 111. In `isa.yaml` and the model with the corners pinned (`tests/test_repeat.py`); the RTL next; the 103- and 106-word programs stay as the record of why |
 | per-pin idle level | SPI, one `SET` for SCLK | open, not hurting yet |
 | configurable shift-output pin | SPI | open, fixed `gpio[0]` has not failed |
 | listen on a pad that is push-pull high at reset | the chip: `gpio_in` is the pad readback | one `CONFIG` word releases the pin, `uart_rx`, `spi_duplex_*`; the I²C programs already did |
@@ -173,6 +175,6 @@ From the big picture down to what the Verilog will look like:
 | `docs/control.svg` | the control block: inputs, equations, counter, enables |
 | `docs/states.svg` | the same block as per-cycle states: Issue, Hold, Stall, Halt |
 | `docs/physical-results.md` | cells, area, utilization and timing per RTL milestone from the Tiny Tapeout CMOS5L flow in `tapeout/janestreet/` |
-| `docs/repeat-candidates.md` | the repeat comparison: four candidate words for "again" against the SWD programs, on the model only; words, encoding, state, timing, stalls, restart, what each disturbs |
+| `docs/repeat-candidates.md` | the repeat comparison that chose REPEAT: four candidate words for "again" against the SWD programs, on the model only; words, encoding, state, timing, stalls, restart, what each disturbs; the spec; the outcome |
 
 Diagrams show only hardware that exists in `sim/cpu.py` and passes the tests.

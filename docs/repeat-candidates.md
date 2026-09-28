@@ -1,5 +1,12 @@
 # Repeat candidates against the SWD programs
 
+**Outcome (2026-09-27): A adopted.** `REPEAT count, label` is opcode 111 in
+`isa.yaml`, the counter `rc` is in `sim/cpu.py`, the rules are the
+assembler's (`cpu.check_bodies`), and the corners below are pinned on the
+model itself in `tests/test_repeat.py`. One correction to the spec as first
+written: `rc` holds the runs still to go after a REPEAT commits, at most 31,
+so it is five bits, not six. The comparison below is left as it was made.
+
 SWD made one architectural complaint (README, "SWD by the numbers"): the same
 two-word bit cell, a shift and its clock edge, 32 times over. 64 of the read's
 103 words and of the write's 106 are the data bits; 89 and 90 words repeat an
@@ -83,7 +90,7 @@ PUSHes and PULLs happen at the same cycles.
 
 | | new opcode | operand bits | other bits | state | words per loop | cycles per iteration |
 |---|---|---|---|---|---|---|
-| A | 111 | back, 8: pc - back | bits 12:8 are count - 1, not a delay | 6-bit counter | 1 | 1, taken from a delay |
+| A | 111 | back, 8: pc - back | bits 12:8 are count - 1, not a delay | 5-bit counter | 1 | 1, taken from a delay |
 | B | 111 | count, 5 | delay bits unused | 5-bit counter | 1 | 0; 1 once |
 | C | 111, two forms on operand bit 7 | LOAD count 5; DJNZ target 7 | delay as ever | 5-bit counter | 2 | 1, taken from a delay |
 | D | none: bit 0 of the SHIFT word | as SHIFT | delay as ever, the half period | 3-bit cell counter, 1-bit half | 0 | 0 |
@@ -209,10 +216,13 @@ The word, as isa.yaml would carry it:
 `back` words before the REPEAT. One cycle. No delay: bits 12:8 are the count.
 No side effect: no bits are left for one, and the assembler refuses one.
 
-The counter `rc`, six bits, is 0 while no loop is under way. It changes on
+The counter `rc`, five bits, is 0 while no loop is under way. It changes on
 the REPEAT's own cycle and at no other time: a REPEAT arriving with `rc` 0
-loads `count`; every arrival takes one off and sets pc to pc - back while
-the result is not 0, else to pc + 1. A body word stalling on a FIFO or a pin
+loads `count - 1`, the runs still to go; every other arrival takes one off;
+pc goes to pc - back while the result is not 0, else to pc + 1. (As first
+written this said six bits and "loads count, takes one off": the same thing
+one step later, and the register never holds the 32.) A back past word 0
+wraps the nine-bit pc past the end, halted; the assembler never writes one. A body word stalling on a FIFO or a pin
 does nothing to `rc`; a delay does nothing to `rc`; a SKIP or JMP does
 nothing to `rc`. Reset and restart clear it, as they clear the delay
 counter; a slot change is a restart.
@@ -231,8 +241,9 @@ The scheduling rule, for the program author: REPEAT costs a real cycle, so
 when a waveform is to be kept the cycle comes out of a delay next to it, and
 never from the word before a word that can stall (finding 2).
 
-Corners pinned in `tests/test_repeat_candidates.py`, each against the
-unrolled program under random outside worlds: count 1, 2 and 32; a one-word
+Corners pinned in `tests/test_repeat_candidates.py` on the candidate and in
+`tests/test_repeat.py` on the model, each against the unrolled program under
+random outside worlds: count 1, 2 and 32; a one-word
 body; a 255-word body, the program then 256 words, and a 256-word body
 refused; a PULL as the body's first word and a PUSH as its last, both
 stalling again and again across 32 iterations with `rc` watched every cycle;
@@ -272,16 +283,25 @@ from 275 to 111 is not the point, since the ROM already folds repeated words
 in synthesis; the point is that every program's repetition was the same
 thing.
 
-## Not decided
+## Decided
 
-Which, if any, goes into the core. If A does, in this order: isa.yaml gets
-the word above and the ISA-definition tests their new contract; the
-adversarial suite's model of a word gets its clause (bits 12:8 are a count
-in one word; one word goes backward besides JMP); cpu.py gets the counter,
-core.v gets the counter and the subtract, and the RTL differential tests the
-same corners as above; the 103- and 106-word programs stay in `programs/` as
-the record of why. Opcode 111's accidental self-trap goes with it, which is
-convenient, not a reason.
+A, in this order: isa.yaml got the word above and the ISA-definition tests
+their new contract; the adversarial suite's model of a word got its clause
+(bits 12:8 are a count in one word; one word goes backward besides JMP; a
+REPEAT is its body count times over with a cycle between); cpu.py got the
+counter and the assembler the rules; core.v gets the counter and the
+subtract next, with the RTL differential tests on the same corners; the
+103- and 106-word programs stay in `programs/` as the record of why. Opcode
+111's accidental self-trap went with it, which is convenient, not a reason.
+
+For the record, how the word came to be: the core had no loop, and did not
+need one while UART, SPI and I²C could be written by unrolling their bit
+cells. SWD pushed that far enough to measure it, 89 and 90 of 103 and 106
+words repeating an earlier one, rather than to assume loops would help. Four
+ways to say "again" were compared on the model against the real programs;
+the smallest general one was taken; then it was run backwards over every
+earlier protocol and found to serve each without moving a cycle. The
+protocol-driven method, doing what it was meant to do.
 
 ## Files
 
@@ -290,4 +310,5 @@ convenient, not a reason.
 - `experiments/repeat/<program>_A.asm`: REPEAT in the ROM's eleven programs
 - `experiments/repeat/uart_tx_{B,D}.asm`: where B applies
 - `experiments/repeat/plugin.py`, `suite.py`: the existing suite on a candidate's model
-- `tests/test_repeat_candidates.py`: the comparison, pinned
+- `tests/test_repeat_candidates.py`: the comparison, pinned, on the candidates' models
+- `tests/test_repeat.py`: REPEAT's corners on the model itself, and every variant against its canonical program

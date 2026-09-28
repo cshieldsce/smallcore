@@ -14,6 +14,7 @@ flowchart-elk LR
   WAIT -->|"gpio_in[i] != v: stall,<br/>everything holds"| WAIT
   OP -->|110| SKIP["<b>SKIP b, v [p, l] [d]</b><br/>reads in_shift_reg[b]<br/>pins, registers unchanged<br/>takes 1 + d cycles"]
   OP -->|011| JMP["<b>JMP target [d]</b><br/>pins, registers unchanged<br/>no side effect<br/>takes 1 + d cycles"]
+  OP -->|111| REP["<b>REPEAT count, label</b><br/>rc == 0 ? rc ← count − 1 : rc ← rc − 1<br/>(rc moves on no other cycle)<br/>pins, registers unchanged<br/>no side effect, no delay<br/>takes 1 cycle"]
   PULL --> NEXT["PC ← PC + 1"]
   PUSH --> NEXT
   NOP --> NEXT
@@ -24,10 +25,12 @@ flowchart-elk LR
   WAIT --> NEXT
   JMP --> JNEXT["PC ← target"]
   SKIP --> SNEXT["in_shift_reg[b] == v ?<br/>PC ← PC + 2 : PC + 1"]
-  HALT ~~~ SIDE["<b>side effect</b> [p, l]<br/>on every instruction but JMP:<br/>gpio[p] ← l on the first cycle,<br/>the same edge as the operation<br/>(after any stall)"]
+  REP --> RNEXT["rc != 0 ?<br/>PC ← PC − back : PC + 1"]
+  HALT ~~~ SIDE["<b>side effect</b> [p, l]<br/>on every instruction but JMP and REPEAT:<br/>gpio[p] ← l on the first cycle,<br/>the same edge as the operation<br/>(after any stall)"]
   NEXT --> END{"PC past last<br/>instruction?"}
   JNEXT --> END
   SNEXT --> END
+  RNEXT --> END
   END -->|no| W
   END -->|yes| HALT(["halt<br/>pins keep their levels"])
   style SIDE fill:#fff4d6,stroke:#c49a2a
