@@ -78,6 +78,22 @@ module core(
     assign is_run    = is_nop_set && !side && (operand[6:5] == 2'b10);
     assign run_sense = operand[4];
 
+    // accumulator: 000 in NOP's hole, side clear, operand[6:5] = 01, kind in 4:2, pin in 1:0
+    wire       is_acc;
+    wire [1:0] acc_pin;
+    wire       is_acc_in;
+    wire       is_acc_crc;
+    wire       is_acc_out;
+    wire       is_acc_push;
+    wire       is_acc_load;
+    assign is_acc      = is_nop_set && !side && (operand[6:5] == 2'b01);
+    assign acc_pin     = operand[1:0];
+    assign is_acc_in   = is_acc && (operand[4:2] == 3'b000);
+    assign is_acc_crc  = is_acc && (operand[4:2] == 3'b001);
+    assign is_acc_out  = is_acc && (operand[4:2] == 3'b010);
+    assign is_acc_push = is_acc && (operand[4:0] == 5'b01100);
+    assign is_acc_load = is_acc && (operand[4:0] == 5'b10000);
+
     // own decode
     wire       shift_select;
     wire       fifo_select;
@@ -106,6 +122,7 @@ module core(
         issue &&
         (
             (is_fifo && (fifo_select ? rx_full : tx_empty)) ||
+            (is_acc_push && rx_full) ||
             (is_wait && (gpio_in[input_pin] != level))
         );
 
@@ -157,6 +174,16 @@ module core(
     assign run_all   = (((newest ^ {8{level}}) & run_mask) == 8'd0);
     assign run_taken = is_run && (run_sense ? !run_all : run_all);
 
+    // accumulator
+    reg  [15:0] acc;
+    reg  [15:0] poly;
+    wire        acc_bit;
+    wire        acc_feedback;
+    wire        acc_en;
+    assign acc_bit      = gpio_in[acc_pin];
+    assign acc_feedback = is_acc_crc && (acc[15] ^ acc_bit);
+    assign acc_en       = issue && !stall;
+
     // repeat
     wire [4:0] rc_next;
     assign rc_next = (rc == 5'd0) ? delay : rc - 5'd1;
@@ -165,8 +192,8 @@ module core(
     assign pull_en = issue && is_fifo && !fifo_select && !tx_empty;
 
     // push
-    assign rx_data = in_shift_reg;
-    assign push_en = issue && is_fifo && fifo_select && !rx_full;
+    assign rx_data = is_acc_push ? acc[7:0] : in_shift_reg;
+    assign push_en = issue && ((is_fifo && fifo_select) || is_acc_push) && !rx_full;
 
     always @(posedge clk) begin
         if (reset) begin            
@@ -179,6 +206,8 @@ module core(
             open_drain    <= 4'b0000;
             shift_reg     <= 8'd0;
             in_shift_reg  <= 8'd0;
+            acc           <= 16'd0;
+            poly          <= 16'd0;
 
         end
         else begin
@@ -257,6 +286,26 @@ module core(
             // Pull
             if (pull_en) begin
                 shift_reg <= tx_data;
+            end
+
+            // Accumulator
+            if (acc_en) begin
+                if (is_acc_in) begin
+                    acc <= {acc[14:0], acc_bit};
+                end
+                else if (is_acc_crc) begin
+                    acc <= {acc[14:0], 1'b0} ^ (acc_feedback ? poly : 16'd0);
+                end
+                else if (is_acc_out) begin
+                    gpio_out[acc_pin] <= acc[15];
+                    acc               <= {acc[14:0], 1'b0};
+                end
+                else if (is_acc_push) begin
+                    acc <= {8'd0, acc[15:8]};
+                end
+                else if (is_acc_load) begin
+                    poly <= {shift_reg, poly[15:8]};
+                end
             end
         end
     end

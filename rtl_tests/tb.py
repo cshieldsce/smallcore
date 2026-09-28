@@ -100,6 +100,8 @@ def rtl_state(dut):
         "gpio_oe": gpio_bits(dut.gpio_oe.value),
         "shift_reg": int(dut.shift_reg.value),
         "in_shift_reg": int(dut.in_shift_reg.value),
+        "acc": int(dut.acc.value),
+        "poly": int(dut.poly.value),
     }
 
 
@@ -115,6 +117,8 @@ def model_state(cpu):
         "gpio_oe": list(cpu.gpio_oe),
         "shift_reg": cpu.shift_reg,
         "in_shift_reg": cpu.in_shift_reg,
+        "acc": cpu.acc,
+        "poly": cpu.poly,
     }
 
 
