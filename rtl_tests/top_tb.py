@@ -2532,3 +2532,155 @@ async def crc4_lfsr_at_the_pins(dut):
         if bytes_ == (0x5A, 0x3A, 0x00, 0x5A):
             assert cpu.cycle == 323
         assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.tx_fifo.empty.value) == 1
+
+
+# CAN receive: the bench is a transmitter on the bus and the node under test
+# listens on gpio_in[0], its pad let go but for the ACK slot. RX2
+# (can_rx.asm): the SOF's edge by WAIT, 48 raw bits at 8 clocks a bit to the
+# host as six bytes. RX3 to RX5 (can_rx_destuff.asm): after every sample the
+# stuffing tree asks whether the last five were one level, the stuff bit is
+# sampled into the raw history and marked not data, the destuffed stream
+# leaves on pins 2 (the bit) and 3 (the slot is data), 42 data bits are
+# counted and the ACK slot pulled dominant, at 8 clocks a bit throughout.
+
+CAN_RX_SAMPLE = 6  # the clock of a bit whose level the receivers take: the sixth
+CAN_RX_AT = 10  # the bench transmitter's first clock, from the bus's start
+
+
+class CanTransmitter:
+    """tests/test_can_rx.py's Transmitter, inlined: from update call `at` it
+    drives `bits` in turn, each for CAN_BIT clocks, a 0 driven and a 1 let
+    go; `slot` is the ACK slot, not driven, its level on its sixth clock
+    kept as `acked`."""
+
+    def __init__(self, bits, at=CAN_RX_AT, slot=None):
+        self.bits, self.at, self.slot = list(bits), at, slot
+        self.i = -1
+        self.acked = None
+
+    def update(self, line):
+        self.i += 1
+        k, phase = divmod(self.i - self.at, CAN_BIT)
+        if k == self.slot and phase == CAN_RX_SAMPLE:
+            self.acked = line == 0
+        return 0 if 0 <= k < len(self.bits) and self.bits[k] == 0 and k != self.slot else None
+
+
+def can_frame_on_the_bus(ident, data):
+    """The stuffed stream, the CRC delimiter, the ACK slot, its delimiter, EOF and the intermission; the slot's index."""
+    bits = can_stuffed(can_frame_bits(ident, data)) + [1, 1, 1] + [1] * CAN_GAP
+    return bits, len(bits) - CAN_GAP - 2
+
+
+async def pin_log(dut, log):
+    """One entry per falling edge of clk, gpio_out, indexed like can_bus's lists when started on the same edge. Runs until cancelled."""
+    while True:
+        await FallingEdge(dut.clk)
+        log.append(int(dut.gpio_out.value))
+
+
+async def can_receive(dut, program, bits, slot, cycles):
+    """`program` on top.v listening to a CanTransmitter sending `bits`; the
+    bus, the pad enables, gpio_out per clock and the host's bytes; and the
+    model on the same bus, tests/test_can_rx.py's bench inlined: its bus,
+    its pad enables, its pins and its bytes."""
+    await FallingEdge(dut.clk)
+    Imem(dut, program).load(program)
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    await reset(dut)
+    await FallingEdge(dut.clk)
+    received, outs = [], []
+    host = cocotb.start_soon(swd_host_drain(dut, received))
+    logger = cocotb.start_soon(pin_log(dut, outs))
+    tx = CanTransmitter(bits, slot=slot)
+    dut.program_words.value = len(program)
+    bus, pad_drives, _ = await can_bus(dut, [tx], limit=cycles)
+    host.cancel()
+    logger.cancel()
+
+    from cpu import CPU
+    cpu = CPU(program, gpio_in=1)
+    model_tx = CanTransmitter(bits, slot=slot)
+    model_bus, model_drives, model_received, line = [], [], [], 1
+    while not cpu.halted and cpu.cycle < cycles:
+        cpu.step()
+        drive = model_tx.update(line)
+        driving = cpu.gpio_oe[CAN_TX] == 1
+        pad = cpu.gpio[CAN_TX] if driving else None
+        line = 0 if pad == 0 or drive == 0 else 1
+        cpu.gpio_in[CAN_TX] = line
+        model_bus.append(line)
+        model_drives.append(int(driving))
+        if cpu.rx_fifo:
+            model_received.append(cpu.rx_fifo.pop(0))
+    assert cpu.halted and tx.acked == model_tx.acked
+    return bus, pad_drives, outs, received, cpu, model_bus, model_drives, model_received, tx
+
+
+@cocotb.test()
+async def can_raw_bits_to_the_host_at_the_pins(dut):
+    """programs/can_rx.asm with the bench transmitter sending 0x5A3 carrying
+    0x5A: the host reads six bytes, the bus from the SOF as it was, the SOF
+    bit 7 of the first, the two stuff bits among them; the pad never
+    drives; the bus, the pad enable and the bytes clock for clock the
+    model's."""
+    program = load_program(PROGRAMS / "can_rx.asm")
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    start_clock(dut)
+    await reset(dut)
+    bits, slot = can_frame_on_the_bus(0x5A3, [0x5A])
+    bus, pad_drives, outs, received, cpu, model_bus, model_drives, model_received, tx = await can_receive(dut, program, bits, slot, 700)
+    sof = bus.index(0)
+    start = sof - model_bus.index(0)
+    assert bus[start : start + len(model_bus)] == model_bus, "the bus, clock for clock the model's"
+    assert pad_drives[start : start + len(model_drives)] == model_drives and not any(model_drives), "the pad never drives"
+    padded = bits + [1] * (48 - len(bits))
+    assert received == model_received == [sum(bit << (7 - i) for i, bit in enumerate(padded[8 * k : 8 * k + 8])) for k in range(6)]
+    assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1
+
+
+@cocotb.test()
+async def can_destuffed_stream_to_the_pins_and_the_ack(dut):
+    """programs/can_rx_destuff.asm with the bench transmitter sending 0x5A3
+    carrying 0x5A and then 0x7FF carrying 0xFF, five stuff bits: on pins 2
+    and 3, read at the sixth clock of the bit after each bus bit, the data
+    bit where the slot was data and the flag low exactly at the stuff
+    bits, the stream the frame's 42 bits; the ACK slot pulled dominant, the
+    pad on the bus for that bit alone, the transmitter seeing the ACK; the
+    host reading the last eight raw samples; the bus, the pad enable, pins
+    2 and 3 and the byte clock for clock the model's; 8 clocks a bit."""
+    program = load_program(PROGRAMS / "can_rx_destuff.asm")
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    start_clock(dut)
+    await reset(dut)
+    for ident, data in ((0x5A3, 0x5A), (0x7FF, 0xFF)):
+        bits, slot = can_frame_on_the_bus(ident, [data])
+        bus, pad_drives, outs, received, cpu, model_bus, model_drives, model_received, tx = await can_receive(dut, program, bits, slot, 800)
+        sof = bus.index(0)
+        start = sof - model_bus.index(0)
+        assert bus[start : start + len(model_bus)] == model_bus, f"{ident:03x}: the bus, clock for clock the model's"
+        assert pad_drives[start : start + len(model_drives)] == model_drives, f"{ident:03x}: the pad enable, clock for clock the model's"
+        pins = [((out >> 2) & 1, (out >> 3) & 1) for out in outs[start : start + len(cpu.trace)]]
+        assert pins == [(levels[2], levels[3]) for levels in cpu.trace], f"{ident:03x}: pins 2 and 3, clock for clock the model's"
+        stream = [pins[sof - start + (k + 1) * CAN_BIT + CAN_RX_SAMPLE - 1] for k in range(slot - 1)]
+        assert [d for d, v in stream if v] == can_frame_bits(ident, [data]), f"{ident:03x}: the destuffed stream on the pins"
+        stuffed_bits, k, stuff_slots = can_frame_bits(ident, [data]), 0, []
+        level, count = None, 0
+        for bit in stuffed_bits:
+            level, count = (level, count + 1) if bit == level else (bit, 1)
+            k += 1
+            if count == 5:
+                stuff_slots.append(k)
+                k += 1
+                level, count = 1 - bit, 1
+        assert [i for i, (d, v) in enumerate(stream) if not v] == stuff_slots, f"{ident:03x}: the stuff slots flagged"
+        ack = slice(sof + slot * CAN_BIT, sof + (slot + 1) * CAN_BIT)
+        assert pad_drives[ack] == [1] * CAN_BIT and bus[ack] == [0] * CAN_BIT and tx.acked, f"{ident:03x}: the ACK slot pulled dominant"
+        assert sum(pad_drives) == CAN_BIT, "the pad on the bus for the slot alone"
+        assert received == model_received == [sum(bit << (7 - i) for i, bit in enumerate(bits[slot - 8 : slot]))]
+        assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.gpio_oe.value) & 1 == 0
