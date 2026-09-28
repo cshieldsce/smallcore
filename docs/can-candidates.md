@@ -4,7 +4,9 @@
 `SKIP_NORUN n, level`, the run test over `in_shift_reg`, earned by the two
 sides of CAN asking the same question ("Decided", below); B, Bc and D
 rejected; REPEAT untouched; A held for one more measurement, the FIFO
-receiver, whose dominant path is exactly the cycle A saves. This is the comparison, on the model only, for the architecture
+receiver, whose dominant path is exactly the cycle A saves, and then, that
+measurement made, **A rejected** for the current ISA (2026-09-28, below).
+This is the comparison, on the model only, for the architecture
 review; nothing in `isa.yaml`, `sim/cpu.py` or the RTL changes, and the four
 CAN programs stay as written: `can_tx.asm` 13 words, `can_tx_arb.asm` 95,
 `can_tx_ack.asm` 21, `can_tx_stuff.asm` 224.
@@ -354,7 +356,7 @@ and the 95- and 224-word programs stay as the record of why.
 | D, the run counter | no: dominated by C |
 | B, SHIFT_SENT | no: the sent bit as a sample, from one pin, with the 95 words unchanged |
 | a second stream register | not a candidate yet, but the pressure RX and CRC share: two workloads now need two mutable histories at once, the CRC's register beside its input and the raw stuff history beside the destuffed data. Carried forward on the README's inventory; the CRC candidate round comes first |
-| A, BRANCH | one measurement short (2026-09-28, after RX). RX found the same SKIP, JMP, pad shape, and its FIFO form is nine clocks a bit because the dominant tree's longest path is one cycle too long for the PUSH: exactly A's cycle. The splice below says whether A turns that receiver into an eight-clock one; if it does, A's evidence is arbitration's symmetric decision, stuffing's control-flow share, RX's FIFO form, SWD's and I²C's ACK, and it probably earns itself; if not, held through the CRC and combined-frame work |
+| A, BRANCH | **rejected for the current ISA (2026-09-28, after the last measurement).** Not a bad word: a symmetric one-cycle branch, no state, rejected encodings only, and it serves CAN arbitration (95 to 84 words, 34 distinct to 15, the decision 3 cycles to 2, the sample at 62.5% for 50%) and the ACK decisions of SWD (103 to 102) and I²C (64 to 63). But its strongest remaining case was the FIFO receiver, nine clocks a bit for the want of exactly its cycle, and C, adopted, makes that receiver an eight-clock one too, in 27 words to A's 47 (`experiments/can/can_rx_bits_A.asm`, `tests/test_can_rx_branch.py`). After C, A enables no workload and removes no measured limit: arbitration already runs at 8 clocks a bit without it, SWD's target waits on SWCLK, I²C's ACK does not care. A nicer generic branch is not enough under the method. The candidate and its evidence stay in `experiments/can/`; a later protocol can reopen it |
 | Bc, SKIP_SENT | rejected (2026-09-28, after RX): it never grew beyond arbitration. It saves a readback sample where a real node has TXD and RXD anyway, and RX gave it no second use |
 | C, the run test | **adopted (2026-09-28, after RX).** Two sides of CAN, built independently, ask the same five-bit question over state the core already owns: TX stuffing, where the run test takes the bit from 16 clocks to 8 and about halves the loop form; RX de-stuffing, where the same predicate cuts the cell from 23 words to about 12 though the timing already fits. A reusable predicate over `in_shift_reg`, no new state, rejected encodings only, and it presses on the 256-word capacity too. The ugly TX and RX baselines stay as the evidence, as SWD's 103 and 106 words did |
 
@@ -427,7 +429,7 @@ the SKIP's pc mux; nothing else touched.
 - `experiments/can/can_tx_stuff_loop.asm`: today's ISA, the cell a REPEAT body: the correction
 - `experiments/can/can_tx_stuff_{A,C,AC,D,AD}.asm` and `_loop`: stuffing, written out and as bodies
 - `experiments/can/plugin.py`, `suite.py`: the existing suite on a candidate's model
-- `tests/test_can_candidates.py`: the comparison, pinned, on the candidates' models; and the FIFO receiver with A, the one measurement A was short of
-- `experiments/can/can_rx_bits_A.asm`: can_rx_bits.asm with BRANCH, 8 clocks a bit for 9, 47 words for 57
+- `tests/test_can_candidates.py`: the comparison, pinned, on the candidates' models
+- `experiments/can/can_rx_bits_A.asm`, `tests/test_can_rx_branch.py`: can_rx_bits.asm with BRANCH, 8 clocks a bit for 9, 47 words for 57, the measurement A was short of and the one that closed it
 - `experiments/can/can_rx_destuff_C.asm`, `can_rx_bits_C.asm`: the receivers with the run test, on the ISA as it is now
 - `tests/test_skip_run.py`: the run test pinned on the model, and the C forms of the transmitter and the receiver on it
