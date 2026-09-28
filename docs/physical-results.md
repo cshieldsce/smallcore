@@ -14,6 +14,7 @@ Measured numbers from the Tiny Tapeout IHP CMOS5L flow in `tapeout/janestreet/`,
 | + FIFO interface | – | | | | | | |
 | + FIFO storage (top: core + TX/RX FIFOs, DEPTH 4), Baseline v1 | 695 | 991 | 16,571 µm² | 1.84% | +10.86 ns | +0.14 ns | 2026-09-26 |
 | + program memory/interface (`smallcore`: host + ROM + top, real pinout), Peripheral v1 | 1,010 | 1,334 | 20,249 µm² | 2.24% | +10.15 ns | +0.11 ns | 2026-09-27 |
+| + REPEAT, run test, accumulator; ROM slots 12..15, Protocol Engine v2 | 1,894 | 2,403 | 31,759 µm² | 3.52% | +7.20 ns | +0.11 ns | 2026-09-28 |
 | final | | | | | | | |
 
 Columns, all from `runs/wokwi/final/metrics.csv` unless noted:
@@ -35,6 +36,7 @@ Where the cells go, one row per milestone, appended as they land. Yosys + abc ag
 | RTL-0 control | 98 | 1,517 µm² | 14 | – | – | – | 98 | 1,517 µm² | 161 | – | – | 2026-09-25 |
 | + FIFO storage (2 × DEPTH 4) | 310 | 4,380 µm² | 39 | 257 | 6,630 µm² | 82 | 567 | 11,010 µm² | 695 | 11,948 µm² | `f795664` | 2026-09-26 |
 | + program memory/interface (`smallcore`: host + ROM + top) | 312 | 4,420 µm² | 39 | 236 | 6,608 µm² | 82 | 548 | 11,028 µm² | 1,010 | 15,372 µm² | `132fe20` | 2026-09-27 |
+| + REPEAT, run test, accumulator; ROM slots 12..15 (Protocol Engine v2) | 719 | 9,772 µm² | 76 | 246 | 6,530 µm² | 82 | 965 | 16,302 µm² | 1,894 | 25,268 µm² | `85d9380` | 2026-09-28 |
 
 - Core: `make synth`, `core` alone.
 - FIFO: `top` minus `core`, both FIFOs together. Derived, since the two are flattened into one netlist.
@@ -86,6 +88,31 @@ Commit `132fe20`: `rtl/smallcore.v`, the chip: `host.v` (a four-register bus, st
 - Budget: 1,010 synth cells is about 4% of the ~24K guidance for 6x4. The program library is not what fills the tile.
 - This run is the first with the real pinout, so hold-fix and pin counts from here on compare with this row, not with v1's provisional wrapper.
 - After this harden, review fixes added two AND gates in `top.v` (the FIFO pop and push are held off on a restart's clock) and eight in `host.v` (RX_DATA reads 0 while empty). Not re-hardened by hand; the CI run for that push has the numbers, a handful of cells over this row.
+
+## Protocol Engine v2 notes
+
+Commit `85d9380`: the core with REPEAT (`cd91c7c`), the run test, SKIP_RUN and SKIP_NORUN (`f4c205f`), and the accumulator, a second stream register with optional LFSR feedback (`543f55d`); and the ROM's last four slots taken so the chip carries programs that use them: 12 the SWD read in REPEAT form, 13 CAN stage 6A (the whole data frame, stuffing by the run test, the CRC in the accumulator, 8 clocks a bit), 14 the CAN receiver with the CRC in the core, 15 the destuffing receiver on the accumulator. Every instruction the ISA has is in the ROM but SKIP_RUN, which no program uses (`tests/test_rom_slots.py`).
+
+- **A fixed ROM is everything the chip can fetch, and synthesis keeps only what those words reach.** Measured: CI run 36466255523 (`35ea2da`, REPEAT and the run test in `core.v`, the ROM still slots 1..11, none of whose words is a REPEAT or a run test) synthesized to 1,009 cells, 15,509 µm², and routed to 1,340 cells, 20,454 µm², against Peripheral v1's 1,010 and 1,334. The 145 cells the two features cost the core alone were pruned out of the chip. That run is a valid chip, but it does not measure the architecture; this row does, as far as the ROM's programs reach.
+- Core alone, `make synth` on `core.v` at each architectural commit, the instruction word an input so nothing is pruned:
+
+  | core.v at | cells | area | flops |
+  |---|---|---|---|
+  | v1.1, `5b21506` | 312 | 4,420 µm² | 39 |
+  | + REPEAT, `cd91c7c` | 434 | 5,815 µm² | 44 |
+  | + SKIP_RUN, `f4c205f` | 457 | 6,150 µm² | 44 |
+  | + accumulator, `543f55d` | 719 | 9,772 µm² | 76 |
+
+  REPEAT is 122 cells and 1,395 µm²: rc's five flops, its decrement and zero test, and a 9-bit subtract into the pc. The run test is 23 cells and 335 µm²: a turn of the register, a mask and a compare, no state. The accumulator is 262 cells and 3,622 µm²: 32 flops, acc and poly, about 1,570 µm² of it, and the rest the acc input mux over five sources, the sixteen XORs, poly's load and the push mux onto the RX FIFO's port. The 37 new flops are exactly rc, acc and poly.
+- `top` 965 cells, 16,302 µm², 158 flops: the FIFOs are 246 cells as before. `smallcore` 1,709 cells, 24,185 µm², 176 flops; the wrapper 1,724 cells. The host block and the ROM are now 744 cells, 7,883 µm², against 295 and 3,113: the four new programs, 319 words, repeat far less than SPI and I²C did, so Yosys folds them less, about 1.4 cells a word. The ROM is now as big as the accumulator and the run test together.
+- Harden: CI run 36480996749 on `85d9380`, tapeout-gds workflow, precheck green. Flow synth 1,894 cells, 25,268 µm², from `06-yosys-synthesis/reports/stat.rpt`: 176 tie-high, one per flop, and 8 tie-low as before, so the wrapper's 1,724 under the quick script plus the ties. v1.1 was 1,010: +884 cells, of which the core's new logic is about 407, the ROM's new words about 449, the rest ties for the 38 new flops.
+- Routed: 2,403 cells, 31,759 µm², 3.52% of the 6x4 core, +1,069 cells and +11,510 µm² over v1.1. Zero routing DRC, Magic DRC, antenna and LVS errors, no setup or hold violations at any corner.
+- **First row with slew violations: 26 at the slow corner, none at typ or fast.** Three nets, each a NOR3 or NOR4 of the fetch address (`imem_addr`, the pc, through its fanout buffers) that the ROM's `{sel, addr}` decode shares out to a dozen gates: `_1900_` and `_1906_` 2.80 ns and 2.68 ns against the 2.51 ns limit, `_1949_` 2.55 ns. Nine, eight and nine pins, so 26, all on `_1` cells. Signoff does not fail on slew and timing is met with the degraded edges; this flow repairs design rules once, after global placement (step 32), and nothing after routing. They are the ROM's address minterms, so the pressure is the library's size, not the core's logic.
+- The one max-fanout violation, `clkbuf_0_clk` driving 16 against a limit of 8, is the clock tree's root buffer and was there in CI run 36466255523 as well; not new, and not in the notes before because earlier rows did not look.
+- Routed minus synth is 509: 224 `dlygate4sd3_1` hold fixes (v1.1 had 192, same pins), 215 `buf_1` in the netlist against v1.1's 73, and the clock tree over 176 flops.
+- Timing per corner: setup +7.20 ns slow, +10.74 typ, +11.09 fast; hold +0.11 fast, +0.33 typ, +0.69 slow. At slow the worst path is 12.9 ns, 3 ns longer than v1.1, and it is the fetch into the accumulator: `imem_addr[2]` through a hold gate, the ROM decode, the instruction decode, the acc input mux, into `acc[4]`. Typ and fast match v1.1 to 10 ps because there the worst path is not flop to flop; flop to flop at typ is +11.91. 50 MHz still has over a third of the period spare at slow.
+- Budget: 1,894 synth cells is about 8% of the ~24K guidance for 6x4, 3.5% of the area. Of that, the ROM and host are 744 quick-synth cells and the core 719; the library is now as much of the chip as the engine.
+- The CI run on `35ea2da` (36466255523), where the ROM reached neither feature, routed at +10.01 ns slow setup with no slew violations: so both the 3 ns and the slew come from what the new programs make the fetch reach, not from REPEAT's or the accumulator's logic sitting idle.
 
 ## Unit costs, typ lib
 
