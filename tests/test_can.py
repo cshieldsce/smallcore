@@ -7,18 +7,27 @@ is BIT cycles long and every node samples it at the same point.
      the node drives each for a bit time, dominant 0 driven, recessive 1 let
      go, samples the bus on every bit, and lets go after ID[0]; an ideal
      receiver on the bus, synchronized on the SOF's edge, reads the identifier
-     back.
+     back;
+  2. arbitration: a second transmitter starts on the same SOF with its own
+     identifier; a node that sent recessive and sees dominant has lost and
+     sends nothing more, so the bus carries the lower identifier whole.
 
-programs/can_tx.asm is stage 1.
+programs/can_tx.asm is stage 1; can_tx_arb.asm is stage 2, and sees the bus
+the way a controller behind a transceiver does, because with the pad on the
+bus the core cannot tell a lost bit from its own dominant one.
 
 The bench is the bus and the other nodes. The bus is a wired AND resolved
-every cycle from the pad (gpio and gpio_oe) and every node: 0, dominant, if
-anyone drives it, else 1, recessive. A node drives 0 or lets go, never 1: a
-push-pull 1 from the pad against a dominant bit is a fight, and fails here.
-A receiver syncs on the recessive-to-dominant edge of the SOF and samples on
-the sixth clock of every bit after it, the level the bus held as that clock
-began, the way the transmitter's SHIFT_IN on the seventh clock does; it never
-resynchronizes and knows no stuffing, later stages' business."""
+every cycle from the node under test and every other node: 0, dominant, if
+anyone drives it, else 1, recessive. With the pad on the bus (`rxd` None)
+the pad drives its 0s and lets go for its 1s, a push-pull 1 against a
+dominant bit is a fight and fails here, and gpio_in 0 is the bus. Behind a
+transceiver (`rxd` a pin) pin 0 is TXD, gpio_in 0 its own pad readback, the
+bit as sent, and the bus comes back on gpio_in[rxd], RXD. A receiver syncs
+on the recessive-to-dominant edge of the SOF and samples on a fixed clock of
+every bit after it, the level the bus held as that clock began, the way the
+transmitter's SHIFT_IN on the next clock does; it never resynchronizes and
+knows no stuffing, later stages' business. A competitor is a receiver that
+also transmits, and withdraws the way a node must."""
 
 from pathlib import Path
 from typing import NamedTuple
@@ -29,6 +38,9 @@ from cpu import CPU, decode, load_isa, load_program
 
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
 TX = PROGRAMS / "can_tx.asm"
+ARB = PROGRAMS / "can_tx_arb.asm"
+RXD = 1  # gpio_in pin can_tx_arb.asm listens to the bus on, behind a transceiver; pin 0 is then TXD
+ARB_SAMPLE = 4  # can_tx_arb.asm samples the bus on the fourth clock of a bit: the decision needs the three after it
 CAN_TX = 0  # the same pin number on gpio (the pad) and gpio_in (the bus): the shift pin
 BIT = 8  # cycles per bit
 SAMPLE = 6  # the clock of a bit whose level a node takes, 1..BIT: the sixth, read by the instruction on the seventh
@@ -61,11 +73,13 @@ class Node:
     the bus as it stood at the end of the cycle before and returns what the
     node drives this cycle: 0 or None, and this one never drives. Idle, it
     waits for the bus to fall, the SOF, and counts clocks from that edge: on
-    the SAMPLEth clock of every bit it takes the level it was handed, the one
-    the bus held as that clock began. After HEADER samples it appends the
-    identifier to `seen` and is idle again, ready for the next SOF."""
+    the `sample`th clock of every bit it takes the level it was handed, the
+    one the bus held as that clock began. When the HEADER bits are over it
+    appends the identifier to `seen` and is idle again, ready for the next
+    SOF."""
 
-    def __init__(self):
+    def __init__(self, sample=SAMPLE):
+        self.sample = sample
         self.line = 1  # the bus as last seen
         self.clock = None  # clocks since the SOF's edge, None between frames
         self.samples = []
@@ -76,14 +90,44 @@ class Node:
             self.clock = 0
         if self.clock is not None:
             self.clock += 1
-            if self.clock % BIT == SAMPLE:
+            if self.clock % BIT == self.sample:
                 self.samples.append(line)
-                if len(self.samples) == HEADER:
-                    assert self.samples[0] == 0, "the SOF: the edge it synced on"
-                    self.seen.append(bits_to_int(self.samples[1:]))
-                    self.samples, self.clock = [], None
+                self.sampled(len(self.samples) - 1, line)
+            if self.clock == HEADER * BIT:
+                assert self.samples[0] == 0, "the SOF: the edge it synced on"
+                self.seen.append(bits_to_int(self.samples[1:]))
+                self.samples, self.clock = [], None
         self.line = line
         return None
+
+    def sampled(self, k, level):
+        """Bit k of the frame, the SOF k = 0, sampled at `level`."""
+
+
+class Competitor(Node):
+    """A second transmitter, ideal and synchronized: it starts its frame on
+    the SOF's edge, its own SOF the same dominant bit, and drives bit k of
+    its header, `ident`, through the BIT cycles of bit k, a 0 driven, a 1 let
+    go. It samples like a Node and, when it let go and sampled dominant, it
+    has lost: `lost` is the bit it lost on, it drives nothing more and reads
+    the rest as a receiver. After ID[0] it lets go: stage 2 sends nothing
+    after the identifier."""
+
+    def __init__(self, ident, sample=SAMPLE):
+        super().__init__(sample)
+        self.ident = ident
+        self.bits = header_bits(ident)
+        self.lost = None
+
+    def update(self, line):
+        super().update(line)
+        if self.clock is None or self.lost is not None:
+            return None
+        return 0 if self.bits[self.clock // BIT] == 0 else None
+
+    def sampled(self, k, level):
+        if self.lost is None and self.bits[k] == 1 and level == 0:
+            self.lost = k
 
 
 class Glitch(Node):
@@ -103,8 +147,9 @@ class Glitch(Node):
 
 
 class Run(NamedTuple):
-    line: list  # the bus, one level per cycle: 0 if the pad or any node drove it, else 1
-    owned: list  # one per cycle: was the pad driving the bus
+    line: list  # the bus, one level per cycle: 0 if the node under test or any other drove it, else 1
+    owned: list  # one per cycle: was the pad driving pin 0
+    txd: list  # one per cycle: what the node under test put out, 0 or 1, a let-go pin a 1
     driven: list  # one per cycle: what the nodes drove, 0 or None, in node order
     received: list  # the bytes the host popped, in order
     nodes: list
@@ -119,16 +164,21 @@ class Bus:
     `nodes` on the bus, and a host that, when `drain`, pops the RX FIFO as
     soon as a byte is there and runs `host(cpu, received)` every cycle to
     push what it decides to. `go(cycles)` steps that many cycles or up to the
-    halt, the bus resolved after every cycle from the pad and the nodes and
-    fed back to gpio_in for the next. The pad driving a 1 against a node's 0
-    is a fight, which no CAN node ever has: it fails here."""
+    halt, the bus resolved after every cycle from the node under test and
+    the others and fed back to gpio_in for the next. With `rxd` None the pad
+    is on the bus: it drives its 0s, lets go for its 1s, and reads the bus
+    back on gpio_in 0; the pad driving a 1 against a node's 0 is a fight,
+    which no CAN node ever has, and fails here. With `rxd` a pin the node is
+    behind a transceiver: pin 0 is TXD, gpio_in 0 its pad readback, the bit
+    as sent, and the bus is on gpio_in[rxd], which pin the program must have
+    let go."""
 
-    def __init__(self, program, tx_data, nodes=(), drain=True, host=None):
+    def __init__(self, program, tx_data, nodes=(), drain=True, host=None, rxd=None):
         self.cpu = CPU(load_program(program), gpio_in=1, tx_data=list(tx_data))
         self.nodes = list(nodes)
-        self.drain, self.host = drain, host
+        self.drain, self.host, self.rxd = drain, host, rxd
         self.line = 1
-        self.lines, self.owned, self.driven, self.received, self.stalls = [], [], [], [], []
+        self.lines, self.owned, self.txds, self.driven, self.received, self.stalls = [], [], [], [], [], []
         self.rx_peak = self.tx_peak = 0
 
     def go(self, cycles):
@@ -143,11 +193,20 @@ class Bus:
             drives = [node.update(self.line) for node in self.nodes]
             driving = cpu.gpio_oe[CAN_TX] == 1
             pad = cpu.gpio[CAN_TX] if driving else None
-            assert not (pad == 1 and 0 in drives), f"cycle {cpu.cycle}: the pad drives a 1 against a node's dominant 0"
-            self.line = 0 if pad == 0 or 0 in drives else 1
-            cpu.gpio_in[CAN_TX] = self.line
+            if self.rxd is None:
+                assert not (pad == 1 and 0 in drives), f"cycle {cpu.cycle}: the pad drives a 1 against a node's dominant 0"
+                txd = 0 if pad == 0 else 1
+                self.line = 0 if txd == 0 or 0 in drives else 1
+                cpu.gpio_in[CAN_TX] = self.line
+            else:
+                assert cpu.gpio_oe[self.rxd] == 0, f"cycle {cpu.cycle}: pin {self.rxd} drives against RXD"
+                txd = 1 if pad is None else pad
+                self.line = 0 if txd == 0 or 0 in drives else 1
+                cpu.gpio_in[CAN_TX] = txd
+                cpu.gpio_in[self.rxd] = self.line
             self.lines.append(self.line)
             self.owned.append(driving)
+            self.txds.append(txd)
             self.driven.append(drives)
             self.stalls.append(cpu.stalled)
             if self.drain and cpu.rx_fifo:
@@ -155,12 +214,23 @@ class Bus:
         return self
 
     def result(self):
-        return Run(self.lines, self.owned, self.driven, self.received, self.nodes, self.cpu, self.stalls, self.rx_peak, self.tx_peak)
+        return Run(self.lines, self.owned, self.txds, self.driven, self.received, self.nodes, self.cpu, self.stalls, self.rx_peak, self.tx_peak)
 
 
-def run(program, tx_data, nodes=None, cycles=2000, drain=True, host=None):
+def run(program, tx_data, nodes=None, cycles=2000, drain=True, host=None, rxd=None):
     """A Bus run for `cycles` or to the halt, as a Run, with one receiver on the bus unless told otherwise."""
-    return Bus(program, tx_data, [Node()] if nodes is None else nodes, drain, host).go(cycles).result()
+    return Bus(program, tx_data, [Node()] if nodes is None else nodes, drain, host, rxd).go(cycles).result()
+
+
+def arb(ident, nodes, **kw):
+    """can_tx_arb.asm behind the transceiver, `ident` from the host, `nodes` on the bus."""
+    return run(ARB, header_bytes(ident), nodes, rxd=RXD, **kw)
+
+
+def pairs(bits):
+    """The byte can_tx_arb.asm hands the host after sending `bits` unopposed:
+    the last four (sent, seen) pairs, each bit twice."""
+    return bits_to_int([b for bit in bits[-4:] for b in (bit, bit)])
 
 
 def cells(line, start, count=HEADER):
@@ -179,6 +249,7 @@ def cells(line, start, count=HEADER):
 
 def show(wave, r):
     wave.add("bus", r.line, group="bus")
+    wave.add("txd", r.txd, group="bus")
     wave.add("pad drives", [int(o) for o in r.owned], group="bus")
     for i in range(len(r.nodes)):
         wave.add(f"node {i} drives", ["-" if d[i] is None else str(d[i]) for d in r.driven], group="bus")
@@ -308,3 +379,118 @@ def test_can_by_the_numbers():
     assert r.line.index(0) == 3, "cycles from release to the SOF's edge"
     assert (r.tx_peak, r.rx_peak) == (2, 1)
     assert len(r.received) == 1, "one pop, two pushes"
+
+
+# --- stage 2: arbitration ---------------------------------------------------------
+
+
+LOWER, HIGHER = 0x1E3, 0x7A3  # 001 1110 0011 beats IDENT on ID[10] and lets go on ID[6], where IDENT is dominant; 111 1010 0011 loses to IDENT on ID[9]
+LOSSES = [(IDENT & ~(1 << i), NAMES.index(f"id{i}")) for i in range(ID_BITS) if (IDENT >> i) & 1]  # IDENT loses to each, on that bit
+
+
+def test_the_pad_on_the_bus_wins_for_free_and_cannot_lose(wave):
+    """Stage 1's program, the pad on the bus, against a competitor. Where its
+    identifier is lower it wins without a word of arbitration: the competitor
+    lets go for its recessive ID[9], sees the dominant bit, withdraws, and
+    the bus carries the frame whole. Where it is higher it should lose on
+    ID[10], and drives on: it cannot know it sent recessive there, the sent
+    bit sits on the pin register and nothing reads it. On record: the bus is
+    the AND of both frames until the competitor, seeing dominant where it
+    let go on ID[6], withdraws too, and the receiver reads an identifier
+    nobody sent."""
+    r = run(TX, header_bytes(IDENT), [Competitor(HIGHER), Node()])
+    show(wave, r)
+    competitor, receiver = r.nodes
+    sof = r.line.index(0)
+    assert cells(r.line, sof) == header_bits(IDENT), "the lower identifier, whole"
+    assert competitor.lost == NAMES.index("id9") and competitor.seen == [IDENT]
+    assert receiver.seen == [IDENT] and r.received == [IDENT & 0xFF]
+
+    r = run(TX, header_bytes(IDENT), [Competitor(LOWER), Node()])
+    competitor, receiver = r.nodes
+    sof = r.line.index(0)
+    assert r.txd[sof : sof + HEADER * BIT] == [bit for bit in header_bits(IDENT) for _ in range(BIT)], "drove every bit, the lost one and after"
+    assert competitor.lost == NAMES.index("id6"), "the competitor, which should have won, withdrew on ID[6]"
+    garbage = [a & b for a, b in zip(header_bits(IDENT), header_bits(LOWER))][: competitor.lost + 1] + header_bits(IDENT)[competitor.lost + 1 :]
+    assert cells(r.line, sof) == garbage
+    assert receiver.seen == [bits_to_int(garbage[1:])] and receiver.seen != [LOWER] and receiver.seen != [IDENT]
+
+
+def test_arbitration_won(wave):
+    """can_tx_arb.asm behind the transceiver against a competitor with a
+    higher identifier: on ID[9] the node sends dominant, the competitor let
+    go, sees dominant, withdraws; the node sends its identifier whole, 8
+    cycles a bit as before, TXD its bits throughout, and reads the last four
+    pairs back, each bit twice; the receiver and the competitor read the
+    identifier; the same 100 cycles as stage 1."""
+    r = arb(IDENT, [Competitor(HIGHER, ARB_SAMPLE), Node(ARB_SAMPLE)])
+    show(wave, r)
+    competitor, receiver = r.nodes
+    sof = r.line.index(0)
+    assert cells(r.line, sof) == header_bits(IDENT)
+    assert r.txd[sof : sof + HEADER * BIT] == [bit for bit in header_bits(IDENT) for _ in range(BIT)]
+    assert competitor.lost == NAMES.index("id9") and competitor.seen == [IDENT] and receiver.seen == [IDENT]
+    assert r.received == [pairs(header_bits(IDENT))]
+    assert r.cpu.cycle == 100 and r.cpu.halted and r.cpu.gpio[CAN_TX] == 1
+
+
+@pytest.mark.parametrize("other, k", LOSSES, ids=lambda v: f"{v:03x}" if v > 11 else NAMES[v])
+def test_arbitration_lost_on_each_recessive_bit(other, k, wave):
+    """can_tx_arb.asm against a competitor whose identifier is IDENT with one
+    of its recessive bits dominant: the node lets go on that bit, sees
+    dominant, and sends nothing more, TXD recessive from the next bit to the
+    halt, one cycle after that bit, two when the loss came before ID[4]'s
+    PULL and the second byte, still queued, had to be PULLed away, so that
+    the TX FIFO is empty at the halt either way; the competitor never sees a
+    loss and its frame goes out whole; the receiver reads it; the host's byte
+    ends in the pair (1, 0)."""
+    r = arb(IDENT, [Competitor(other, ARB_SAMPLE), Node(ARB_SAMPLE)], cycles=200)
+    show(wave, r)
+    competitor, receiver = r.nodes
+    sof = r.line.index(0)
+    mine = header_bits(IDENT)
+    early = k < NAMES.index("id4")
+    assert mine[k] == 1 and header_bits(other)[k] == 0 and mine[:k] == header_bits(other)[:k]
+    assert r.cpu.halted and r.cpu.cycle == sof + (k + 1) * BIT + 1 + early, "halted on the cycle after the lost bit, or the one after that"
+    assert r.txd[sof : sof + (k + 1) * BIT] == [bit for bit in mine[: k + 1] for _ in range(BIT)], "its bits through the lost one"
+    assert r.txd[sof + (k + 1) * BIT :] == [1] * (1 + early), "recessive after"
+    assert r.received == [pairs(mine[: k + 1]) & ~1], "the pairs through the lost bit, (1, 0) last"
+    assert r.cpu.tx_fifo == [], "the second byte PULLed away on an early loss, sent on a late one"
+    assert competitor.lost is None
+    # The bus goes on without the node: the competitor's frame whole, the receiver reading it.
+    tail = Bus(ARB, [], [competitor, receiver], rxd=RXD)  # the halted node is off the bus; the nodes carry on from where they were
+    tail.line = r.line[-1]
+    for _ in range(HEADER * BIT - len(r.line) + sof + 2):
+        drives = [node.update(tail.line) for node in tail.nodes]
+        tail.line = 0 if 0 in drives else 1
+        tail.lines.append(tail.line)
+    line = r.line + tail.lines
+    assert cells(line, sof) == header_bits(other)
+    assert competitor.seen == [other] and receiver.seen == [other]
+
+
+def test_the_arbitration_sample_point_is_the_fourth_clock_of_the_bit():
+    """Where can_tx_arb.asm samples the bus, seen from outside, as for stage
+    1: a glitch node pulls the bus dominant for one cycle of ID[7], a
+    recessive bit, at each of its eight cycles in turn. The node loses on
+    that bit, sent recessive and saw dominant, exactly when the glitch is on
+    the fourth cycle, and goes through on every other."""
+    sof = arb(IDENT, []).line.index(0)
+    k = NAMES.index("id7")
+    for p in range(BIT):
+        r = arb(IDENT, [Glitch(sof + k * BIT + p)], cycles=200)
+        hit = p == ARB_SAMPLE - 1
+        assert (r.cpu.cycle == sof + (k + 1) * BIT + 2) == hit, f"glitch on cycle {p + 1} of the bit: halted at {r.cpu.cycle}"
+        assert r.received == [pairs(header_bits(IDENT)[: k + 1]) & ~1 if hit else pairs(header_bits(IDENT))]
+
+
+def test_arbitration_by_the_numbers():
+    """Stage 2 measured against stage 1: the words, the cycles, the sample
+    point, the host's part."""
+    words, plain = load_program(ARB), load_program(TX)
+    assert (len(words), len(set(words))) == (95, 34)
+    assert (len(plain), len(set(plain))) == (13, 8)
+    r = arb(IDENT, [Node(ARB_SAMPLE)])
+    assert r.cpu.cycle == 100 and r.line.index(0) == 3
+    assert (r.tx_peak, r.rx_peak, len(r.received)) == (2, 1, 1)
+    assert (ARB_SAMPLE, SAMPLE) == (4, 6), "the decision's three cycles move the sample point two clocks earlier at 8 a bit"
