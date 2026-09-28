@@ -205,6 +205,6 @@ From the big picture down to what the Verilog will look like:
 | `docs/states.svg` | the same block as per-cycle states: Issue, Hold, Stall, Halt |
 | `docs/physical-results.md` | cells, area, utilization and timing per RTL milestone from the Tiny Tapeout CMOS5L flow in `tapeout/janestreet/` |
 | `docs/repeat-candidates.md` | the repeat comparison that chose REPEAT: four candidate words for "again" against the SWD programs, on the model only; words, encoding, state, timing, stalls, restart, what each disturbs; the spec; the outcome |
-| `docs/can-candidates.md` | the CAN comparison: a one-cycle branch, the sent bit exposed, a run test and a run counter, and their combinations, spliced into the arbitration and stuffing programs on the model only; words, cycles a bit, sample point, pins, REPEAT, state, encoding, what each disturbs; stuffing back from 16 cycles a bit to 8; no outcome yet |
+| `docs/can-candidates.md` | the CAN comparison: a one-cycle branch, the sent bit exposed, a run test and a run counter, and their combinations, spliced into the arbitration and stuffing programs on the model only; words, cycles a bit, sample point, pins, REPEAT, state, encoding, what each disturbs; stuffing back from 16 cycles a bit to 8; the outcome: nothing merged, REPEAT kept, B and D rejected, A, Bc and C held until RX has spoken |
 
 Diagrams show only hardware that exists in `sim/cpu.py` and passes the tests.

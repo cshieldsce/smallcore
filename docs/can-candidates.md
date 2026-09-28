@@ -1,9 +1,12 @@
 # CAN candidates against the arbitration and stuffing programs
 
-**No outcome yet.** This is the comparison, on the model only, for the
-architecture review; nothing in `isa.yaml`, `sim/cpu.py` or the RTL changes,
-and the four CAN programs stay as written: `can_tx.asm` 13 words,
-`can_tx_arb.asm` 95, `can_tx_ack.asm` 21, `can_tx_stuff.asm` 224.
+**Outcome (2026-09-28): nothing merged.** REPEAT stays as it is; B and D
+are rejected; A, Bc and C are held as candidates, C the strongest, the call
+deferred until RX and de-stuffing have asked their questions ("Decided",
+below). This is the comparison, on the model only, for the architecture
+review; nothing in `isa.yaml`, `sim/cpu.py` or the RTL changes, and the four
+CAN programs stay as written: `can_tx.asm` 13 words, `can_tx_arb.asm` 95,
+`can_tx_ack.asm` 21, `can_tx_stuff.asm` 224.
 
 CAN made two complaints on the post-REPEAT ISA (README, "CAN by the
 numbers"). Arbitration: a node that sent recessive and sees dominant has
@@ -338,13 +341,28 @@ register (C, D, Bc); one more source for a sample (B).
     SHIFT's spare bit; no valid word changes meaning, and every program in
     `programs/` means the same under every candidate.
 
-## Not decided
+## Decided
 
-The reviewer's call, after this: whether the branch earns its word, which
-of the run tests, whether the sent bit is a sample or a condition; and
-CRC stays separate, its arithmetic pressure not to be mixed with these.
-Nothing in the core is touched; the 95- and 224-word programs are the
-record of why.
+The reviewer's call, 2026-09-28. Nothing is merged; the core is as it was,
+and the 95- and 224-word programs stay as the record of why.
+
+| | |
+|---|---|
+| REPEAT | kept, untouched. CAN found something narrower than "REPEAT cannot handle dynamic decisions": it handles them when every path rejoins at the loop boundary, and correctly refuses loops whose semantics escape early. A good boundary |
+| a breakable loop | no |
+| D, the run counter | no: dominated by C |
+| B, SHIFT_SENT | no: the sent bit as a sample, from one pin, with the 95 words unchanged |
+| A, BRANCH | held. Stronger if RX turns out to need symmetric immediate branches as often as TX did |
+| Bc, SKIP_SENT | held |
+| C, the run test | held, the strongest. If RX de-stuffing independently says "the last five bits are right here, but asking whether they form a run is killing my timing and my words", both sides of the protocol want the same predicate, and C has earned its word |
+
+A successful round with nothing merged: the bad directions are known
+without being paid for in the architecture. What follows keeps "can the
+core execute CAN?" apart from "can the core compute CAN's arithmetic?":
+stage 5A, a complete data frame on the current ISA with a host-computed CRC
+and today's stuffing, to let the whole frame expose the next pressure; then
+CRC computation on its own, so the XOR and LFSR pressure is measured alone;
+then RX and de-stuffing; and only then the call on A, Bc and C.
 
 ## Files
 
