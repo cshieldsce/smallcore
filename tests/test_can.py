@@ -242,10 +242,11 @@ class Bus:
     which no CAN node ever has, and fails here. With `rxd` a pin the node is
     behind a transceiver: pin 0 is TXD, gpio_in 0 its pad readback, the bit
     as sent, and the bus is on gpio_in[rxd], which pin the program must have
-    let go."""
+    let go. With `cpu` a CPU already built, on any model, it runs in the
+    model's place: the candidates' bench."""
 
-    def __init__(self, program, tx_data, nodes=(), drain=True, host=None, rxd=None):
-        self.cpu = CPU(load_program(program), gpio_in=1, tx_data=list(tx_data))
+    def __init__(self, program, tx_data, nodes=(), drain=True, host=None, rxd=None, cpu=None):
+        self.cpu = cpu or CPU(load_program(program), gpio_in=1, tx_data=list(tx_data))
         self.nodes = list(nodes)
         self.drain, self.host, self.rxd = drain, host, rxd
         self.line = 1
