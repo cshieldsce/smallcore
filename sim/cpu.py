@@ -21,6 +21,8 @@ LINE_RE = re.compile(
 
 
 PC_BITS = 9  # the pc: room for the halt address 256 and a SKIP's pc + 2 past it, as in core.v
+RUN_TESTS = ("SKIP_RUN", "SKIP_NORUN")  # the run tests, SKIP-shaped: they step over the next word
+SKIPS = ("SKIP",) + RUN_TESTS  # every word that steps over the next one
 
 
 class Instruction(NamedTuple):
@@ -182,7 +184,8 @@ def assemble(source, isa=None):
     side effect: `SHIFT_OUT 1, 0 [3]`. CONFIG takes its field by name:
     `CONFIG shift_dir, 1`. REPEAT is written the natural way round, the count
     then the label, and goes into the word as count - 1 in bits 12:8 and the
-    distance back in the operand byte; it takes no `[n]`. Labels and names
+    distance back in the operand byte; it takes no `[n]`. A run test is
+    written `SKIP_RUN n, level`, n 1..8, and holds n - 1. Labels and names
     never reach the words. A program whose REPEAT bodies break the rules in
     check_bodies() is refused.
     """
@@ -224,6 +227,10 @@ def assemble(source, isa=None):
                 continue
             args = tuple(operand(lineno, a, op if i == 0 else None) for i, a in enumerate(args))
             delay = int(delay, 0) if delay else 0
+            if op in RUN_TESTS:  # `SKIP_RUN n, level`, n written 1..8 and held as n - 1
+                if not args or not 1 <= args[0] <= 8:
+                    raise ValueError(f"{op} n {args[0] if args else '?'} outside 1..8")
+                args = (args[0] - 1,) + args[1:]
             n = len(isa["instructions"][op]["operands"])
             side = args[n:] if len(args) > n and side_effect(isa, op) else None
             words.append(encode(Instruction(op, args[:n] if side else args, delay, side), isa))
@@ -270,8 +277,8 @@ def check_bodies(words, isa):
     machinery for odd control flow: a body (the words from the label to the
     REPEAT) holds no REPEAT, so no nesting and no overlap; a JMP in a body
     lands in it, from the label to the REPEAT; the body's last word is not a
-    SKIP, which would step over the REPEAT; nothing outside jumps or skips
-    into a body past its label. Raises ValueError. Outside these rules the
+    SKIP or a run test, which would step over the REPEAT; nothing outside
+    jumps or skips into a body past its label. Raises ValueError. Outside these rules the
     hardware still does the one thing REPEAT does with whatever rc holds."""
     ops = [decode(w, isa) for w in words]
     bodies = [(end - instr.args[0], end) for end, instr in enumerate(ops) if instr.op == "REPEAT"]
@@ -281,8 +288,8 @@ def check_bodies(words, isa):
                 raise ValueError(f"REPEAT at {end}: a REPEAT at {other_end} inside its body, or bodies overlapping")
         if start < 0:
             raise ValueError(f"REPEAT at {end}: reaches {end - start} words back, before the program")
-        if ops[end - 1].op == "SKIP":
-            raise ValueError(f"REPEAT at {end}: the body's last word is a SKIP, which would step over the REPEAT")
+        if ops[end - 1].op in SKIPS:
+            raise ValueError(f"REPEAT at {end}: the body's last word is a {ops[end - 1].op}, which would step over the REPEAT")
         for address, instr in enumerate(ops):
             inside = start <= address < end
             if instr.op == "JMP":
@@ -291,8 +298,8 @@ def check_bodies(words, isa):
                     raise ValueError(f"REPEAT at {end}: the JMP at {address} leaves the body")
                 if not inside and start < target <= end:
                     raise ValueError(f"REPEAT at {end}: the JMP at {address} lands inside the body past its label")
-            if instr.op == "SKIP" and not inside and start < address + 2 <= end:
-                raise ValueError(f"REPEAT at {end}: the SKIP at {address} steps into the body past its label")
+            if instr.op in SKIPS and not inside and start < address + 2 <= end:
+                raise ValueError(f"REPEAT at {end}: the {instr.op} at {address} steps into the body past its label")
 
 
 def load_program(path, isa=None):
@@ -344,6 +351,19 @@ class CPU:
     def pin_trace(self, pin):
         """One pin's level at the end of each cycle."""
         return [levels[pin] for levels in self.trace]
+
+    def newest(self, n):
+        """The newest n samples in in_shift_reg, oldest first: the n bits at
+        the end SHIFT_IN fills, bit 0 MSB first, bit 7 LSB first."""
+        if self.shift_dir == 0:
+            return [(self.in_shift_reg >> (8 - n + i)) & 1 for i in range(n)]
+        return [(self.in_shift_reg >> (n - 1 - i)) & 1 for i in range(n)]
+
+    def run_test(self, instr):
+        """SKIP_RUN: the newest n samples all `level`; SKIP_NORUN: not so."""
+        n, level = instr.args[0] + 1, instr.args[1]
+        run = all(bit == level for bit in self.newest(n))
+        return run if instr.op == "SKIP_RUN" else not run
 
     def step(self):
         """Advance exactly one clock cycle."""
@@ -405,11 +425,14 @@ class CPU:
         self.counter -= 1
         if self.counter == 0:
             # Last cycle of the instruction: JMP loads its target, SKIP steps over the next word
-            # (pc + 2) when the bit of in_shift_reg it names holds the level, REPEAT goes back
+            # (pc + 2) when the bit of in_shift_reg it names holds the level, a run test when the
+            # newest n samples are all the level (SKIP_RUN) or not (SKIP_NORUN), REPEAT goes back
             # while runs of the body are left, everything else pc + 1.
             if instr.op == "JMP":
                 self.pc = instr.args[0]
             elif instr.op == "SKIP" and (self.in_shift_reg >> instr.args[0]) & 1 == instr.args[1]:
+                self.pc += 2
+            elif instr.op in RUN_TESTS and self.run_test(instr):
                 self.pc += 2
             elif instr.op == "REPEAT":
                 # The one cycle rc changes: 0 loads count - 1, the runs still to go; any other
@@ -452,6 +475,8 @@ if __name__ == "__main__":
         args = ", ".join(str(a) for a in instr.args + (instr.side or ()))
         if instr.op == "REPEAT":  # as written: the count, then the label's address
             args = f"{instr.delay + 1}, {addr - instr.args[0]}"
+        elif instr.op in RUN_TESTS:  # as written: n, not n - 1
+            args = f"{instr.args[0] + 1}, {instr.args[1]}"
         print(f"{addr:3}  {word:04x}  {instr.op} {args} [{instr.delay}]")
     cpu = CPU(program, tx_data=tx_data, isa=isa)
     while not cpu.halted and not cpu.stalled and cpu.cycle < 100_000:

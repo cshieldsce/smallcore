@@ -163,7 +163,8 @@ def test_the_side_effect_is_one_field_shared_by_every_instruction_but_jmp(isa):
     operand[4] the value, on every opcode. SET's operands are those bits, and
     every instruction allows the side effect except JMP and REPEAT, whose
     target and distance need all eight operand bits, and NOP, which with the
-    side effect is SET."""
+    side effect is SET. The run tests, in NOP's hole, have none: SET owns
+    the flag bit there."""
     side = isa["side_effect"]
     assert side["flag"] == {"lsb": 7, "bits": 1}
     assert [(o["name"], o["lsb"], o["bits"]) for o in side["operands"]] == [("pin", 5, 2), ("value", 4, 1)]
@@ -171,7 +172,7 @@ def test_the_side_effect_is_one_field_shared_by_every_instruction_but_jmp(isa):
     assert isa["instructions"]["SET"]["select"] == {"name": "side", "lsb": 7, "bits": 1, "value": 1}
     allows = {op: bool(spec.get("side_effect")) for op, spec in isa["instructions"].items()}
     assert allows == {"NOP": False, "SET": False, "SHIFT_OUT": True, "SHIFT_IN": True,
-                      "PULL": True, "PUSH": True, "WAIT": True, "SKIP": True, "JMP": False, "CONFIG": True, "REPEAT": False}
+                      "PULL": True, "PUSH": True, "WAIT": True, "SKIP": True, "SKIP_RUN": False, "SKIP_NORUN": False, "JMP": False, "CONFIG": True, "REPEAT": False}
     assert assemble("PULL 2, 0 [3]") == [0x43C0]
     assert assemble("CONFIG shift_dir, 1, 1, 0") == [0x80A1]
     for line in ("SET 3, 1", "SHIFT_OUT 3, 1", "SHIFT_IN 0, 3, 1", "PULL 3, 1", "WAIT 0, 0, 3, 1",

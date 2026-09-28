@@ -19,7 +19,7 @@ import random
 
 import pytest
 
-from cpu import PC_BITS, Instruction, assemble, cycles, decode, encode, load_isa
+from cpu import RUN_TESTS, SKIPS, PC_BITS, Instruction, assemble, cycles, decode, encode, load_isa
 from cpu import CPU as _CPU
 from test_repeat import lockstep, unroll
 
@@ -39,12 +39,24 @@ DELAY_MAX = (1 << ISA["fields"]["delay"]["bits"]) - 1
 STATE = ("pc", "gpio", "open_drain", "shift_reg", "in_shift_reg", "shift_dir", "tx_fifo", "rx_fifo", "counter", "rc", "halted")
 
 
+def run_holds(reg, shift_dir, instr):
+    """The reference for a run test: the newest n bits of the register, the
+    low n MSB first and the high n LSB first, all the level; SKIP_NORUN the
+    other way round."""
+    n, level = instr.args[0] + 1, instr.args[1]
+    newest = reg & ((1 << n) - 1) if shift_dir else reg >> (8 - n)
+    run = newest == level * ((1 << n) - 1)
+    return run if instr.op == "SKIP_RUN" else not run
+
+
 def to_asm(instr):
     """Instruction -> one assembly line, the inverse of assemble() for one word.
     A REPEAT's line names a label `back` words before it, so its line here
     is not one assemble() takes: see reassemble()."""
     if instr.op == "REPEAT":
         return f"REPEAT {instr.delay + 1}, {instr.args[0]} back"
+    if instr.op in RUN_TESTS:  # written as n, held as n - 1
+        return f"{instr.op} {instr.args[0] + 1}, {instr.args[1]} [{instr.delay}]"
     args = ", ".join(str(a) for a in instr.args + (instr.side or ()))
     return f"{instr.op} {args} [{instr.delay}]"
 
@@ -120,9 +132,11 @@ def test_valid_word_count_per_instruction():
         "CONFIG": (2 + 4 + 4) * 9 * 32,  # shift_dir 0 or 1, open_drain01 and open_drain23 0..3, x side
         "WAIT": 4 * 2 * 9 * 32,     # pin x level x side
         "SKIP": 8 * 2 * 9 * 32,     # bit x level x side
+        "SKIP_RUN": 8 * 2 * 32,     # n x level, no side effect: NOP's hole has no flag bit
+        "SKIP_NORUN": 8 * 2 * 32,
         "REPEAT": 255 * 32,         # back 1..255 x count 1..32
     }
-    assert len(VALID) == 28384
+    assert len(VALID) == 28384 + 1024
 
 
 def test_words_wider_than_16_bits_are_rejected():
@@ -239,6 +253,8 @@ def checked_step(cpu):
         if instr.op == "JMP":
             expected["pc"] = instr.args[0]
         elif instr.op == "SKIP" and (before["in_shift_reg"] >> instr.args[0]) & 1 == instr.args[1]:
+            expected["pc"] = before["pc"] + 2
+        elif instr.op in RUN_TESTS and run_holds(before["in_shift_reg"], before["shift_dir"], instr):
             expected["pc"] = before["pc"] + 2
         elif instr.op == "REPEAT":
             expected["rc"] = instr.delay if before["rc"] == 0 else before["rc"] - 1
@@ -408,7 +424,7 @@ def test_a_repeat_is_its_body_count_times_over_with_a_cycle_between(seed):
     rng = random.Random(seed)
     n = rng.randrange(1, 7)
     body = [random_instruction(rng, 0, ops=NO_LOOP) for _ in range(n)]
-    while body[-1].op == "SKIP":
+    while body[-1].op in SKIPS:
         body[-1] = random_instruction(rng, 0, ops=NO_LOOP)
     words = [encode(i, ISA) for i in body] + [encode(Instruction("REPEAT", (n,), rng.randrange(DELAY_MAX + 1)), ISA)]
     words.append(encode(Instruction("SET", (rng.randrange(4), rng.randrange(2))), ISA))
@@ -615,7 +631,7 @@ def test_shift_out_and_shift_in_never_see_each_others_register():
                 assert cpu.shift_reg == before["shift_reg"] >> 1
             if op == "SHIFT_OUT" and cpu.shift_dir == 1:
                 assert cpu.shift_reg == (before["shift_reg"] << 1) & 0xFF
-            if op in ("SET", "NOP", "CONFIG", "JMP", "WAIT", "SKIP", "REPEAT"):
+            if op in ("SET", "NOP", "CONFIG", "JMP", "WAIT", "SKIP", "REPEAT") + RUN_TESTS:
                 assert (cpu.shift_reg, cpu.in_shift_reg) == (before["shift_reg"], before["in_shift_reg"])
 
 
@@ -641,13 +657,13 @@ def control_trace(program, fifo_seed, pin_seed, cycles=400):
 
 @pytest.mark.parametrize("seed", range(100))
 def test_only_wait_and_skip_let_an_input_reach_the_pc_the_counter_or_a_pin(seed):
-    """Without a WAIT or a SKIP, the same FIFO traffic under any two input
-    histories gives the same pc, counter, stalls and output pins, cycle for
-    cycle: an input reaches in_shift_reg and the RX FIFO, nothing else. A
-    WAIT lets an input hold the machine; a SKIP lets a sampled input, from
-    the register, move the pc."""
+    """Without a WAIT, a SKIP or a run test, the same FIFO traffic under
+    any two input histories gives the same pc, counter, stalls and output
+    pins, cycle for cycle: an input reaches in_shift_reg and the RX FIFO,
+    nothing else. A WAIT lets an input hold the machine; a SKIP or a run
+    test lets a sampled input, from the register, move the pc."""
     rng = random.Random(seed)
-    program = [w for w in random_program(rng) if VALID[w].op not in ("WAIT", "SKIP")] or [0x0000]
+    program = [w for w in random_program(rng) if VALID[w].op not in ("WAIT",) + SKIPS] or [0x0000]
     assert control_trace(program, seed, seed + 1) == control_trace(program, seed, seed + 2)
     pin, level = rng.randrange(4), rng.randrange(2)
     held, free = (CPU([encode(Instruction("WAIT", (pin, level), 0), ISA)] + program) for _ in range(2))

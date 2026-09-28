@@ -44,8 +44,8 @@ assemble_candidate, load_candidate = candidates.assemble, candidates.load_progra
 from cpu import CPU, assemble, decode, encode, load_isa, load_program  # noqa: E402
 from test_can import (  # noqa: E402
     ARB, ARB_SAMPLE, BIT, CAN_TX, HEADER, HIGHER, ID_BITS, IDENT, IDENTS, LOSSES, NAMES, PROGRAMS, RXD, STUFF, STUFF_BIT,
-    STUFF_IDENTS, STUFF_SAMPLE, TX, Bus, Competitor, Glitch, Node, arb, bits_to_int, cells, header_bits, header_bytes, pairs,
-    run, stuffed,
+    STUFF_IDENTS, STUFF_SAMPLE, TX, Bus, Competitor, Glitch, Node, arb, bits_to_int, cells, frame_bits, header_bits, header_bytes,
+    pairs, run, stuffed,
 )
 from test_swd import DATA, DP_READ, OK, READ, SlowHost, Target, Wire, read_bytes  # noqa: E402
 
@@ -390,7 +390,7 @@ def test_every_existing_program_means_the_same_under_the_candidate(name):
             assert cls.decode(word) == decode(word, BASE), f"{path.name}: {word:#06x}"
 
 
-NEW_WORDS = {"A": 1008, "B": 1152, "Bc": 256, "C": 1024, "D": 256, "AB": 2160, "ABc": 1768, "AC": 3040, "AD": 2272}
+NEW_WORDS = {"A": 1008, "B": 1152, "Bc": 256, "C": 0, "D": 256, "AB": 2160, "ABc": 1768, "AC": 2016, "AD": 2272}  # C's 1024 are the ISA's since 2026-09-28: SKIP_RUN and SKIP_NORUN adopted; AC adds BRANCH and BRANCH_RUN
 
 
 @pytest.mark.parametrize("name", sorted(CANDIDATES), ids=lambda t: f"candidate {t}")
@@ -398,8 +398,9 @@ def test_what_each_candidate_adds_to_the_word_space(name):
     """Of the 65,536 words the ISA accepts 28,384. Each candidate accepts
     those, meaning the same, and these more, each re-encoding to itself:
     BRANCH 63 distances by 16 conditions; SHIFT_SENT 4 pins by 9 side
-    effects by 32 delays; SKIP_SENT 8 by 32; SKIP_RUN and SKIP_NORUN 16 by
-    32 each; SKIP_SAME 8 by 32; and a second branch kind another 1008."""
+    effects by 32 delays; SKIP_SENT 8 by 32; SKIP_SAME 8 by 32; and a second
+    branch kind another 1008. SKIP_RUN and SKIP_NORUN, 16 by 32 each, were
+    C's until 2026-09-28 and are the ISA's now: C adds nothing."""
     cls = CANDIDATES[name]
     new, changed = 0, 0
     for word in range(1 << 16):
@@ -531,3 +532,4 @@ def test_a_serves_swd_and_i2c_where_the_decision_goes_ahead_and_not_where_it_goe
     lines = [line for line in i2c.splitlines() if not line.startswith("        JMP stop ")]
     lines = [line.replace("        SKIP 0, 0 ", "        BRANCH 0, 1, stop ", 1) if line.startswith("        SKIP 0, 0 ") else line for line in lines]
     assert len(assemble_candidate("\n".join(lines) + "\n", cls)) == 63 and len(load_program(PROGRAMS / "i2c_write_addr_data.asm")) == 64
+

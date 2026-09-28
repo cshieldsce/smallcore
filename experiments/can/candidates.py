@@ -315,21 +315,11 @@ class Run(Candidate):
     dominant` is the baseline's shape, `SKIP_NORUN 5, 1` then `JMP stuff`
     is this one's. A BRANCH takes the run's side itself."""
 
-    SELECTS = {"NOP": NOP_HOLE}
-    NEW = {
-        "SKIP_RUN": {
-            "opcode": 0b000,
-            "select": {"name": "kind", "lsb": 4, "bits": 4, "value": 0b0100},
-            "description": "Step over the next word if the newest n samples in in_shift_reg are all `level`; n - 1 in the word.",
-            "operands": [{"name": "n1", "lsb": 1, "bits": 3}, {"name": "level", "lsb": 0, "bits": 1}],
-        },
-        "SKIP_NORUN": {
-            "opcode": 0b000,
-            "select": {"name": "kind", "lsb": 4, "bits": 4, "value": 0b0101},
-            "description": "Step over the next word unless the newest n samples in in_shift_reg are all `level`; n - 1 in the word.",
-            "operands": [{"name": "n1", "lsb": 1, "bits": 3}, {"name": "level", "lsb": 0, "bits": 1}],
-        },
-    }
+    # Adopted 2026-09-28: SKIP_RUN and SKIP_NORUN are isa.yaml's, with NOP's hole select, and the
+    # assembler writes their n - 1; the candidate adds nothing to the word space now and keeps
+    # its own test for the comparison and BRANCH_RUN for AC.
+    SELECTS = {}
+    NEW = {}
     BRANCHES = {"BRANCH_RUN": (1, ("n", "level"))}
     KINDS = {1: "BRANCH_RUN"}
     SKIPS = ("SKIP_RUN", "SKIP_NORUN")
@@ -478,7 +468,7 @@ def assemble(source, cls):
             if not 1 <= ahead < 1 << AHEAD_BITS:
                 raise SyntaxError(f"line {lineno}: {op} reaches {ahead} words ahead, not 1..{(1 << AHEAD_BITS) - 1}")
             out.append(f"{label:8}BRANCH {ahead} [{kind << KIND_LSB | a << 1 | level}]")
-        elif op in runs:
+        elif op in runs and op not in ("SKIP_RUN", "SKIP_NORUN"):  # the base assembler writes those two's n - 1 since 2026-09-28
             n = value(lineno, args[0]) if args else 0
             if not 1 <= n <= 8:
                 raise SyntaxError(f"line {lineno}: {op} n {n} outside 1..8")

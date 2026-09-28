@@ -10,9 +10,9 @@ The state a program can hold is pinned first, by running every word of the
 ISA from random state and recording what it changed and what it read
 (`test_what_each_instruction_writes`, `test_what_each_instruction_reads`):
 in_shift_reg is the only state a program both writes and reads, eight bits,
-written one at a time at one end by SHIFT_IN and read one bit at a time
-into the pc by SKIP; the pins are written by SET and read by nothing but a
-SHIFT_IN from the pad. So a bit moves from the register to a pin only
+written one at a time at one end by SHIFT_IN and read into the pc by SKIP,
+one bit, and since 2026-09-28 by the run tests, the newest n; the pins are
+written by SET and read by nothing but a SHIFT_IN from the pad. So a bit moves from the register to a pin only
 through the pc, and every XOR is control flow.
 
 Then the three baselines. One, the host's CRC (stage 5A as it stands): the
@@ -178,7 +178,8 @@ def test_what_each_instruction_writes():
     and by nothing else; the configuration by CONFIG; rc by REPEAT; the TX
     FIFO by PULL, the RX FIFO
     by PUSH; the pc goes somewhere other than the next word only for JMP,
-    SKIP and REPEAT, and only a WAIT stalls with a byte in each FIFO. So the
+    SKIP, the run tests and REPEAT, and only a WAIT stalls with a byte in
+    each FIFO. So the
     state a program can write is in_shift_reg, one bit at one end, the four
     pins, and the configuration."""
     rng = random.Random(15)
@@ -207,7 +208,7 @@ def test_what_each_instruction_writes():
     assert writers["open_drain"] == {"CONFIG"} and writers["shift_dir"] == {"CONFIG"}
     assert writers["rc"] == {"REPEAT"}
     assert writers["tx_fifo"] == {"PULL"} and writers["rx_fifo"] == {"PUSH"}
-    assert writers["pc"] == {"JMP", "SKIP", "REPEAT"}
+    assert writers["pc"] == {"JMP", "SKIP", "SKIP_RUN", "SKIP_NORUN", "REPEAT"}
     assert writers["stalled"] == {"WAIT"}, "a byte in each FIFO: only a WAIT on the wrong level stalls"
 
 
@@ -240,7 +241,8 @@ def perturbed(cpu, field, rng):
 
 
 READS = {
-    ("in_shift_reg", "pc"): {"SKIP"},
+    ("in_shift_reg", "pc"): {"SKIP", "SKIP_RUN", "SKIP_NORUN"},
+    ("shift_dir", "pc"): {"SKIP_RUN", "SKIP_NORUN"},  # the direction says which end of the register is the newest
     ("in_shift_reg", "rx_fifo"): {"PUSH"},
     ("shift_reg", "gpio"): {"SHIFT_OUT"},
     ("gpio_in", "in_shift_reg"): {"SHIFT_IN"},
@@ -265,8 +267,9 @@ READS = {
 def test_what_each_instruction_reads():
     """Every kind of word, 64 of each, run from a state and from the same
     state with one field changed: where the change shows up is what the
-    word read. The whole table: SKIP reads in_shift_reg into the pc and
-    PUSH reads it into the RX FIFO; SHIFT_OUT reads shift_reg onto a pin;
+    word read. The whole table: SKIP and the run tests read in_shift_reg
+    into the pc, the run tests under shift_dir, and PUSH reads it into the
+    RX FIFO; SHIFT_OUT reads shift_reg onto a pin;
     SHIFT_IN reads a pin into in_shift_reg and WAIT reads one into a stall;
     PULL reads the TX FIFO; REPEAT reads rc; shift_dir steers the shifts;
     and what stalls a word, a pin's level or a FIFO's fullness, holds its

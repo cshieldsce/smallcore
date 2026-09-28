@@ -14,7 +14,12 @@
 #        the same edge as the operation itself. Bit 7 is the flag, 6:5 the
 #        pin, 4 the value. Every opcode but JMP allows it; SET is nothing
 #        but it (opcode 000 with the flag, NOP is the same opcode without).
-#        One pin-write port serves them all.
+#        One pin-write port serves them all. NOP's hole, opcode 000 with the
+#        flag clear and bits 6:5 not 00, held 4064 rejected words; SKIP_RUN
+#        and SKIP_NORUN take bits 7:5 = 010 of it, bit 4 their sense, taken
+#        2026-09-28 when CAN's transmitter and receiver both asked "are the
+#        newest n samples one level?" and paid a tree of SKIPs for it. A
+#        word there has a delay and no side effect: SET owns the flag bit.
 # own:   the instruction's own operands (`lsb` counts from operand bit 0).
 #        A `select` bit here lets two mnemonics share an opcode: SHIFT_OUT /
 #        SHIFT_IN (bit 1), PULL / PUSH (bit 0). Unused bits must be 0. An
@@ -57,8 +62,8 @@ side_effect:   # one shape for every instruction with `side_effect: true`
 instructions:
   NOP:
     opcode: 0b000
-    select: {name: side, lsb: 7, bits: 1, value: 0}
-    description: Nothing changes.
+    select: {name: hole, lsb: 5, bits: 3, value: 0}
+    description: Nothing changes. Bits 7:5 = 000; 001, 011 are rejected words, 010 SKIP_RUN's.
     operands: []
 
   SET:
@@ -132,6 +137,36 @@ instructions:
       - {name: bit,   lsb: 1, bits: 3}
       - {name: level, lsb: 0, bits: 1}
     side_effect: true
+
+  SKIP_RUN:
+    opcode: 0b000
+    select: {name: kind, lsb: 4, bits: 4, value: 0b0100}
+    description: >
+      `SKIP_RUN n, level`: step over the next word if the newest n samples in
+      in_shift_reg, n 1..8, are all `level`: pc <- pc + 2 on the last cycle
+      instead of pc + 1. The newest sample is the one SHIFT_IN put in last,
+      bit 0 MSB first and bit 7 LSB first, and the n newest are the n bits
+      from that end. n is held as n - 1, the assembler's to write; n = 1 is
+      SKIP on the newest bit. The register is read as the word ends, as it
+      stood when it issued. A run test, not a bit test: its other case is
+      "not all `level`", which no level says, so SKIP_NORUN is the same
+      test the other way round. No side effect: NOP's hole has no flag bit.
+    operands:
+      - {name: n1,    lsb: 1, bits: 3}
+      - {name: level, lsb: 0, bits: 1}
+
+  SKIP_NORUN:
+    opcode: 0b000
+    select: {name: kind, lsb: 4, bits: 4, value: 0b0101}
+    description: >
+      `SKIP_NORUN n, level`: step over the next word unless the newest n
+      samples in in_shift_reg are all `level`. `SKIP_NORUN 5, 1` then `JMP
+      stuff` goes on unless five recessive bits are in, the shape CAN's
+      stuffing wants; SKIP_RUN's word after it would have to be the run's
+      case. Bit 4 is the sense.
+    operands:
+      - {name: n1,    lsb: 1, bits: 3}
+      - {name: level, lsb: 0, bits: 1}
 
   JMP:
     opcode: 0b011
