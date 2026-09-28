@@ -7,12 +7,13 @@ The core runs NOP and its delay counter, so the tests check reset and then
 step the RTL and the model together, one cycle at a time, comparing state.
 """
 
+import random
 from pathlib import Path
 
 import cocotb
 from cocotb.triggers import ClockCycles, FallingEdge, ReadOnly, RisingEdge
 
-from cpu import CPU, assemble, load_program  # sim/cpu.py, the golden model
+from cpu import CPU, Instruction, assemble, decode, encode, load_isa, load_program  # sim/cpu.py, the golden model
 from tb import Imem, drive_inputs, gpio_bits, model_state, reset, rtl_state, start_clock
 
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
@@ -666,3 +667,247 @@ async def uart_rx_0xa5_matches_model(dut):
     rtl = await cycle(1)
     assert cpu.stalled
     assert (rtl["pc"], rtl["counter"]) == (1, 0)
+
+
+# --- REPEAT ---------------------------------------------------------------------------------
+#
+# The corners tests/test_repeat.py pins on the model, here the RTL against
+# the model edge for edge. The FIFOs are inputs on this bench, so the outside
+# world is the model's FIFOs: before every edge tx_empty, tx_data and rx_full
+# follow them, and a byte fed to or popped from the model reaches the RTL as
+# a flag on the next edge, the way top.v's FIFOs would show it.
+
+ISA = load_isa()
+BYTE = "        PULL\nbit:    SHIFT_OUT 1, 0 [1]\n        SET 1, 1\n        REPEAT {count}, bit\n        SET 1, 0"
+
+
+async def cross(dut, cpu):
+    """Between edges the RTL's FIFO flags, tx_data and pins follow the model;
+    then both cross one edge and every register must agree."""
+    dut.tx_empty.value = 0 if cpu.tx_fifo else 1
+    dut.tx_data.value = cpu.tx_fifo[0] if cpu.tx_fifo else 0
+    dut.rx_full.value = 1 if len(cpu.rx_fifo) >= cpu.rx_depth else 0
+    dut.gpio_in.value = sum(level << pin for pin, level in enumerate(cpu.gpio_in))
+    cpu.step()
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    rtl, model = rtl_state(dut), model_state(cpu)
+    assert rtl == model, f"cycle {cpu.cycle}: RTL={rtl}, model={model}"
+    return rtl
+
+
+async def follow(dut, cpu):
+    await FallingEdge(dut.clk)
+    return await cross(dut, cpu)
+
+
+async def load(dut, imem, program, cpu):
+    """Reset the core onto `program`, the model at its start; the two agree."""
+    await FallingEdge(dut.clk)
+    imem.load(program)
+    drive_inputs(dut, program_words=len(program), tx_empty=0 if cpu.tx_fifo else 1, tx_data=cpu.tx_fifo[0] if cpu.tx_fifo else 0)
+    await reset(dut)
+    await ReadOnly()
+    assert rtl_state(dut) == model_state(cpu)
+
+
+async def bench(dut):
+    """The clock, a reset, and an instruction memory for load() to fill."""
+    dut.imem_word.value = 0
+    drive_inputs(dut, program_words=0)
+    start_clock(dut)
+    await reset(dut)
+    return Imem(dut, [])
+
+
+@cocotb.test()
+async def repeat_count_1_2_and_32_match_the_model(dut):
+    """A UART-shaped byte: a PULL, then a two-word cell, the shift with its
+    clock down and the clock up, REPEATed count times, then the clock down.
+    For counts 1, 2 and 32, edge for edge to the halt: 1 + 4 * count + 1
+    clocks, rc back at 0."""
+    imem = await bench(dut)
+    for count in (1, 2, 32):
+        program = assemble(BYTE.format(count=count))
+        cpu = CPU(program, tx_data=[0x96])
+        await load(dut, imem, program, cpu)
+        while not cpu.halted:
+            await follow(dut, cpu)
+        assert cpu.cycle == 1 + 4 * count + 1 and int(dut.rc.value) == 0, count
+
+
+@cocotb.test()
+async def repeat_one_word_body_and_255_word_body_match_the_model(dut):
+    """The shortest body, one SHIFT_OUT eight times over, and the longest,
+    255 SETs with delays 0, 1, 2 three times over in a 256-word program,
+    the operand byte's whole reach: 3 * (255 + 255 + 1) clocks."""
+    imem = await bench(dut)
+    one = assemble("        PULL\nbit:    SHIFT_OUT [2]\n        REPEAT 8, bit\n        SET 0, 1")
+    lines = [f"        SET {i % 4}, {i % 2} [{i % 3}]" for i in range(255)]
+    long = assemble("start:" + "\n".join(lines)[6:] + "\n        REPEAT 3, start")
+    assert len(long) == 256 and decode(long[-1], ISA).args == (255,)
+    for program, tx in ((one, [0x96]), (long, [])):
+        cpu = CPU(program, tx_data=tx)
+        await load(dut, imem, program, cpu)
+        while not cpu.halted:
+            await follow(dut, cpu)
+    assert cpu.cycle == 3 * (255 + 255 + 1)
+
+
+@cocotb.test()
+async def stalls_inside_a_repeat_body_leave_rc_alone_and_the_repeat_commits_once(dut):
+    """A body that PULLs first and PUSHes last, four times over. On the
+    second run the byte is withheld 73 clocks at the PULL; the second byte
+    PUSHed is left in a one-deep RX FIFO until the third run's PUSH has
+    stalled on it 20 clocks. RTL against model every edge; rc moves on
+    exactly four edges, the REPEATs', none of them a stall."""
+    imem = await bench(dut)
+    program = assemble("byte:   PULL 1, 0 [1]\n        SHIFT_OUT 1, 1 [1]\n        SHIFT_IN 0 [1]\n        PUSH 1, 0\n        REPEAT 4, byte\n        SET 2, 0")
+    cpu = CPU(program, rx_depth=1)
+    await load(dut, imem, program, cpu)
+    pushed = withheld = held = 0
+    stalls = {"PULL": 0, "PUSH": 0}
+    moves = []
+    while not cpu.halted:
+        at = decode(program[cpu.pc], ISA).op
+        issuing = cpu.counter == 0  # not a delay cycle of the same word
+        if at == "PULL" and issuing and not cpu.tx_fifo:
+            if pushed == 1 and withheld < 73:
+                withheld += 1
+            else:
+                cpu.tx_fifo.append(0x96)
+        if cpu.rx_fifo:
+            if pushed == 2 and held < 20:
+                held += at == "PUSH" and issuing
+            else:
+                cpu.rx_fifo.pop(0)
+        before, rc = len(cpu.rx_fifo), cpu.rc
+        rtl = await follow(dut, cpu)
+        pushed += len(cpu.rx_fifo) > before
+        if cpu.stalled:
+            stalls[at] += 1
+        if rtl["rc"] != rc:
+            moves.append((at, cpu.stalled))
+    assert (withheld, held, pushed) == (73, 20, 4)
+    assert stalls == {"PULL": 73, "PUSH": 20}
+    assert moves == [("REPEAT", False)] * 4
+
+
+def random_line(rng):
+    """One body word of any kind but JMP and REPEAT, a delay of 0..3, a side
+    effect half the time on pins 1..3 so a SHIFT_OUT keeps its own pin."""
+    d = rng.choice((0, 0, 1, 2, 3))
+    side = rng.choice(("", f", {rng.randrange(1, 4)}, {rng.randrange(2)}"))
+    return rng.choice((
+        f"SET {rng.randrange(4)}, {rng.randrange(2)} [{d}]",
+        f"NOP [{d}]",
+        f"SHIFT_OUT{side} [{d}]",
+        f"SHIFT_IN {rng.randrange(4)}{side} [{d}]",
+        f"PULL{side} [{d}]",
+        f"PUSH{side} [{d}]",
+        f"WAIT {rng.randrange(4)}, {rng.randrange(2)}{side} [{d}]",
+        f"SKIP {rng.randrange(8)}, {rng.randrange(2)}{side} [{d}]",
+        f"CONFIG shift_dir, {rng.randrange(2)}{side} [{d}]",
+    ))
+
+
+@cocotb.test()
+async def random_stalls_inside_random_repeat_bodies_match_the_model(dut):
+    """Forty random bodies of one to six words, any word but JMP and REPEAT,
+    a SKIP anywhere but last, REPEATed 1..32 times, under an outside world
+    that feeds bytes, pops bytes and moves the pins at random, so PULLs,
+    PUSHes and WAITs stall inside the body at random moments. RTL against
+    model every edge; rc moves only on a REPEAT's edge, never a stalled one;
+    and the sweep must stall inside a body with runs still to go."""
+    imem = await bench(dut)
+    rng = random.Random(5)
+    inside = 0
+    for seed in range(40):
+        body = [random_line(rng) for _ in range(rng.randrange(1, 7))]
+        while body[-1].startswith("SKIP"):
+            body[-1] = random_line(rng)
+        source = "body:   " + "\n        ".join(body) + f"\n        REPEAT {rng.randrange(1, 33)}, body\n        SET 3, 0"
+        program = assemble(source)
+        cpu = CPU(program, rx_depth=2)
+        await load(dut, imem, program, cpu)
+        for _ in range(400):
+            if cpu.halted:
+                break
+            if len(cpu.tx_fifo) < 2 and rng.random() < 0.15:
+                cpu.tx_fifo.append(rng.randrange(256))
+            if cpu.rx_fifo and rng.random() < 0.2:
+                cpu.rx_fifo.pop(0)
+            cpu.gpio_in = [rng.randrange(2) for _ in range(4)]
+            at, rc = decode(program[cpu.pc], ISA).op, cpu.rc
+            try:
+                rtl = await follow(dut, cpu)
+            except AssertionError as e:
+                raise AssertionError(f"seed {seed}: {source!r}: {e}") from e
+            if rtl["rc"] != rc:
+                assert at == "REPEAT" and not cpu.stalled, f"seed {seed}: rc moved on a {at}"
+            inside += cpu.stalled and cpu.rc != 0
+    assert inside > 50, f"only {inside} stalled edges inside a body with runs to go"
+
+
+@cocotb.test()
+async def reset_in_every_cycle_of_a_loop_matches_the_restarted_model(dut):
+    """At every clock t of the byte's 34, reset the core mid-loop, which is
+    what top.v's restart does to it: on that edge the RTL is the model
+    restarted, rc 0, and the run from there is a fresh run edge for edge,
+    34 clocks to the halt."""
+    imem = await bench(dut)
+    program = assemble(BYTE.format(count=8))
+    whole = CPU(program, tx_data=[0x96])
+    whole.run()
+    total = whole.cycle
+    assert total == 34
+    for t in range(1, total):
+        cpu = CPU(program, tx_data=[0x96, 0x53])
+        await load(dut, imem, program, cpu)
+        for _ in range(t):
+            await follow(dut, cpu)
+        await FallingEdge(dut.clk)
+        dut.reset.value = 1
+        cpu.restart()
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        rtl = rtl_state(dut)
+        assert rtl == model_state(cpu) and rtl["rc"] == 0 and rtl["pc"] == 0, f"reset at clock {t}: {rtl}"
+        await FallingEdge(dut.clk)
+        dut.reset.value = 0
+        await cross(dut, cpu)
+        while not cpu.halted:
+            await follow(dut, cpu)
+        assert cpu.cycle - t == total, f"reset at clock {t}"
+
+
+@cocotb.test()
+async def repeat_reaching_before_word_0_wraps_the_pc_past_the_end_and_halts(dut):
+    """Two NOPs then REPEAT 3, five words back: pc 2 - 5 in nine bits is
+    509, past any program, halted, rc loaded as any REPEAT loads it. The
+    assembler never writes one; the subtract does this on its own."""
+    imem = await bench(dut)
+    program = [0x0000, 0x0000, encode(Instruction("REPEAT", (5,), 2), ISA), 0x0000]
+    cpu = CPU(program)
+    await load(dut, imem, program, cpu)
+    for _ in range(3):
+        rtl = await follow(dut, cpu)
+    assert (rtl["pc"], rtl["rc"], rtl["halted"]) == (509, 2, True)
+
+
+@cocotb.test()
+async def repeats_operand_bit_7_is_the_top_of_back_not_a_side_effect_flag(dut):
+    """A 240-word body, SET 3, 0 then NOPs, twice over: back is 0xF0, which
+    read as every other word's side effect would be pin 3 <- 1 on the
+    REPEAT's edge. REPEAT's operand byte is all back: pin 3 stays 0 through
+    the loop, as in the model, and the SET after it raises it."""
+    imem = await bench(dut)
+    program = assemble("start:  SET 3, 0\n" + "        NOP\n" * 239 + "        REPEAT 2, start\n        SET 3, 1")
+    assert decode(program[240], ISA) == Instruction("REPEAT", (240,), 1)
+    cpu = CPU(program)
+    await load(dut, imem, program, cpu)
+    while not cpu.halted:
+        rtl = await follow(dut, cpu)
+        if not cpu.halted:
+            assert rtl["gpio"][3] == 0, f"cycle {cpu.cycle}: pin 3 written"
+    assert rtl["gpio"][3] == 1 and cpu.cycle == 2 * 241 + 1

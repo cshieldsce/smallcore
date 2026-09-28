@@ -39,8 +39,8 @@ OPS = tuple(ISA["instructions"])
 DELAY_MAX = (1 << ISA["fields"]["delay"]["bits"]) - 1
 DEPTH = 4  # both FIFOs in top.v
 STALL = 37  # clocks a stall is held for: longer than any delay, not a multiple of anything
-CORE = ("pc", "counter", "gpio", "halted", "shift_dir", "open_drain", "gpio_oe", "shift_reg", "in_shift_reg")
-HELD = ("gpio", "open_drain", "gpio_oe", "shift_reg", "in_shift_reg", "shift_dir", "tx", "rx")
+CORE = ("pc", "counter", "rc", "gpio", "halted", "shift_dir", "open_drain", "gpio_oe", "shift_reg", "in_shift_reg")
+HELD = ("gpio", "open_drain", "gpio_oe", "shift_reg", "in_shift_reg", "shift_dir", "rc", "tx", "rx")
 
 
 def fifo_queue(fifo):
@@ -471,21 +471,26 @@ async def a_stall_only_prepends_held_cycles(dut):
 # --- Host pressure ---------------------------------------------------------------
 
 
-def random_instruction(rng, n_words, ops=OPS):
+def random_instruction(rng, n_words, ops=OPS, address=0):
     """A valid instruction, drawn as tests/test_adversarial.py draws them:
     an opcode from `ops`, operands in range, a JMP target inside the program
-    or its halt address, a side effect half the time and never SHIFT_OUT's
-    on pin 0."""
+    or its halt address, a REPEAT at `address` reaching back into the
+    program nine times in ten and anywhere in 1..255 otherwise with its
+    delay bits a count of 1, 2, 3, 4 or 32, a side effect half the time and
+    never SHIFT_OUT's on pin 0."""
     op = rng.choice(ops)
     spec = ISA["instructions"][op]
     delay = rng.choice((0, 0, 0, 1, 2, 3, DELAY_MAX))
     if op == "JMP":
         return Instruction(op, (rng.randrange(n_words + 1),), delay)
+    if op == "REPEAT":
+        back = rng.randrange(1, address + 1) if address and rng.random() < 0.9 else rng.randrange(1, 256)
+        return Instruction(op, (back,), delay)
     if op == "CONFIG":
         cfg = rng.choice(list(ISA["config"].values()))
         args = (cfg["field"], rng.randrange(1 << cfg["bits"]))
     else:
-        args = tuple(rng.randrange(1 << o["bits"]) for o in spec["operands"])
+        args = tuple(rng.randrange(o.get("min", 0), 1 << o["bits"]) for o in spec["operands"])
     side = None
     if spec.get("side_effect") and rng.random() < 0.5:
         side = (rng.choice((1, 2, 3)) if op == "SHIFT_OUT" else rng.randrange(4), rng.randrange(2))
@@ -501,7 +506,7 @@ def random_program(rng):
     times under a host that does not pop ever stalls a PUSH."""
     n = rng.randrange(2, 12)
     ops = RECEIVER if rng.random() < 0.25 else OPS
-    return [encode(random_instruction(rng, n, ops), ISA) for _ in range(n)]
+    return [encode(random_instruction(rng, n, ops, address), ISA) for address in range(n)]
 
 
 SEEDS = 100
@@ -553,7 +558,7 @@ async def random_programs_under_host_pressure_match_the_model(dut):
             seen["stall" if cpu.stalled else "issue" if counter == 0 else "hold"].add(op)
         popped += len(ls.popped)
     assert seen["stall"] == {"PULL", "PUSH", "WAIT"}, seen
-    assert seen["issue"] == seen["hold"] == set(OPS), seen
+    assert seen["issue"] == set(OPS) and seen["hold"] == set(OPS) - {"REPEAT"}, seen  # REPEAT holds one cycle, never more
     assert pushed > 0 and popped > 0 and 0 < halted < SEEDS, (pushed, popped, halted)
 
 
@@ -925,7 +930,7 @@ async def an_open_drain_pin_releases_samples_and_drives(dut):
 # --- Restart and reset ----------------------------------------------------------------
 
 RESET_CORE = {
-    "pc": 0, "counter": 0, "gpio": [1, 1, 1, 1], "halted": False, "shift_dir": 0, "open_drain": [0, 0, 0, 0],
+    "pc": 0, "counter": 0, "rc": 0, "gpio": [1, 1, 1, 1], "halted": False, "shift_dir": 0, "open_drain": [0, 0, 0, 0],
     "gpio_oe": [1, 1, 1, 1], "shift_reg": 0, "in_shift_reg": 0,
 }
 # Pushes twice, pulls four times: with three bytes preloaded it stalls on the fourth PULL.
@@ -1262,7 +1267,8 @@ def canonical(word):
     """`word` with the operand bits its opcode never reads cleared. An opcode
     reads its select bit, its operands, the side-effect flag and, when the
     flag is set, the side-effect operands; nothing else, in isa.yaml or in
-    core.v. None for the free opcode."""
+    core.v. Every opcode is assigned since REPEAT took 111, and REPEAT reads
+    its whole operand byte."""
     for spec in ISA["instructions"].values():
         select = spec.get("select")
         if spec["opcode"] != word >> 13 or (select and (word >> select["lsb"]) & 1 != select["value"]):
@@ -1296,29 +1302,28 @@ async def same_run(dut, imem, program, twin, tx=(), gpio_in=0, limit=40):
     return states
 
 
-RESERVED_WORDS = (0xE000, 0xFF00, 0xE080, 0xE0FF)  # bare, delay 31, side effect pin 0 <- 0, every low bit set: pin 3 <- 1
+SELF_WORDS = tuple(0xE000 | count << 8 for count in range(DELAY_MAX + 1))  # REPEAT with back 0: it reaches itself
 GARBAGE_WORDS = (0x0040, 0x007F, 0x2005, 0x200D, 0x40FE, 0x400E, 0xA002, 0xA070, 0x8070)  # one of each kind, then random
 
 
 @cocotb.test()
 async def words_the_isa_rejects_do_what_their_read_bits_say(dut):
-    """The 45,312 words decode() refuses, in three kinds, and what core.v
+    """The 37,152 words decode() refuses, in two kinds, and what core.v
     makes of each. 33,536 carry garbage in operand bits their opcode never
     reads: core.v never reads them either, so nine chosen and 400 drawn at
     random run edge for edge as the model runs the word with those bits
-    cleared. 3,584 are well-formed but out of range: CONFIG's unassigned
+    cleared. 3,616 are well-formed but out of range: CONFIG's unassigned
     field 3 changes nothing, a NOP with its side effect kept; a shift_dir
     value of 2 or 3 writes its low bit; a SHIFT_OUT side effect on pin 0
-    loses to the shift on the same edge, a bare SHIFT_OUT. 8,192 carry the
-    free opcode 111: the core never leaves such a word, it reloads the delay
-    field and counts it down, over and over, and touches nothing but the
-    side-effect pin the word names; a restart is the only way on."""
+    loses to the shift on the same edge, a bare SHIFT_OUT; a REPEAT with
+    back 0 reaches itself and runs itself count times, its counter counting
+    down, a NOP [count - 1] with the delay counter at 0 throughout. No word
+    is left that the core never leaves: opcode 111 is REPEAT's."""
     rejected = [w for w in range(1 << 16) if not accepted(w)]
-    reserved = [w for w in rejected if w >> 13 == 7]
-    garbage = [w for w in rejected if canonical(w) not in (None, w) and accepted(canonical(w))]
-    semantic = sorted(set(rejected) - set(reserved) - set(garbage))
-    assert (len(rejected), len(reserved), len(garbage), len(semantic)) == (45312, 8192, 33536, 3584)
-    assert all(w in garbage for w in GARBAGE_WORDS) and all(w in reserved for w in RESERVED_WORDS)
+    garbage = [w for w in rejected if canonical(w) != w and accepted(canonical(w))]
+    semantic = sorted(set(rejected) - set(garbage))
+    assert (len(rejected), len(garbage), len(semantic)) == (37152, 33536, 3616)
+    assert all(w in garbage for w in GARBAGE_WORDS) and all(w in semantic for w in SELF_WORDS)
     imem = Imem(dut, [])
     start_clock(dut)
 
@@ -1349,27 +1354,18 @@ async def words_the_isa_rejects_do_what_their_read_bits_say(dut):
             states = await same_run(dut, imem, assemble("PULL") + [word], assemble("PULL\nSHIFT_OUT"), tx=(byte,))
             assert states[-1]["gpio"][0] == byte & 1, "the shift wins the pin"
 
-    prefix = assemble("SHIFT_IN 1\nPULL 3, 0")  # state to keep: in_shift_reg 0x80, shift_reg 0x96, pin 3 low, 0x53 queued
-    for word in RESERVED_WORDS:
-        program = prefix + [word] + assemble("SET 0, 0")
-        await begin(dut, imem, program, tx=(0x96, 0x53), gpio_in=0b0010)
-        await run_edges(dut, 2)
-        delay = (word >> 8) & DELAY_MAX
-        gpio = [1, 1, 1, 0]
-        if word & 0x80:
-            gpio[(word >> 5) & 3] = (word >> 4) & 1  # the side-effect bits are honoured
-        for k in range(70):
+    for word in SELF_WORDS:
+        count = ((word >> 8) & DELAY_MAX) + 1
+        await begin(dut, imem, [word] + tail, tx=(0x96,))
+        cpu = CPU(assemble(f"NOP [{count - 1}]") + tail, tx_data=[0x96], rx_depth=DEPTH)
+        for k in range(count + 2):
+            cpu.step()
             state = (await run_edges(dut, 1))[0]
-            expected = {
-                "pc": 2, "counter": delay - k % (delay + 1), "halted": False, "shift_dir": 0, "open_drain": [0, 0, 0, 0],
-                "gpio": gpio, "gpio_oe": [1, 1, 1, 1], "shift_reg": 0x96,
-                "in_shift_reg": 0x80, "tx": [0x53], "rx": [],
-            }
-            assert state == expected, f"{word:#06x} edge {k}: {state}"
-        dut.restart.value = 1
-        state = (await run_edges(dut, 1))[0]
-        dut.restart.value = 0
-        assert state == {**RESET_CORE, "tx": [0x53], "rx": []}, f"{word:#06x} after a restart: {state}"
+            twin = model_top_state(cpu)
+            assert {key: v for key, v in state.items() if key not in ("counter", "rc")} == \
+                   {key: v for key, v in twin.items() if key not in ("counter", "rc")}, f"{word:#06x} edge {k}: {state}"
+            assert (state["counter"], state["rc"]) == (0, max(count - 1 - k, 0)), f"{word:#06x} edge {k}: {state}"
+        assert cpu.halted and state["halted"]
 
 
 # --- Long random programs under everything at once ------------------------------------
@@ -1382,7 +1378,7 @@ def long_program(rng):
     """Two to sixty-four words, drawn as random_program draws them."""
     n = rng.randrange(2, 65)
     ops = RECEIVER if rng.random() < 0.25 else OPS
-    return [encode(random_instruction(rng, n, ops), ISA) for _ in range(n)]
+    return [encode(random_instruction(rng, n, ops, address), ISA) for address in range(n)]
 
 
 @cocotb.test()
@@ -1437,6 +1433,6 @@ async def long_random_programs_under_a_rude_host_with_restarts_match_the_model(d
                 seen["stall" if ls.cpu.stalled else "issue" if counter == 0 else "hold"].add(op)
         dropped, idle_pops, popped = dropped + ls.dropped, idle_pops + ls.idle_pops, popped + len(ls.popped)
     assert seen["stall"] == {"PULL", "PUSH", "WAIT"}, seen
-    assert seen["issue"] == seen["hold"] == set(OPS), seen
+    assert seen["issue"] == set(OPS) and seen["hold"] == set(OPS) - {"REPEAT"}, seen  # REPEAT holds one cycle, never more
     assert all(hit.values()), hit
     assert dropped > 0 and idle_pops > 0 and popped > 0, (dropped, idle_pops, popped)

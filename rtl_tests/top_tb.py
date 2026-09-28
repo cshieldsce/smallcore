@@ -1677,3 +1677,69 @@ async def restart_on_the_clock_a_pull_or_push_issues_keeps_the_fifos(dut):
     assert int(dut.core_i.pc.value) == 0
     assert int(dut.tx_fifo.count.value) == 0
     assert int(dut.rx_fifo.count.value) == 0, "the restart pushed a byte"
+
+
+# --- SWD with REPEAT ------------------------------------------------------------------------
+
+VARIANTS = PROGRAMS.parent / "experiments" / "repeat"
+
+
+@cocotb.test()
+async def swd_with_repeat_is_the_canonical_program_at_the_pins(dut):
+    """experiments/repeat/swd_read_A.asm and swd_write_A.asm, 40 words each,
+    against programs/swd_read.asm and swd_write.asm, 103 and 106, on the
+    same wire with the same target and host: the read with a host that
+    drains as bytes land and with the sleeping host of the stall test, which
+    reads nothing until the FIFO is full and then sleeps 200 clocks twice;
+    the write with a prompt host and with a target that says WAIT and a host
+    150 clocks late pushing the request again, the retry entering the
+    request loop at its label. Clock for clock the same SWDIO, SWCLK, pad
+    enable and target drive, the same bytes to the host on the same pops,
+    the same view from the target."""
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    start_clock(dut)
+    await reset(dut)
+    imem = Imem(dut, [])
+    data = 0xE31D5396
+    for kind, host_kind in (("read", "prompt"), ("read", "sleeping"), ("write", "prompt"), ("write", "wait")):
+        runs = []
+        for path in (PROGRAMS / f"swd_{kind}.asm", VARIANTS / f"swd_{kind}_A.asm"):
+            program = load_program(path)
+            await FallingEdge(dut.clk)
+            imem.load(program)
+            drive_host(dut, program_words=0)
+            dut.gpio_in.value = 0b0001  # the wire idles high
+            await reset(dut)
+            received, pops = [], []
+            if kind == "read":
+                target = SwdTarget([SWD_OK], data)
+                await FallingEdge(dut.clk)
+                dut.tx_data.value = 0x8D
+                dut.tx_push.value = 1
+                await FallingEdge(dut.clk)
+                dut.tx_push.value = 0
+                dut.program_words.value = len(program)
+                host = cocotb.start_soon(swd_host_drain(dut, received) if host_kind == "prompt"
+                                         else swd_sleeping_host(dut, received, pops, 200))
+            else:
+                target = SwdTarget([SWD_OK] if host_kind == "prompt" else [SWD_WAIT, SWD_OK])
+                host = cocotb.start_soon(swd_write_host(dut, 0xA9, swd_payload(data), received, delay=0 if host_kind == "prompt" else 150))
+                await FallingEdge(dut.clk)
+                await FallingEdge(dut.clk)
+                dut.program_words.value = len(program)
+            wire = await swd_wire(dut, target, limit=1400)
+            host.cancel()
+            runs.append((len(program), wire, list(received), list(target.requests), list(target.written), list(pops)))
+        (words, *canonical), (words_a, *variant) = runs
+        assert (words, words_a) == ((103, 40) if kind == "read" else (106, 40))
+        assert variant == canonical, f"{kind} with a {host_kind} host: the REPEAT program differs at the pins"
+        wire, received, requests, written, pops = canonical
+        if kind == "read":
+            assert received == [SWD_OK << 5, 0x96, 0x53, 0x1D, 0xE3, 0xF1] and requests == [0x8D]
+            assert (len(wire[1]) > 379 + 200) == (host_kind == "sleeping")
+        else:
+            # The ACK is bits 7:5 of the byte; after a WAIT the retry's ACK byte carries the first ACK's bits below it.
+            assert [b >> 5 for b in received] == ([SWD_OK] if host_kind == "prompt" else [SWD_WAIT, SWD_OK])
+            assert written == [(data, True)] and requests == ([0xA9] if host_kind == "prompt" else [0xA9, 0xA9])
