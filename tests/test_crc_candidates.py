@@ -47,7 +47,7 @@ from test_can import BIT, GAP, IDENT, PROGRAMS, Glitch, bits_to_int, frame_bits 
 from test_can_rx import AT, RX_SAMPLE, frame_on_the_bus, run_rx, stuff_positions  # noqa: E402
 from test_crc import CRC4, VECTORS, bits_of, crc  # noqa: E402
 
-ISA = load_isa()
+ISA = candidates.can.round_isa()  # the ISA the round ran on: the accumulator came after
 EXPERIMENTS = ROOT / "experiments" / "crc"
 CRC_PIN = 1  # the pin every CRC program here puts the CRC's bits on, MSB first, one per run of the `crc` body
 ZERO_PIN = 3  # the pin the tree forms hold at 0 and sample for the feedback the CRC's emission forces to 0

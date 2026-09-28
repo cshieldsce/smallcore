@@ -13,7 +13,9 @@ in_shift_reg is the only state a program both writes and reads, eight bits,
 written one at a time at one end by SHIFT_IN and read into the pc by SKIP,
 one bit, and since 2026-09-28 by the run tests, the newest n; the pins are
 written by SET and read by nothing but a SHIFT_IN from the pad. So a bit moves from the register to a pin only
-through the pc, and every XOR is control flow.
+through the pc, and every XOR is control flow. That was the ISA the
+baselines ran on; since 2026-09-28 the accumulator, acc and its polynomial,
+is the second state a program writes and reads, and the census counts it.
 
 Then the three baselines. One, the host's CRC (stage 5A as it stands): the
 computation is separable from the wire. Two, the widest CRC the current ISA
@@ -116,14 +118,14 @@ def test_the_oracle_is_the_benchs_crc():
 # --- the state a program can hold ---------------------------------------------------------
 
 
-FIELDS = ("pc", "shift_reg", "in_shift_reg", "gpio", "open_drain", "shift_dir", "rc", "tx_fifo", "rx_fifo", "stalled")
+FIELDS = ("pc", "shift_reg", "in_shift_reg", "gpio", "open_drain", "shift_dir", "rc", "tx_fifo", "rx_fifo", "stalled", "acc", "poly")
 
 
 def state(cpu):
     return {
         "pc": cpu.pc, "shift_reg": cpu.shift_reg, "in_shift_reg": cpu.in_shift_reg, "gpio": tuple(cpu.gpio),
         "open_drain": tuple(cpu.open_drain), "shift_dir": cpu.shift_dir, "rc": cpu.rc, "tx_fifo": tuple(cpu.tx_fifo),
-        "rx_fifo": tuple(cpu.rx_fifo), "stalled": cpu.stalled,
+        "rx_fifo": tuple(cpu.rx_fifo), "stalled": cpu.stalled, "acc": cpu.acc, "poly": cpu.poly,
     }
 
 
@@ -136,6 +138,7 @@ def machine(word, rng, tx=1, rx=1):
     cpu.gpio, cpu.open_drain = [rng.randrange(2) for _ in range(4)], [rng.randrange(2) for _ in range(4)]
     cpu.gpio_in, cpu.shift_dir = [rng.randrange(2) for _ in range(4)], rng.randrange(2)
     cpu.rc = rng.randrange(1, 32)
+    cpu.acc, cpu.poly = rng.randrange(1 << 16), rng.randrange(1 << 16)
     cpu.rx_fifo = [rng.randrange(256) for _ in range(rx)]
     return cpu
 
@@ -203,11 +206,12 @@ def test_what_each_instruction_writes():
                         side_effects.add((instr.op, instr.side is not None or instr.op in ("SET", "SHIFT_OUT")))
     assert writers["in_shift_reg"] == {"SHIFT_IN"}
     assert writers["shift_reg"] == {"SHIFT_OUT", "PULL"}
-    assert writers["gpio"] == {"SET", "SHIFT_OUT", "SHIFT_IN", "PULL", "PUSH", "WAIT", "SKIP", "CONFIG"}
-    assert all(carried for _, carried in side_effects), "a pin changes only under SET, SHIFT_OUT or a side effect"
+    assert writers["gpio"] == {"SET", "SHIFT_OUT", "SHIFT_IN", "PULL", "PUSH", "WAIT", "SKIP", "CONFIG", "ACC_OUT"}
+    assert all(carried or op == "ACC_OUT" for op, carried in side_effects), "a pin changes only under SET, SHIFT_OUT, ACC_OUT or a side effect"
+    assert writers["acc"] == {"ACC_IN", "ACC_CRC", "ACC_OUT", "ACC_PUSH"} and writers["poly"] == {"ACC_LOAD"}
     assert writers["open_drain"] == {"CONFIG"} and writers["shift_dir"] == {"CONFIG"}
     assert writers["rc"] == {"REPEAT"}
-    assert writers["tx_fifo"] == {"PULL"} and writers["rx_fifo"] == {"PUSH"}
+    assert writers["tx_fifo"] == {"PULL"} and writers["rx_fifo"] == {"PUSH", "ACC_PUSH"}
     assert writers["pc"] == {"JMP", "SKIP", "SKIP_RUN", "SKIP_NORUN", "REPEAT"}
     assert writers["stalled"] == {"WAIT"}, "a byte in each FIFO: only a WAIT on the wrong level stalls"
 
@@ -217,6 +221,7 @@ def perturbed(cpu, field, rng):
     other = CPU(list(cpu.program), gpio_in=0, tx_data=list(cpu.tx_fifo), isa=ISA)
     other.shift_reg, other.in_shift_reg, other.gpio, other.open_drain = cpu.shift_reg, cpu.in_shift_reg, list(cpu.gpio), list(cpu.open_drain)
     other.gpio_in, other.shift_dir, other.rc, other.rx_fifo = list(cpu.gpio_in), cpu.shift_dir, cpu.rc, list(cpu.rx_fifo)
+    other.acc, other.poly = cpu.acc, cpu.poly
     if field == "shift_reg":
         other.shift_reg ^= rng.randrange(1, 256)
     elif field == "in_shift_reg":
@@ -237,6 +242,10 @@ def perturbed(cpu, field, rng):
         other.tx_fifo = []
     elif field == "rx_full":
         other.rx_fifo = [0] * other.rx_depth
+    elif field == "acc":
+        other.acc ^= rng.randrange(1, 1 << 16)
+    elif field == "poly":
+        other.poly ^= rng.randrange(1, 1 << 16)
     return other
 
 
@@ -254,9 +263,15 @@ READS = {
     ("tx_empty", "pc"): {"PULL"},
     ("tx_empty", "gpio"): {"PULL"},
     ("tx_empty", "shift_reg"): {"PULL"},  # and its load
-    ("rx_full", "stalled"): {"PUSH"},
-    ("rx_full", "pc"): {"PUSH"},
+    ("rx_full", "stalled"): {"PUSH", "ACC_PUSH"},
+    ("rx_full", "pc"): {"PUSH", "ACC_PUSH"},
     ("rx_full", "gpio"): {"PUSH"},
+    ("rx_full", "acc"): {"ACC_PUSH"},  # and its shift
+    ("acc", "rx_fifo"): {"ACC_PUSH"},  # the accumulator, since 2026-09-28: the second register a program writes and reads
+    ("acc", "gpio"): {"ACC_OUT"},
+    ("gpio_in", "acc"): {"ACC_IN", "ACC_CRC"},
+    ("poly", "acc"): {"ACC_CRC"},
+    ("shift_reg", "poly"): {"ACC_LOAD"},
     ("rc", "pc"): {"REPEAT"},
     ("shift_dir", "gpio"): {"SHIFT_OUT"},
     ("shift_dir", "shift_reg"): {"SHIFT_OUT"},
@@ -265,7 +280,7 @@ READS = {
 
 
 def test_what_each_instruction_reads():
-    """Every kind of word, 64 of each, run from a state and from the same
+    """Every kind of word, 64 of each, run from four states and from the same
     state with one field changed: where the change shows up is what the
     word read. The whole table: SKIP and the run tests read in_shift_reg
     into the pc, the run tests under shift_dir, and PUSH reads it into the
@@ -281,10 +296,10 @@ def test_what_each_instruction_reads():
     for word, instr in valid_words():
         by_op.setdefault(instr.op, []).append(word)
     reads = {}
-    fields = ("shift_reg", "in_shift_reg", "gpio", "gpio_in", "open_drain", "shift_dir", "rc", "tx_fifo", "tx_empty", "rx_full")
+    fields = ("shift_reg", "in_shift_reg", "gpio", "gpio_in", "open_drain", "shift_dir", "rc", "tx_fifo", "tx_empty", "rx_full", "acc", "poly")
     for op, words in by_op.items():
         for word in rng.sample(words, min(64, len(words))):
-            for field in fields:
+            for field in [f for f in fields for _ in range(4)]:  # four states each: a read that shows only sometimes still shows
                 base = machine(word, rng, tx=2, rx=1)
                 other = perturbed(base, field, rng)
                 a, b = run_word(base), run_word(other)

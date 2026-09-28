@@ -36,7 +36,7 @@ class CPU(_CPU):
 OPS = tuple(ISA["instructions"])
 WORD_BITS = ISA["word_bits"]
 DELAY_MAX = (1 << ISA["fields"]["delay"]["bits"]) - 1
-STATE = ("pc", "gpio", "open_drain", "shift_reg", "in_shift_reg", "shift_dir", "tx_fifo", "rx_fifo", "counter", "rc", "halted")
+STATE = ("pc", "gpio", "open_drain", "shift_reg", "in_shift_reg", "shift_dir", "tx_fifo", "rx_fifo", "counter", "rc", "halted", "acc", "poly")
 
 
 def run_holds(reg, shift_dir, instr):
@@ -134,9 +134,14 @@ def test_valid_word_count_per_instruction():
         "SKIP": 8 * 2 * 9 * 32,     # bit x level x side
         "SKIP_RUN": 8 * 2 * 32,     # n x level, no side effect: NOP's hole has no flag bit
         "SKIP_NORUN": 8 * 2 * 32,
+        "ACC_IN": 4 * 32,           # pin, no side effect
+        "ACC_CRC": 4 * 32,
+        "ACC_OUT": 4 * 32,
+        "ACC_PUSH": 32,
+        "ACC_LOAD": 32,
         "REPEAT": 255 * 32,         # back 1..255 x count 1..32
     }
-    assert len(VALID) == 28384 + 1024
+    assert len(VALID) == 28384 + 1024 + 448
 
 
 def test_words_wider_than_16_bits_are_rejected():
@@ -173,6 +178,7 @@ def snapshot(cpu):
         "pc": cpu.pc, "gpio": list(cpu.gpio), "open_drain": list(cpu.open_drain), "shift_reg": cpu.shift_reg,
         "in_shift_reg": cpu.in_shift_reg, "shift_dir": cpu.shift_dir, "tx_fifo": list(cpu.tx_fifo),
         "rx_fifo": list(cpu.rx_fifo), "counter": cpu.counter, "rc": cpu.rc, "halted": cpu.halted,
+        "acc": cpu.acc, "poly": cpu.poly,
     }
 
 
@@ -196,9 +202,10 @@ def checked_step(cpu):
     assert after["shift_dir"] in (0, 1)
     assert len(after["rx_fifo"]) <= cpu.rx_depth
     assert 0 <= after["rc"] <= DELAY_MAX, "rc is five bits: the runs still to go, at most 31"
+    assert 0 <= after["acc"] <= 0xFFFF and 0 <= after["poly"] <= 0xFFFF, "the accumulator and its polynomial are sixteen bits"
 
     stalling = before["counter"] == 0 and (
-        (instr.op == "PULL" and not before["tx_fifo"]) or (instr.op == "PUSH" and len(before["rx_fifo"]) >= cpu.rx_depth)
+        (instr.op == "PULL" and not before["tx_fifo"]) or (instr.op in ("PUSH", "ACC_PUSH") and len(before["rx_fifo"]) >= cpu.rx_depth)
         or (instr.op == "WAIT" and gpio_in[instr.args[0]] != instr.args[1])
     )
     if stalling:
@@ -226,6 +233,18 @@ def checked_step(cpu):
             expected["tx_fifo"] = before["tx_fifo"][1:]
         elif instr.op == "PUSH":
             expected["rx_fifo"] = before["rx_fifo"] + [before["in_shift_reg"]]
+        elif instr.op in ("ACC_IN", "ACC_CRC"):
+            bit, acc = gpio_in[instr.args[0]], before["acc"]  # the pad as SHIFT_IN samples it
+            feedback = instr.op == "ACC_CRC" and (acc >> 15) != bit
+            expected["acc"] = (((acc << 1) & 0xFFFF) | (bit if instr.op == "ACC_IN" else 0)) ^ (before["poly"] if feedback else 0)
+        elif instr.op == "ACC_OUT":
+            expected["gpio"][instr.args[0]] = before["acc"] >> 15
+            expected["acc"] = (before["acc"] << 1) & 0xFFFF
+        elif instr.op == "ACC_PUSH":
+            expected["rx_fifo"] = before["rx_fifo"] + [before["acc"] & 0xFF]
+            expected["acc"] = before["acc"] >> 8
+        elif instr.op == "ACC_LOAD":
+            expected["poly"] = (before["shift_reg"] << 8) | (before["poly"] >> 8)
         elif instr.op == "CONFIG":
             field, value = instr.args
             expected["open_drain"] = list(before["open_drain"])
@@ -344,7 +363,7 @@ def test_random_walk_reaches_every_kind_of_cycle():
                 through += cpu.pc == pc + 1
     assert ops == set(OPS)
     assert {k for _, k in kinds} == {"stall", "issue", "hold"}
-    assert {op for op, k in kinds if k == "stall"} == {"PULL", "PUSH", "WAIT"}
+    assert {op for op, k in kinds if k == "stall"} == {"PULL", "PUSH", "WAIT", "ACC_PUSH"}
     assert {op for op, k in kinds if k == "hold"} == set(OPS) - {"REPEAT"}, "REPEAT holds one cycle, never more"
     assert back > 100 and through > 30, f"REPEATs going back {back}, falling through {through}"
     assert 50 < halted < 300
@@ -355,7 +374,7 @@ def test_reset_state():
         cpu = CPU([0x0000], gpio=gpio, gpio_in=gpio_in)
         assert snapshot(cpu) == {
             "pc": 0, "gpio": [gpio] * 4, "open_drain": [0, 0, 0, 0], "shift_reg": 0, "in_shift_reg": 0, "shift_dir": 0,
-            "tx_fifo": [], "rx_fifo": [], "counter": 0, "rc": 0, "halted": False,
+            "tx_fifo": [], "rx_fifo": [], "counter": 0, "rc": 0, "halted": False, "acc": 0, "poly": 0,
         }
         assert cpu.gpio_oe == [1, 1, 1, 1], "push-pull is the reset: every pin driven"
         assert (cpu.gpio_in, cpu.cycle, cpu.stalled, cpu.trace) == ([gpio_in] * 4, 0, False, [])

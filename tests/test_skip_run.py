@@ -38,7 +38,7 @@ RUNS = ("SKIP_RUN", "SKIP_NORUN")
 def old_isa():
     """isa.yaml as it was before the run tests: the two gone, NOP's select the flag bit alone."""
     isa = copy.deepcopy(ISA)
-    for op in RUNS:
+    for op in RUNS + ("ACC_IN", "ACC_CRC", "ACC_OUT", "ACC_PUSH", "ACC_LOAD"):  # the accumulator came after
         del isa["instructions"][op]
     isa["instructions"]["NOP"]["select"] = {"name": "side", "lsb": 7, "bits": 1, "value": 0}
     return isa
@@ -91,6 +91,8 @@ def test_the_run_tests_take_1024_rejected_words_and_change_no_other():
         if was is not None:
             assert now == was, f"word {w:#06x} changed meaning"
             same += 1
+        elif now is not None and now.op.startswith("ACC_"):
+            rejected += 1  # the accumulator's, adopted after: tests/test_acc.py counts them
         elif now is not None:
             assert now.op in RUNS and now.side is None, f"word {w:#06x}"
             new += 1

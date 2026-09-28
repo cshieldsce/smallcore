@@ -23,6 +23,7 @@ LINE_RE = re.compile(
 PC_BITS = 9  # the pc: room for the halt address 256 and a SKIP's pc + 2 past it, as in core.v
 RUN_TESTS = ("SKIP_RUN", "SKIP_NORUN")  # the run tests, SKIP-shaped: they step over the next word
 SKIPS = ("SKIP",) + RUN_TESTS  # every word that steps over the next one
+ACC_BITS = 16  # the accumulator and its polynomial
 
 
 class Instruction(NamedTuple):
@@ -330,6 +331,8 @@ class CPU:
         self.cycle = 0
         self.counter = 0  # cycles left in the current instruction
         self.rc = 0  # REPEAT's counter, 5 bits: runs of the body still to go, 0 between loops; moves on a REPEAT's cycle only
+        self.acc = 0  # the accumulator, 16 bits: the second stream register, shifted towards bit 15 by ACC_IN and ACC_CRC
+        self.poly = 0  # its polynomial, 16 bits, left-aligned: ACC_CRC's feedback, loaded a byte at a time by ACC_LOAD
         self.halted = not self.program
         self.trace = []  # gpio levels (gpio[0], gpio[1], ...) at the end of each cycle
 
@@ -372,7 +375,7 @@ class CPU:
 
         instr = decode(self.program[self.pc], self.isa)  # imem[pc], visible every cycle
         if self.counter == 0:
-            if ((instr.op == "PULL" and not self.tx_fifo) or (instr.op == "PUSH" and len(self.rx_fifo) >= self.rx_depth)
+            if ((instr.op == "PULL" and not self.tx_fifo) or (instr.op in ("PUSH", "ACC_PUSH") and len(self.rx_fifo) >= self.rx_depth)
                     or (instr.op == "WAIT" and self.gpio_in[instr.args[0]] != instr.args[1])):
                 # Block: stay on this PULL / PUSH / WAIT, pins unchanged, until there is a
                 # byte / room / the level. The pin is read as SHIFT_IN samples it: what the
@@ -404,6 +407,21 @@ class CPU:
                 self.shift_reg = self.tx_fifo.pop(0)
             elif instr.op == "PUSH":
                 self.rx_fifo.append(self.in_shift_reg)  # the register keeps its value
+            elif instr.op in ("ACC_IN", "ACC_CRC"):
+                # The pad sampled as SHIFT_IN samples it; ACC_CRC feeds the bit that leaves back in.
+                bit = self.gpio_in[instr.args[0]]
+                top = self.acc >> (ACC_BITS - 1)
+                self.acc = ((self.acc << 1) & 0xFFFF) | (bit if instr.op == "ACC_IN" else 0)
+                if instr.op == "ACC_CRC" and top ^ bit:
+                    self.acc ^= self.poly
+            elif instr.op == "ACC_OUT":
+                self.gpio[instr.args[0]] = self.acc >> (ACC_BITS - 1)  # the pin-write port, as SET's
+                self.acc = (self.acc << 1) & 0xFFFF
+            elif instr.op == "ACC_PUSH":
+                self.rx_fifo.append(self.acc & 0xFF)
+                self.acc >>= 8
+            elif instr.op == "ACC_LOAD":
+                self.poly = (self.shift_reg << 8) | (self.poly >> 8)
             elif instr.op == "CONFIG":
                 # One write port into the configuration registers, field-decoded.
                 field, value = instr.args

@@ -62,7 +62,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from cpu import LINE_RE, load_isa
+from cpu import LINE_RE
 
 HERE = Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location("can_candidates", HERE.parent / "can" / "candidates.py")
@@ -87,7 +87,7 @@ class Variant(Candidate):
     @classmethod
     def isa(cls):
         if cls.__dict__.get("_isa") is None:
-            isa = copy.deepcopy(load_isa())
+            isa = can.round_isa()  # the ISA the round ran on, before the accumulator was adopted
             for klass in reversed(cls.__mro__):
                 for name, select in klass.__dict__.get("SELECTS", {}).items():
                     isa["instructions"][name]["select"] = copy.deepcopy(select)

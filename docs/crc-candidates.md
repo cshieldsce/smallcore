@@ -1,6 +1,8 @@
 # CRC state candidates
 
-**Outcome (2026-09-28): measured, nothing merged, the call is charlie's.**
+**Outcome (2026-09-28): the accumulator adopted** ("Decided", below). W32
+and Pin16 rejected, Lanes subsumed, every candidate program kept. First
+measured with nothing merged, as follows.
 The CRC baselines (`docs/crc-baselines.md`) left one wall, the width of
 the state: `in_shift_reg` is the eight bits a program both writes and
 reads, and CRC-15 wants fifteen, thirty in the form the core can execute.
@@ -186,6 +188,55 @@ shape, except the parity, which is pinned.
    of it and an XOR feedback path explain the CRC wall. W and Pin answer
    the CRC question only, Lanes the RX question only, and Acc both, one at
    a time, at 32 bits of state: the most of any candidate here.
+
+## Decided
+
+The reviewer's call, 2026-09-28.
+
+| | |
+|---|---|
+| W32 | rejected. Width alone: correct, 180 words at 13 to 20 cycles an input bit, and nothing for RX |
+| Pin16 | rejected. An elegant proof that an input without a slot halves the window, as the baselines predicted, but still 171 words at 12 to 19 cycles, and nothing for RX |
+| Lanes | rejected as a separate feature, subsumed: it found half of the answer. The accumulator is Lanes widened to sixteen bits with a feedback path |
+| Acc | **adopted**: a sixteen-bit second stream register with optional LFSR feedback. Two failures, CRC's width and RX's collision, converged on it, and it turns the CRC from computable into usable, 171 to 180 words into 23 |
+
+One refinement before the ISA froze, the reviewer's: the candidate's one
+input word, the shift with feedback, was a plain register only with poly =
+1 and a push every eight bits, before anything reached bit 15; shifted
+further, the old top bit fed back. The adopted accumulator says which in
+the word, not in hidden mode state: `ACC_IN pin`, the plain shift, the
+oldest bit falling off bit 15, and `ACC_CRC pin`, the shift with feedback.
+
+### The spec
+
+```
+  15 14 13 | 12 .. 8 | 7 6 5 | 4 3 2 | 1 0
+   0  0  0 |  delay  | 0 0 1 | kind  | pin
+```
+
+NOP's hole, bits 7:5 = 001, which the CAN round's SKIP_SENT had been
+measured in. kind 000 `ACC_IN pin`: acc ← (acc << 1) | gpio_in[pin]. 001
+`ACC_CRC pin`: f = acc[15] ^ gpio_in[pin], acc ← (acc << 1) ^ (f ? poly :
+0). 010 `ACC_OUT pin`: gpio[pin] ← acc[15], acc ← acc << 1, through the one
+pin-write port. 011 `ACC_PUSH`, pin bits 0: the RX FIFO takes acc[7:0],
+acc ← acc >> 8, stalling while the FIFO is full as PUSH does. 100
+`ACC_LOAD`, pin bits 0: poly ← {shift_reg, poly[15:8]}. Kinds 101 to 111
+stay rejected. The pad is sampled as SHIFT_IN samples it, as the word
+issues. acc shifts towards bit 15 whatever `shift_dir` says, since a CRC is
+defined MSB first. A delay as any word, no side effect. Reset and restart
+clear acc and poly. 448 words that were rejected are instructions, and no
+other word changed meaning. CAN's CRC-15 is poly = 0x8B32, 0x4599
+left-aligned; the parity is poly = 0x8000.
+
+In the model (`sim/cpu.py`) and pinned on it (`tests/test_acc.py`): the
+words and the 448, every program the same words, the plain shift over forty
+samples, the CRC against the oracle for five polynomials, the parity among
+them, ACC_OUT, ACC_PUSH and its stall, ACC_LOAD, the sample as the word
+issues, reset and restart, and nothing else moved. The candidate programs
+on the adopted ISA: `experiments/acc/crc15.asm`, 23 words, and
+`experiments/acc/can_rx_bytes.asm`, 92 words, the polynomial load gone. The
+candidate rounds stay measured on the ISA they ran on
+(`experiments/can/candidates.py`, `round_isa`).
 
 ## Files
 

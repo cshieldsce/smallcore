@@ -49,7 +49,7 @@ from test_can import (  # noqa: E402
 )
 from test_swd import DATA, DP_READ, OK, READ, SlowHost, Target, Wire, read_bytes  # noqa: E402
 
-BASE = load_isa()
+BASE = candidates.round_isa()  # the ISA the round ran on: the accumulator came after
 
 # tag -> (words, distinct, pins on the bus side, the clock of the bit whose level the bus sample takes, cycles after it to decide)
 ARB_SPLICED = {"A": (84, 15, 2, 5, 2), "B": (95, 34, 1, 4, 3), "Bc": (84, 33, 1, 4, 3), "AB": (84, 15, 1, 5, 2), "ABc": (73, 14, 1, 5, 2)}

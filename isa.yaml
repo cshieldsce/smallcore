@@ -18,8 +18,11 @@
 #        flag clear and bits 6:5 not 00, held 4064 rejected words; SKIP_RUN
 #        and SKIP_NORUN take bits 7:5 = 010 of it, bit 4 their sense, taken
 #        2026-09-28 when CAN's transmitter and receiver both asked "are the
-#        newest n samples one level?" and paid a tree of SKIPs for it. A
-#        word there has a delay and no side effect: SET owns the flag bit.
+#        newest n samples one level?" and paid a tree of SKIPs for it. Bits
+#        7:5 = 001 are the accumulator's, taken 2026-09-28 when CRC-15 and
+#        CAN's receiver both ran out of the one register a program reads and
+#        writes. A word there has a delay and no side effect: SET owns the
+#        flag bit.
 # own:   the instruction's own operands (`lsb` counts from operand bit 0).
 #        A `select` bit here lets two mnemonics share an opcode: SHIFT_OUT /
 #        SHIFT_IN (bit 1), PULL / PUSH (bit 0). Unused bits must be 0. An
@@ -63,7 +66,7 @@ instructions:
   NOP:
     opcode: 0b000
     select: {name: hole, lsb: 5, bits: 3, value: 0}
-    description: Nothing changes. Bits 7:5 = 000; 001, 011 are rejected words, 010 SKIP_RUN's.
+    description: Nothing changes. Bits 7:5 = 000; 001 are the accumulator's, 010 SKIP_RUN's, 011 rejected words.
     operands: []
 
   SET:
@@ -167,6 +170,57 @@ instructions:
     operands:
       - {name: n1,    lsb: 1, bits: 3}
       - {name: level, lsb: 0, bits: 1}
+
+  ACC_IN:
+    opcode: 0b000
+    select: {name: kind, lsb: 2, bits: 6, value: 0b001000}
+    description: >
+      acc <- (acc << 1) | gpio_in[pin]: the accumulator as a plain stream
+      register, sixteen bits, the newest sample at bit 0 and the oldest
+      falling off bit 15. The pad is sampled as SHIFT_IN samples it. acc
+      shifts towards bit 15 whatever shift_dir says. `acc`, sixteen bits,
+      is the second stream register, beside in_shift_reg: CAN's receiver
+      keeps the raw history in one and the destuffed data in the other.
+    operands:
+      - {name: pin, lsb: 0, bits: 2}
+
+  ACC_CRC:
+    opcode: 0b000
+    select: {name: kind, lsb: 2, bits: 6, value: 0b001001}
+    description: >
+      f = acc[15] ^ gpio_in[pin]; acc <- (acc << 1) ^ (f ? poly : 0): the
+      same shift with LFSR feedback, the spec's CRC register in the direct
+      form, any width to 16 with the polynomial left-aligned in `poly`
+      (CAN's CRC-15, 0x4599, is poly = 0x8B32; x + 1, poly = 0x8000, is a
+      parity in acc[15]).
+    operands:
+      - {name: pin, lsb: 0, bits: 2}
+
+  ACC_OUT:
+    opcode: 0b000
+    select: {name: kind, lsb: 2, bits: 6, value: 0b001010}
+    description: >
+      gpio[pin] <- acc[15]; acc <- acc << 1: the accumulator out MSB first,
+      a CRC in the order it is sent. Through the one pin-write port.
+    operands:
+      - {name: pin, lsb: 0, bits: 2}
+
+  ACC_PUSH:
+    opcode: 0b000
+    select: {name: kind, lsb: 0, bits: 8, value: 0b00101100}
+    description: >
+      Append acc[7:0] to the RX FIFO, then acc <- acc >> 8: a byte of a
+      stream, or two for a sixteen-bit value, low first. Stalls while the
+      FIFO is full; the delay waits.
+    operands: []
+
+  ACC_LOAD:
+    opcode: 0b000
+    select: {name: kind, lsb: 0, bits: 8, value: 0b00110000}
+    description: >
+      poly <- {shift_reg, poly[15:8]}: a polynomial byte from the host, PULLed
+      first, low byte first. Reset and restart clear acc and poly.
+    operands: []
 
   JMP:
     opcode: 0b011

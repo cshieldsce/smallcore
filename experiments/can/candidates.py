@@ -58,6 +58,17 @@ from cpu import assemble as base_assemble
 
 HERE = Path(__file__).resolve().parent
 AHEAD_BITS = 6
+# The accumulator took bits 7:5 = 001 of NOP's hole on 2026-09-28, after this round, where Bc's SKIP_SENT
+# was measured; the candidates stay measured on the ISA as it was then.
+LATER = ("ACC_IN", "ACC_CRC", "ACC_OUT", "ACC_PUSH", "ACC_LOAD")
+
+
+def round_isa():
+    """isa.yaml without the words adopted after the CAN and CRC candidate rounds."""
+    isa = copy.deepcopy(load_isa())
+    for op in LATER:
+        isa["instructions"].pop(op, None)
+    return isa
 KIND_LSB = 4  # in the delay field: kind at bit 4, bit / n-1 / pin at 3:1, level at 0
 
 
@@ -77,7 +88,7 @@ class Candidate(CPU):
     @classmethod
     def isa(cls):
         if cls.__dict__.get("_isa") is None:  # one cache per class, not the parent's
-            isa = copy.deepcopy(load_isa())
+            isa = round_isa()
             for klass in reversed(cls.__mro__):
                 for name, select in klass.__dict__.get("SELECTS", {}).items():
                     isa["instructions"][name]["select"] = copy.deepcopy(select)
