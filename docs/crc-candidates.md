@@ -236,7 +236,13 @@ issues, reset and restart, and nothing else moved. The candidate programs
 on the adopted ISA: `experiments/acc/crc15.asm`, 23 words, and
 `experiments/acc/can_rx_bytes.asm`, 92 words, the polynomial load gone. The
 candidate rounds stay measured on the ISA they ran on
-(`experiments/can/candidates.py`, `round_isa`).
+(`experiments/can/candidates.py`, `round_isa`). In `core.v`: acc and poly, sixteen bits each, decoded
+from NOP's hole; the feedback is sixteen XORs gated by acc[15] ^ the pad;
+ACC_PUSH shares PUSH's stall and the RX FIFO's port through a mux; ACC_OUT
+writes its pin beside SHIFT_OUT's. RTL against the model on every word from
+random state, the accumulator words in the random REPEAT bodies and the
+adversarial sweeps, and both programs at the pins (`rtl_tests/core_tb.py`,
+`top_tb.py`).
 
 ## Files
 
