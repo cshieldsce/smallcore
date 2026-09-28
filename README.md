@@ -140,6 +140,21 @@ What the protocols have asked of the core, in order. Open items stay open until 
 | branch three ways on a 3-bit field | SWD stage 4, OK / WAIT / FAULT | works, on record: SKIP sees one bit, so the decision is `SKIP 5, 0`, `JMP data`, `SKIP 6, 0`, `JMP request`, `JMP done`, five words. Two things the core cannot do, found here and left open: resend the request on WAIT (SHIFT_OUT empties `shift_reg`, only PULL reloads it, so the retry is a JMP to the PULL and the host pushes the request again) and tell a read from a write (the RnW bit went out on the wire; SKIP sees only sampled input), so read and write are two programs |
 | take 32 data bits and a parity bit from the target | SWD stage 5, the read, `swd_read.asm` | works, 103 words: two per bit and a `PUSH` in place of every eighth clock drop, the repetition pressure at its widest. On record: a read is six bytes (ACK, four data, parity as bit 7 of a fifth over data[31:25]) through a 4-deep RX FIFO, so the host pops mid-transaction or the fifth PUSH stalls with SWCLK stopped (SWD allows it); the core has no XOR, so parity is the host's to check; the branch must come before the turnaround back, because on OK the target keeps the line |
 | send 32 data bits and a parity bit the host computed | SWD stage 6, the write, `swd_write.asm` | works, 106 words: a PULL per data byte in the last high cycle of the clock before, so a prompt host costs no cycles; the parity is bit 0 of a fifth byte, the host's to compute. On record: the host must not queue the data behind the request, because on a WAIT the retry PULLs the next byte as the request and nothing but PULL can discard a queued byte, so a host writes the request, reads the ACK, then queues the data; request, data and parity are six bytes through a 4-deep TX FIFO |
+| stop the clock mid-transaction: a host that does not read | SWD, the sleeping host | nothing new, the stall as built, on a real protocol: the fifth `PUSH` finds the RX FIFO full after data bit 31 and the core stands still for as long as the host sleeps, SWCLK high without a glitch, the pad off SWDIO with the target holding bit 31, pc on the PUSH, `in_shift_reg` and the FIFO unchanged; one pop and it moves exactly once, one rise (the parity's) to the sixth PUSH's stall; the six bytes arrive whole. At the pins on `top.v` (`imem_addr` is the pc, the FIFO's full flag) and in the model |
+| the host pushes the request again on WAIT: must it hurry? | SWD, the slow host | no. The retry's `PULL` stalls with SWCLK low and SWDIO high and the host's; the target sees no edge to count; once the byte lands the run is the prompt host's cycle for cycle, whether the host is 1 or 1000 cycles late (13 clocks in hand on `top.v`). SWD moves on SWCLK alone and has no timeout on a stopped clock. On record as an API inconvenience, not a timing burden |
+
+SWD by the numbers: one transaction the target says OK to, a host at the FIFOs every cycle (`tests/test_swd.py::test_swd_by_the_numbers`, the cycle counts also on `top.v`). The repeats are the number to watch: the core cannot count, so 32 data bits are 64 words in each program.
+
+| | read, `swd_read.asm` | write, `swd_write.asm` |
+|---|---|---|
+| program words | 103 | 106 |
+| distinct words | 14 | 16 |
+| words that repeat an earlier word | 89 | 90 |
+| the 32 data bits | 64 words, two per bit | 64 words, two per bit |
+| host interactions | 1 push, 6 pops | 6 pushes, 1 pop |
+| RX FIFO fill, most | 1; 4 and a stall when the host does not read | 1 |
+| TX FIFO fill, most | 1 | 4, the host holding the parity byte for the first data PULL |
+| cycles, release to halt | 379 | 384 |
 
 Three kinds of state: instruction (`pc`, the delay counter), stream (the shift registers and FIFOs) and configuration (`shift_dir`, `open_drain`), each a `CONFIG` field. A shift pin or input pin would join the third kind as the last field.
 

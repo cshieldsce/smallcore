@@ -189,37 +189,70 @@ class Run(NamedTuple):
     received: list  # the bytes the host popped, in order
     target: Target
     cpu: CPU
+    rx_peak: int  # the most bytes the RX FIFO held after any cycle, before the host's pop
+    tx_peak: int  # the most bytes the TX FIFO held after any cycle
+
+
+class Wire:
+    """The bench: `program` in the core with `tx_data` waiting in the TX FIFO,
+    a `target` on the wire, and a host that, when `drain`, pops the RX FIFO as
+    soon as a byte is there, as a host reading a word must, and runs
+    `host(cpu, received)` every cycle to push what it decides to. `go(cycles)`
+    steps that many cycles or up to the halt, the wire resolved after every
+    cycle from the pad, the target and the pull-up, and fed back to gpio_in
+    for the next. A pad driving against the target is a fight, which no
+    working host ever has: it fails here. One entry per cycle: the wire, who
+    owned it, what the target drove, pc, in_shift_reg, whether the core was
+    stalled and what the RX FIFO held, so a test can stop the host, look, and
+    go on."""
+
+    def __init__(self, program, tx_data, target=None, drain=True, host=None):
+        tx_data = [tx_data] if isinstance(tx_data, int) else list(tx_data)
+        self.cpu = CPU(load_program(program), gpio_in=1, tx_data=tx_data)
+        self.target = target or Target()
+        self.drain, self.host = drain, host
+        self.swdio, self.owned, self.driven, self.received = [], [], [], []
+        self.pcs, self.regs, self.stalls, self.fills = [], [], [], []
+        self.rx_peak = self.tx_peak = 0
+        self.line = 1
+
+    def go(self, cycles):
+        cpu, target = self.cpu, self.target
+        end = cpu.cycle + cycles
+        while not cpu.halted and cpu.cycle < end:
+            if self.host:
+                self.host(cpu, self.received)
+            self.tx_peak = max(self.tx_peak, len(cpu.tx_fifo))
+            cpu.step()
+            self.rx_peak = max(self.rx_peak, len(cpu.rx_fifo))
+            drive = target.update(self.line, cpu.gpio[SWCLK])
+            driving = cpu.gpio_oe[SWDIO] == 1
+            pad = cpu.gpio[SWDIO] if driving else None
+            assert not (pad is not None and drive is not None and pad != drive), f"cycle {cpu.cycle}: the pad drives {pad} against the target's {drive}"
+            self.line = pad if pad is not None else drive if drive is not None else 1
+            cpu.gpio_in[SWDIO] = self.line
+            self.swdio.append(self.line)
+            self.owned.append(driving)
+            self.driven.append(drive)
+            self.pcs.append(cpu.pc)
+            self.regs.append(cpu.in_shift_reg)
+            self.stalls.append(cpu.stalled)
+            self.fills.append(list(cpu.rx_fifo))
+            if self.drain and cpu.rx_fifo:
+                self.received.append(cpu.rx_fifo.pop(0))
+        return self
+
+    @property
+    def swclk(self):
+        return self.cpu.pin_trace(SWCLK)
+
+    def result(self):
+        return Run(self.swdio, self.swclk, self.owned, self.driven, self.received, self.target, self.cpu, self.rx_peak, self.tx_peak)
 
 
 def run(program, tx_data, target=None, cycles=2000, drain=True, host=None):
-    """Run `program` with `tx_data` waiting in the TX FIFO until it halts or
-    `cycles` pass, the wire resolved after every cycle from the pad, the
-    target and the pull-up, and fed back to gpio_in for the next. The host
-    pops the RX FIFO as soon as a byte is there (`drain`), as a host reading
-    a word must, and `host(cpu, received)`, if given, runs every cycle to
-    push what it decides to. A pad driving against the target is a fight,
-    which no working host ever has: it fails here."""
-    target = target or Target()
-    tx_data = [tx_data] if isinstance(tx_data, int) else list(tx_data)
-    cpu = CPU(load_program(program), gpio_in=1, tx_data=tx_data)
-    swdio, owned, driven, received = [], [], [], []
-    line = 1
-    while not cpu.halted and cpu.cycle < cycles:
-        if host:
-            host(cpu, received)
-        cpu.step()
-        drive = target.update(line, cpu.gpio[SWCLK])
-        driving = cpu.gpio_oe[SWDIO] == 1
-        pad = cpu.gpio[SWDIO] if driving else None
-        assert not (pad is not None and drive is not None and pad != drive), f"cycle {cpu.cycle}: the pad drives {pad} against the target's {drive}"
-        line = pad if pad is not None else drive if drive is not None else 1
-        cpu.gpio_in[SWDIO] = line
-        swdio.append(line)
-        owned.append(driving)
-        driven.append(drive)
-        if drain and cpu.rx_fifo:
-            received.append(cpu.rx_fifo.pop(0))
-    return Run(swdio, cpu.pin_trace(SWCLK), owned, driven, received, target, cpu)
+    """A Wire run for `cycles` or to the halt, as a Run."""
+    return Wire(program, tx_data, target, drain, host).go(cycles).result()
 
 
 def rising_edges(trace):
@@ -882,3 +915,177 @@ def test_read_program_is_the_request_program_plus_two_words_per_data_bit():
     assert all(w.side == (SWCLK, 0) and w.delay == 3 for w in pushes)
     assert len(configs) == 3, "let go once, take back on either path"
     assert len(words) == 2 + 16 + 2 + 6 + 2 + 3 + 3 + 1 + 4 * 16 + 1 + 1 + 2 == 103
+
+
+# --- the reviewer's questions: the stall, the slow host, the numbers -----------------------
+
+
+def test_read_with_a_sleeping_host_stalls_on_the_fifth_push_and_resumes_exactly_once():
+    """The adversarial read: a host that reads nothing until the RX FIFO is
+    full, and then not for a long while. Four PUSHes fill it (the ACK, data
+    bytes 0, 1 and 2); the fifth, data byte 3's, finds it full right after
+    the thirty-second data bit and the core stops there for as long as the
+    host sleeps: SWCLK stops, high, without a glitch; SWDIO stays the
+    target's, the pad not driving, the target holding bit 31; pc stays on the
+    PUSH; no sample repeats, in_shift_reg keeps byte 3 as it was taken once;
+    no PUSH repeats, the FIFO keeps its four bytes. The host pops one byte and
+    execution resumes exactly once: the PUSH goes through, the parity is
+    clocked and taken, and the sixth PUSH stalls the same way, SWCLK high,
+    until the host pops again. Then the turnaround back, the halt, and the
+    host holds all six bytes, byte 3 and the parity whole. The stall the
+    core was built around, on a real protocol: nothing is lost or repeated,
+    the clock just stops."""
+    isa = load_isa()
+    pushes = [i for i, w in enumerate(load_program(READ)) if decode(w, isa).op == "PUSH"]
+    w = Wire(READ, DP_READ, Target([OK], DATA), drain=False).go(600)
+    cpu = w.cpu
+
+    # The stall: from the cycle the PUSH found the FIFO full, four after the
+    # thirty-second data bit's rise, to the end of the sleep.
+    ups = rising_edges(w.swclk)
+    assert len(ups) == 12 + 32, "stopped after the thirty-second data bit"
+    stop = ups[43] + HIGH
+    assert not cpu.halted and cpu.stalled
+    assert cpu.pc == pushes[-2] and decode(cpu.program[cpu.pc], isa).op == "PUSH", "on data byte 3's PUSH"
+    sleep = slice(stop, None)
+    assert len(w.swclk[sleep]) > 200
+    assert set(w.stalls[sleep]) == {True}
+    assert set(w.swclk[sleep]) == {1}, "SWCLK stopped high, no glitch"
+    assert set(w.owned[sleep]) == {False}, "the pad drove SWDIO during the stall"
+    assert set(w.driven[sleep]) == set(w.swdio[sleep]) == {(DATA >> 31) & 1}, "the target holds data bit 31 and the wire shows it"
+    assert set(w.pcs[sleep]) == {pushes[-2]}, "pc moved"
+    assert set(w.regs[sleep]) == {(DATA >> 24) & 0xFF}, "in_shift_reg changed: a sample repeated"
+    assert all(fill == read_bytes(OK, DATA)[:4] for fill in w.fills[sleep]), "the FIFO changed: a PUSH repeated"
+
+    # The host pops one byte. The PUSH goes through and drops SWCLK, the
+    # parity is clocked and taken, the sixth PUSH stalls: one more rise, pc
+    # through three addresses once each, then still again.
+    received = [cpu.rx_fifo.pop(0)]
+    resume = len(w.swclk)
+    w.go(200)
+    assert len(rising_edges(w.swclk)) == 12 + 33, "one more rise, the parity's"
+    assert w.swclk[resume:resume + HIGH] == [0] * HIGH and set(w.swclk[resume + HIGH:]) == {1}
+    visited = [pc for i, pc in enumerate(w.pcs[resume:]) if i == 0 or pc != w.pcs[resume:][i - 1]]
+    assert visited == [pushes[-2], pushes[-2] + 1, pushes[-1]], "the PUSH, the parity's SHIFT_IN, the parity's PUSH, once each"
+    assert cpu.stalled and cpu.pc == pushes[-1]
+    assert cpu.rx_fifo == read_bytes(OK, DATA)[1:5], "byte 3 pushed once, whole"
+    assert cpu.in_shift_reg == read_bytes(OK, DATA)[5], "the parity taken once"
+    assert w.owned[-1] is False and w.driven[-1] is None and w.swdio[-1] == 1, "after the parity the target let go: the wire at the pull-up, the pad still off"
+
+    # The host pops again: the turnaround back, the halt, six bytes in all.
+    received.append(cpu.rx_fifo.pop(0))
+    w.go(200)
+    assert cpu.halted
+    assert len(rising_edges(w.swclk)) == READ_CLOCKS
+    assert received + cpu.rx_fifo == read_bytes(OK, DATA)
+    assert cpu.gpio_oe[SWDIO] == 1 and cpu.gpio[SWDIO] == 1 and cpu.gpio[SWCLK] == 0
+
+
+class SlowHost:
+    """A host at the FIFOs the way top.v's are: it pushes one byte per cycle
+    while the 4-deep TX FIFO has room. The request first and nothing else,
+    because a WAIT would make the retry PULL a data byte as the request; on a
+    WAIT the request again, `delay` cycles later; on an OK the `data` and its
+    parity, if there is data to write. Only the first byte of a transaction
+    is an ACK: after an OK on a read the next five are data, and a data byte
+    0x53 has WAIT's 010 in bits 7:5. Counts its pushes."""
+
+    def __init__(self, request, delay=0, data=None, parity=None, depth=4):
+        self.request, self.delay, self.depth = request, delay, depth
+        self.bytes = [] if data is None else write_bytes(data, parity)
+        self.seen = 0
+        self.ack_next = True  # the next byte from the core is an ACK
+        self.queue = []
+        self.due = None  # the cycle to queue the request again
+        self.pushes = 0
+
+    def __call__(self, cpu, received):
+        if len(received) > self.seen:
+            self.seen = len(received)
+            if self.ack_next:
+                ack = received[-1] >> ACK_SHIFT
+                if ack == WAIT:
+                    self.due = cpu.cycle + self.delay
+                else:
+                    self.ack_next = False
+                    if ack == OK:
+                        self.queue.extend(self.bytes)
+        if self.due is not None and cpu.cycle >= self.due:
+            self.queue.append(self.request)
+            self.due = None
+        if self.queue and len(cpu.tx_fifo) < self.depth:
+            cpu.tx_fifo.append(self.queue.pop(0))
+            self.pushes += 1
+
+
+@pytest.mark.parametrize("delay", (0, 1, 5, 100, 1000))
+def test_wait_retry_waits_for_the_host_however_long_it_takes(program, delay):
+    """The question the WAIT retry raises: the core cannot resend the request,
+    so the host pushes it again; must the host race the wire to do it? No.
+    After the turnaround back the retry's PULL finds the TX FIFO empty and
+    stalls, and everything stands still until the host gets round to it:
+    SWCLK low, SWDIO high and the host's, nothing on the wire for the target
+    to count. SWD moves on SWCLK alone and has no timeout on a stopped clock.
+    However long the host takes, the run is the prompt host's with the idle
+    cycles cut out, cycle for cycle, and the target sees the same two
+    requests. On record: an API inconvenience, not a timing burden."""
+    data = DATA if program is WRITE else None
+    prompt = Wire(program, REQ[program], Target([WAIT, OK], DATA), host=SlowHost(REQ[program], 0, data)).go(3000)
+    slow = Wire(program, REQ[program], Target([WAIT, OK], DATA), host=SlowHost(REQ[program], delay, data)).go(3000)
+    assert prompt.cpu.halted and slow.cpu.halted
+    assert slow.target.seen == prompt.target.seen == [target_decode(wire_bits(REQ[program]))] * 2
+    assert slow.target.written == prompt.target.written == ([(DATA, True)] if program is WRITE else [])
+    assert slow.received == prompt.received
+    assert not slow.cpu.tx_fifo and not prompt.cpu.tx_fifo, "a request left over: something else was taken for a WAIT"
+
+    # The idle: every stalled cycle is the retry's PULL, in one stretch, with
+    # the wire standing still, host's, and the clock low. Cut those cycles out
+    # and the slow run is the prompt one.
+    idle = [i for i, stalled in enumerate(slow.stalls) if stalled]
+    assert idle == list(range(idle[0], idle[0] + len(idle))) if idle else True, "stalled twice"
+    assert set(slow.pcs[i] for i in idle) <= {1}, "stalled somewhere other than the request's PULL"
+    assert set(slow.swclk[i] for i in idle) <= {0}, "SWCLK moved while the host slept"
+    assert set(slow.swdio[i] for i in idle) <= {1} and set(slow.owned[i] for i in idle) <= {True}, "the host did not hold SWDIO high"
+    assert set(slow.driven[i] for i in idle) <= {None}
+    awake = [i for i in range(len(slow.stalls)) if not slow.stalls[i]]
+    for name, trace in (("swdio", slow.swdio), ("swclk", slow.swclk), ("owned", slow.owned), ("driven", slow.driven)):
+        assert [trace[i] for i in awake] == getattr(prompt, name), f"{name} differs once the idle is cut out"
+    assert slow.cpu.cycle - len(idle) == prompt.cpu.cycle
+    assert True not in prompt.stalls, "the prompt host never left the core waiting"
+    assert (len(idle) > 0) == (delay > 9), "a host within nine cycles of the WAIT is in time for the PULL; a slower one is waited for"
+
+
+NUMBERS = {  # the five numbers for a transaction the target says OK to, with a host at the FIFOs every cycle
+    READ: dict(words=103, distinct=14, repeats=89, pushes=1, pops=6, rx_peak=1, tx_peak=1, cycles=379),
+    WRITE: dict(words=106, distinct=16, repeats=90, pushes=6, pops=1, rx_peak=1, tx_peak=4, cycles=384),
+}
+
+
+def test_swd_by_the_numbers(program):
+    """Program words, how many are an exact repeat of an earlier word (and how
+    few are distinct), the host's pushes and pops, the most bytes either FIFO
+    held, and cycles from release to halt, pinned so a change shows. A read:
+    103 words of which 14 are distinct, 7 host interactions, one byte in the
+    RX FIFO at a time when the host keeps up (four and a stall when it does
+    not), 379 cycles. A write: 106 words, 16 distinct, 7 interactions, the
+    TX FIFO full with the parity byte held back by the host until the first
+    data PULL, 384 cycles. The repeats are the number to watch: 64 words of
+    each program are the 32 data bits, two per bit."""
+    words = load_program(program)
+    host = SlowHost(REQ[program], data=DATA if program is WRITE else None)
+    r = run(program, REQ[program], Target([OK], DATA), host=host)
+    assert r.cpu.halted and not r.cpu.tx_fifo and not r.cpu.rx_fifo
+    numbers = dict(
+        words=len(words),
+        distinct=len(set(words)),
+        repeats=len(words) - len(set(words)),
+        pushes=1 + host.pushes,
+        pops=len(r.received),
+        rx_peak=r.rx_peak,
+        tx_peak=r.tx_peak,
+        cycles=r.cpu.cycle,
+    )
+    assert numbers == NUMBERS[program]
+    isa = load_isa()
+    ops = [decode(w, isa).op for w in words]
+    assert ops.count("SHIFT_IN") + ops.count("SHIFT_OUT") == 8 + 3 + 32 + 1, "one word per bit on the wire, and one more to move the clock for it"
