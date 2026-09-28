@@ -10,11 +10,18 @@ is BIT cycles long and every node samples it at the same point.
      back;
   2. arbitration: a second transmitter starts on the same SOF with its own
      identifier; a node that sent recessive and sees dominant has lost and
-     sends nothing more, so the bus carries the lower identifier whole.
+     sends nothing more, so the bus carries the lower identifier whole;
+  3. the ACK slot: after the identifier the transmitter lets go for one bit
+     and samples it; a receiver that took the frame pulls it dominant; the
+     ACK delimiter is recessive; not acked, the transmitter reports, waits
+     out EOF and the intermission and sends the frame again when the host
+     queues it again.
 
 programs/can_tx.asm is stage 1; can_tx_arb.asm is stage 2, and sees the bus
 the way a controller behind a transceiver does, because with the pad on the
-bus the core cannot tell a lost bit from its own dominant one.
+bus the core cannot tell a lost bit from its own dominant one; can_tx_ack.asm
+is stage 3, stage 1's frame with the ACK slot after it. Stages 1 and 2 stay
+as they are, the baselines.
 
 The bench is the bus and the other nodes. The bus is a wired AND resolved
 every cycle from the node under test and every other node: 0, dominant, if
@@ -49,6 +56,9 @@ HEADER = 1 + ID_BITS  # the SOF and the identifier, the bits stage 1 sends
 IDENT = 0x5A3  # 101 1010 0011: no run longer than three, not a palindrome (0x62D backwards)
 IDENTS = (IDENT, 0x62D, 0x000, 0x7FF, 0x400, 0x001)
 NAMES = ("sof",) + tuple(f"id{i}" for i in range(ID_BITS - 1, -1, -1))
+ACK = PROGRAMS / "can_tx_ack.asm"
+ACK_FRAME = HEADER + 2  # the header, the ACK slot, the ACK delimiter: the bits stage 3 sends
+GAP = 10  # EOF and the intermission: recessive bits before the next frame may start
 
 
 def header_bytes(ident):
@@ -71,23 +81,33 @@ def bits_to_int(bits):
 class Node:
     """An ideal receiver on the bus. `update(line)` is called every cycle with
     the bus as it stood at the end of the cycle before and returns what the
-    node drives this cycle: 0 or None, and this one never drives. Idle, it
-    waits for the bus to fall, the SOF, and counts clocks from that edge: on
-    the `sample`th clock of every bit it takes the level it was handed, the
-    one the bus held as that clock began. When the HEADER bits are over it
-    appends the identifier to `seen` and is idle again, ready for the next
-    SOF."""
+    node drives this cycle: 0 or None. Idle, it waits for the bus to fall,
+    the SOF, and counts clocks from that edge: on the `sample`th clock of
+    every bit it takes the level it was handed, the one the bus held as that
+    clock began. When the HEADER bits are over it appends the identifier to
+    `seen`; then, if it `ack`s the frame (a bool, or one per frame, the last
+    repeating), it pulls the next bit, the ACK slot, dominant and lets go for
+    the delimiter; a receiver that does not ack goes idle at once, ready for
+    the next SOF, as stage 1's did. `samples` is every level taken this
+    frame, the ACK slot's and the delimiter's included when it acks."""
 
-    def __init__(self, sample=SAMPLE):
+    def __init__(self, sample=SAMPLE, ack=False):
         self.sample = sample
+        self.acks = list(ack) if isinstance(ack, (list, tuple)) else [ack]
         self.line = 1  # the bus as last seen
         self.clock = None  # clocks since the SOF's edge, None between frames
+        self.phase = "idle"  # "header", then "ack" and "delimiter" when it acks
         self.samples = []
         self.seen = []
+        self.frames = 0
+
+    @property
+    def acking(self):
+        return self.acks[min(self.frames, len(self.acks) - 1)]
 
     def update(self, line):
         if self.clock is None and line == 0 and self.line == 1:
-            self.clock = 0
+            self.clock, self.phase, self.samples = 0, "header", []
         if self.clock is not None:
             self.clock += 1
             if self.clock % BIT == self.sample:
@@ -95,10 +115,19 @@ class Node:
                 self.sampled(len(self.samples) - 1, line)
             if self.clock == HEADER * BIT:
                 assert self.samples[0] == 0, "the SOF: the edge it synced on"
-                self.seen.append(bits_to_int(self.samples[1:]))
-                self.samples, self.clock = [], None
+                self.seen.append(bits_to_int(self.samples[1:HEADER]))
+                self.phase = "ack" if self.acking else "idle"
+            elif self.clock == (HEADER + 1) * BIT:
+                self.phase = "delimiter"
+            elif self.clock == (HEADER + 2) * BIT:
+                self.phase = "idle"
+            if self.phase == "idle":
+                self.clock, self.frames = None, self.frames + 1
         self.line = line
-        return None
+        return self.drive()
+
+    def drive(self):
+        return 0 if self.phase == "ack" else None
 
     def sampled(self, k, level):
         """Bit k of the frame, the SOF k = 0, sampled at `level`."""
@@ -119,29 +148,26 @@ class Competitor(Node):
         self.bits = header_bits(ident)
         self.lost = None
 
-    def update(self, line):
-        super().update(line)
-        if self.clock is None or self.lost is not None:
-            return None
+    def drive(self):
+        if self.clock is None or self.lost is not None or self.phase != "header":
+            return super().drive()
         return 0 if self.bits[self.clock // BIT] == 0 else None
 
     def sampled(self, k, level):
-        if self.lost is None and self.bits[k] == 1 and level == 0:
+        if self.lost is None and k < HEADER and self.bits[k] == 1 and level == 0:
             self.lost = k
 
 
-class Glitch(Node):
-    """A node that pulls the bus dominant for exactly one cycle, the one whose
-    index is `at` (the cycle the run's `line` list indexes it by), and reads
-    like a Node the rest of the time: a probe for where a bit is sampled."""
+class Glitch:
+    """Not a node: a probe that pulls the bus dominant for exactly one cycle,
+    the one whose index is `at` (the cycle the run's `line` list indexes it
+    by), to find where a bit is sampled."""
 
     def __init__(self, at):
-        super().__init__()
         self.at = at
         self.i = -1
 
     def update(self, line):
-        super().update(line)
         self.i += 1
         return 0 if self.i == self.at else None
 
@@ -331,7 +357,7 @@ def test_the_sample_point_is_the_sixth_clock_of_the_bit():
     assert header_bits(IDENT)[k] == 1, "a recessive bit"
     for p in range(BIT):
         at = sof + k * BIT + p
-        r = run(TX, header_bytes(IDENT), [Glitch(at)])
+        r = run(TX, header_bytes(IDENT), [Node(), Glitch(at)])
         cell = r.line[sof + k * BIT : sof + (k + 1) * BIT]
         assert cell == [int(i != p) for i in range(BIT)], f"one dominant cycle in a recessive bit: {cell}"
         hit = p == SAMPLE - 1
@@ -478,7 +504,7 @@ def test_the_arbitration_sample_point_is_the_fourth_clock_of_the_bit():
     sof = arb(IDENT, []).line.index(0)
     k = NAMES.index("id7")
     for p in range(BIT):
-        r = arb(IDENT, [Glitch(sof + k * BIT + p)], cycles=200)
+        r = arb(IDENT, [Node(ARB_SAMPLE), Glitch(sof + k * BIT + p)], cycles=200)
         hit = p == ARB_SAMPLE - 1
         assert (r.cpu.cycle == sof + (k + 1) * BIT + 2) == hit, f"glitch on cycle {p + 1} of the bit: halted at {r.cpu.cycle}"
         assert r.received == [pairs(header_bits(IDENT)[: k + 1]) & ~1 if hit else pairs(header_bits(IDENT))]
@@ -494,3 +520,111 @@ def test_arbitration_by_the_numbers():
     assert r.cpu.cycle == 100 and r.line.index(0) == 3
     assert (r.tx_peak, r.rx_peak, len(r.received)) == (2, 1, 1)
     assert (ARB_SAMPLE, SAMPLE) == (4, 6), "the decision's three cycles move the sample point two clocks earlier at 8 a bit"
+
+
+# --- stage 3: the ACK slot ------------------------------------------------------------
+
+
+def ack_byte(ident, acked):
+    """What the host reads after the ACK slot: the last eight samples, ID[6:0] and the slot's."""
+    return ((ident & 0x7F) << 1) | (0 if acked else 1)
+
+
+def test_ack_slot_let_go_and_the_receivers_dominant_bit_sampled(ident, wave):
+    """can_tx_ack.asm with a receiver that acks: after ID[0] the transmitter
+    lets go for one bit and the receiver pulls it dominant, the pad off the
+    bus for the whole slot; the delimiter is recessive, nobody driving; the
+    host reads ID[6:0] and the ACK, 0; halted after the delimiter, the bus
+    idle."""
+    r = run(ACK, header_bytes(ident), [Node(ack=True)])
+    show(wave, r)
+    receiver = r.nodes[0]
+    sof = r.line.index(0)
+    assert cells(r.line, sof, ACK_FRAME) == header_bits(ident) + [0, 1]
+    slot = slice(sof + HEADER * BIT, sof + (HEADER + 1) * BIT)
+    assert r.owned[slot] == [False] * BIT and [d[0] for d in r.driven[slot]] == [0] * BIT, "the receiver's bit, the transmitter off the bus"
+    assert r.owned[sof + HEADER * BIT :] == [False] * len(r.owned[sof + HEADER * BIT :])
+    assert receiver.seen == [ident] and receiver.samples[HEADER:] == [0, 1]
+    assert r.received == [ack_byte(ident, True)]
+    assert r.cpu.halted and r.cpu.cycle == sof + ACK_FRAME * BIT, "halted as the delimiter ends"
+    assert r.line[sof + ACK_FRAME * BIT :] == [], "nothing after: the bus idle is the halt's"
+
+
+def no_ack_host(bytes_, late):
+    """A host for can_tx_ack.asm: it queues `bytes_` again `late` cycles
+    after it read a byte that says not acked, once."""
+    state = {"at": None, "done": False}
+
+    def host(cpu, received):
+        if state["at"] is None and received and received[-1] & 1:
+            state["at"] = cpu.cycle
+        if state["at"] is not None and not state["done"] and cpu.cycle == state["at"] + late:
+            cpu.tx_fifo.extend(bytes_)
+            state["done"] = True
+
+    return host
+
+
+def test_not_acked_reports_waits_out_the_intermission_and_sends_the_frame_again(wave):
+    """A receiver that does not ack the first frame and acks the second: the
+    slot stays recessive, the host reads the ACK as 1, the transmitter holds
+    the bus recessive for the delimiter, EOF and the intermission, ten bits,
+    and sends the frame again from the two bytes the host queues again, the
+    second SOF 82 cycles after the delimiter, JMP and PULL; the receiver
+    reads the identifier twice and acks the second, the host reads the ACK
+    as 0. On record: the host supplies the frame again, the core cannot."""
+    r = run(ACK, header_bytes(IDENT), [Node(ack=[False, True])], host=no_ack_host(header_bytes(IDENT), 0))
+    show(wave, r)
+    receiver = r.nodes[0]
+    sof = r.line.index(0)
+    assert cells(r.line, sof, ACK_FRAME) == header_bits(IDENT) + [1, 1], "no ack"
+    quiet = r.line[sof + HEADER * BIT : sof + (ACK_FRAME + GAP) * BIT + 2]
+    assert quiet == [1] * len(quiet), "the slot, the delimiter, EOF and the intermission recessive"
+    sof2 = sof + (ACK_FRAME + GAP) * BIT + 2
+    assert r.line[sof2] == 0 and r.line[sof2 - 1] == 1, "the second SOF"
+    assert cells(r.line, sof2, ACK_FRAME) == header_bits(IDENT) + [0, 1], "acked"
+    assert receiver.seen == [IDENT, IDENT]
+    assert r.received == [ack_byte(IDENT, False), ack_byte(IDENT, True)]
+    assert r.stalls.count(True) == 0 and r.cpu.halted
+
+
+@pytest.mark.parametrize("late", (50, 87, 88, 300))
+def test_a_host_late_with_the_frame_again_stalls_the_core_on_an_idle_bus(late):
+    """After a missing ACK the host has the delimiter's tail, EOF and the
+    intermission to queue the frame again, 87 cycles from the byte it read;
+    later than that the PULL stalls, the bus recessive, idle, and the second
+    frame starts when the bytes land: a stall between frames is safe, the
+    receiver reads the frame whole, unlike the stall inside one of stage 1.
+    On record."""
+    never = run(ACK, header_bytes(IDENT), [Node(ack=False)], cycles=400)
+    at = next(i for i, byte in enumerate(never.received) if byte & 1)  # the byte is popped the cycle it is pushed
+    popped = never.stalls.index(True) - 87  # the cycle the host read it, 87 before the PULL first waits
+    assert never.stalls.index(True) == never.line.index(0) + (ACK_FRAME + GAP) * BIT + 1
+    r = run(ACK, header_bytes(IDENT), [Node(ack=[False, True])], host=no_ack_host(header_bytes(IDENT), late), cycles=800)
+    sof = r.line.index(0)
+    assert r.stalls.count(True) == max(0, late - 87)
+    sof2 = sof + (ACK_FRAME + GAP) * BIT + 2 + max(0, late - 87)
+    assert r.line[sof + HEADER * BIT : sof2] == [1] * (sof2 - sof - HEADER * BIT), "recessive until the second SOF"
+    assert cells(r.line, sof2, ACK_FRAME) == header_bits(IDENT) + [0, 1]
+    assert r.nodes[0].seen == [IDENT, IDENT] and r.received == [ack_byte(IDENT, False), ack_byte(IDENT, True)]
+
+
+def test_the_ack_slot_is_sampled_on_its_sixth_clock():
+    """Where in the slot the transmitter samples, seen from outside, as for
+    stage 1's bits: no receiver acks, and a glitch node pulls the slot
+    dominant for one cycle at each of its eight cycles in turn; the host
+    reads an ACK exactly when the glitch is on the slot's sixth cycle."""
+    sof = run(ACK, header_bytes(IDENT), [], cycles=400).line.index(0)
+    for p in range(BIT):
+        r = run(ACK, header_bytes(IDENT), [Node(), Glitch(sof + HEADER * BIT + p)], cycles=400)
+        assert r.line[sof + HEADER * BIT + p] == 0
+        assert r.received[:1] == [ack_byte(IDENT, p == SAMPLE - 1)], f"glitch on cycle {p + 1} of the slot"
+
+
+def test_ack_by_the_numbers():
+    """Stage 3 measured: the words, the cycles, the host's part."""
+    words = load_program(ACK)
+    assert (len(words), len(set(words))) == (21, 16)
+    r = run(ACK, header_bytes(IDENT), [Node(ack=True)])
+    assert r.cpu.cycle == 3 + ACK_FRAME * BIT == 115
+    assert (r.tx_peak, r.rx_peak, len(r.received)) == (2, 1, 1)
