@@ -3,7 +3,9 @@ block-beta
   b15["15"] b14["14"] b13["13"] b12["12"] b11["11"] b10["10"] b9["9"] b8["8"]
   b7["7"] b6["6"] b5["5"] b4["4"] b3["3"] b2["2"] b1["1"] b0["0"]
   opcode["opcode (3)"]:3 delay["delay (5)<br/>0–31 extra cycles<br/>(REPEAT: count − 1)"]:5 side["side effect (4): s p p l<br/>s = 1: also gpio[p] ← l"]:4 own["own operands (4)"]:4
-  nop["000 = NOP"]:3 nopd["d"]:5 nopop["0000 0000"]:8
+  nop["000 = NOP"]:3 nopd["d"]:5 nopop["0000 0000<br/>001x xxxx and 011x xxxx are rejected words"]:8
+  run["000 = SKIP_RUN"]:3 rund["d"]:5 runop["0100 nnnv<br/>NOP's hole: n = the newest n − 1 samples all v? skip the next word"]:8
+  norun["000 = SKIP_NORUN"]:3 norund["d"]:5 norunop["0101 nnnv<br/>bit 4 = the sense: skip unless they are"]:8
   set["000 = SET"]:3 setd["d"]:5 setop["1ppl 0000<br/>p = pin 0–3, l = level: the side effect alone"]:8
   shift["001 = SHIFT_OUT"]:3 shiftd["d"]:5 shiftop["sppl 0000<br/>side pin p = 1–3, gpio[0] is the shift pin"]:8
   shin["001 = SHIFT_IN"]:3 shind["d"]:5 shinop["sppl ii10<br/>i = input pin 0–3, bit 1 = in; side pin p = 0–3"]:8

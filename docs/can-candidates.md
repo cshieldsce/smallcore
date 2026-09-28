@@ -1,9 +1,10 @@
 # CAN candidates against the arbitration and stuffing programs
 
-**Outcome (2026-09-28): nothing merged.** REPEAT stays as it is; B and D
-are rejected; A, Bc and C are held as candidates, C the strongest, the call
-deferred until RX and de-stuffing have asked their questions ("Decided",
-below). This is the comparison, on the model only, for the architecture
+**Outcome (2026-09-28, after RX): C adopted.** `SKIP_RUN n, level` and
+`SKIP_NORUN n, level`, the run test over `in_shift_reg`, earned by the two
+sides of CAN asking the same question ("Decided", below); B, Bc and D
+rejected; REPEAT untouched; A held for one more measurement, the FIFO
+receiver, whose dominant path is exactly the cycle A saves. This is the comparison, on the model only, for the architecture
 review; nothing in `isa.yaml`, `sim/cpu.py` or the RTL changes, and the four
 CAN programs stay as written: `can_tx.asm` 13 words, `can_tx_arb.asm` 95,
 `can_tx_ack.asm` 21, `can_tx_stuff.asm` 224.
@@ -352,9 +353,10 @@ and the 95- and 224-word programs stay as the record of why.
 | a breakable loop | no |
 | D, the run counter | no: dominated by C |
 | B, SHIFT_SENT | no: the sent bit as a sample, from one pin, with the 95 words unchanged |
-| A, BRANCH | held. Stronger if RX turns out to need symmetric immediate branches as often as TX did |
-| Bc, SKIP_SENT | held |
-| C, the run test | held, the strongest. If RX de-stuffing independently says "the last five bits are right here, but asking whether they form a run is killing my timing and my words", both sides of the protocol want the same predicate, and C has earned its word |
+| a second stream register | not a candidate yet, but the pressure RX and CRC share: two workloads now need two mutable histories at once, the CRC's register beside its input and the raw stuff history beside the destuffed data. Carried forward on the README's inventory; the CRC candidate round comes first |
+| A, BRANCH | one measurement short (2026-09-28, after RX). RX found the same SKIP, JMP, pad shape, and its FIFO form is nine clocks a bit because the dominant tree's longest path is one cycle too long for the PUSH: exactly A's cycle. The splice below says whether A turns that receiver into an eight-clock one; if it does, A's evidence is arbitration's symmetric decision, stuffing's control-flow share, RX's FIFO form, SWD's and I²C's ACK, and it probably earns itself; if not, held through the CRC and combined-frame work |
+| Bc, SKIP_SENT | rejected (2026-09-28, after RX): it never grew beyond arbitration. It saves a readback sample where a real node has TXD and RXD anyway, and RX gave it no second use |
+| C, the run test | **adopted (2026-09-28, after RX).** Two sides of CAN, built independently, ask the same five-bit question over state the core already owns: TX stuffing, where the run test takes the bit from 16 clocks to 8 and about halves the loop form; RX de-stuffing, where the same predicate cuts the cell from 23 words to about 12 though the timing already fits. A reusable predicate over `in_shift_reg`, no new state, rejected encodings only, and it presses on the 256-word capacity too. The ugly TX and RX baselines stay as the evidence, as SWD's 103 and 106 words did |
 
 ### RX's evidence (2026-09-28)
 
@@ -387,6 +389,36 @@ and today's stuffing, to let the whole frame expose the next pressure; then
 CRC computation on its own, so the XOR and LFSR pressure is measured alone;
 then RX and de-stuffing; and only then the call on A, Bc and C.
 
+## SKIP_RUN and SKIP_NORUN, the spec
+
+`SKIP_RUN n, level`: step over the next word if the newest n samples in
+`in_shift_reg` are all `level`; `SKIP_NORUN n, level`: step over it unless
+they are. n is 1..8, written as n and held as n − 1; the newest sample is
+the one SHIFT_IN put in last, bit 0 MSB first and bit 7 LSB first, and the
+n newest are the n bits from that end. pc ← pc + 2 on the word's last cycle
+instead of pc + 1, the register read as it stood when the word issued, as
+SKIP reads its bit; a delay in bits 12:8 as any word; no side effect, since
+SET owns the flag bit; no state. n = 1 is SKIP on the newest bit.
+
+```
+  15 14 13 | 12 .. 8 | 7 | 6 5 | 4     | 3 2 1 | 0
+   0  0  0 |  delay  | 0 | 1 0 | sense | n - 1 | level
+```
+
+NOP's hole: opcode 000 with the flag clear and bits 6:5 = 10, 1024 words
+that were rejected; bits 6:5 = 01 and 11 stay rejected. sense 0 is
+SKIP_RUN, 1 SKIP_NORUN. The assembler keeps REPEAT's rules for a run test
+as for a SKIP: not a body's last word, not stepping into a body past its
+label. In the model (`sim/cpu.py`, `newest`, `run_test`) and pinned on it
+(`tests/test_skip_run.py`): every register value, n, level, direction and
+sense; the delay; n = 1 against SKIP; the 1024 words and no other changed;
+every program in `programs/` the same words; the stuffing transmitter's C
+forms bit for bit the baseline at 8 cycles a bit; the receiver's C forms,
+34 words for 56 on the pins and 27 for 57 through the FIFO at 8 clocks for
+9. In `core.v`: a turn of the register so the newest bit is bit 0 either
+way, a mask of the n low bits, a compare against the level replicated, and
+the SKIP's pc mux; nothing else touched.
+
 ## Files
 
 - `experiments/can/candidates.py`: the models; `Candidate` is cpu.CPU's step written out with hooks, REPEAT included
@@ -395,4 +427,7 @@ then RX and de-stuffing; and only then the call on A, Bc and C.
 - `experiments/can/can_tx_stuff_loop.asm`: today's ISA, the cell a REPEAT body: the correction
 - `experiments/can/can_tx_stuff_{A,C,AC,D,AD}.asm` and `_loop`: stuffing, written out and as bodies
 - `experiments/can/plugin.py`, `suite.py`: the existing suite on a candidate's model
-- `tests/test_can_candidates.py`: the comparison, pinned, on the candidates' models
+- `tests/test_can_candidates.py`: the comparison, pinned, on the candidates' models; and the FIFO receiver with A, the one measurement A was short of
+- `experiments/can/can_rx_bits_A.asm`: can_rx_bits.asm with BRANCH, 8 clocks a bit for 9, 47 words for 57
+- `experiments/can/can_rx_destuff_C.asm`, `can_rx_bits_C.asm`: the receivers with the run test, on the ISA as it is now
+- `tests/test_skip_run.py`: the run test pinned on the model, and the C forms of the transmitter and the receiver on it

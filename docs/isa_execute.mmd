@@ -12,6 +12,8 @@ flowchart-elk LR
   OP -->|100| CFG["<b>CONFIG f, v [p, l] [d]</b><br/>config[f] ← v<br/>f = 0: shift_dir<br/>f = 1: open_drain[1:0]<br/>f = 2: open_drain[3:2]<br/>takes 1 + d cycles"]
   OP -->|101| WAIT["<b>WAIT i, v [p, l] [d]</b><br/>stall while gpio_in[i] != v<br/>(read at cycle start, like SHIFT_IN)<br/>takes 1 + d cycles<br/>after any stall"]
   WAIT -->|"gpio_in[i] != v: stall,<br/>everything holds"| WAIT
+  OP -->|000, bits 7:5 = 010| RUN["<b>SKIP_RUN n, v [d] / SKIP_NORUN n, v [d]</b><br/>reads the newest n bits of in_shift_reg<br/>pins, registers unchanged, no side effect<br/>takes 1 + d cycles"]
+  RUN --> RNEXT["the newest n all v ? (RUN) / not all v ? (NORUN)<br/>PC ← PC + 2 : PC + 1"]
   OP -->|110| SKIP["<b>SKIP b, v [p, l] [d]</b><br/>reads in_shift_reg[b]<br/>pins, registers unchanged<br/>takes 1 + d cycles"]
   OP -->|011| JMP["<b>JMP target [d]</b><br/>pins, registers unchanged<br/>no side effect<br/>takes 1 + d cycles"]
   OP -->|111| REP["<b>REPEAT count, label</b><br/>rc == 0 ? rc ← count − 1 : rc ← rc − 1<br/>(rc moves on no other cycle)<br/>pins, registers unchanged<br/>no side effect, no delay<br/>takes 1 cycle"]

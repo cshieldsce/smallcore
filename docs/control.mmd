@@ -18,7 +18,7 @@ flowchart LR
   SIDE(["side = operand[7]"]):::sig
   OWN(["own = operand[3:0]<br/>in = own[1], push = own[0], field = own[3:2]<br/>in_pin = own[3:2], bit = own[3:1], level = own[0]"]):::sig
 
-  CU["<b>control</b><br/><br/>cycles = 1 + delay (REPEAT: 1)<br/>halted = pc == N<br/>issue = !halted & counter == 0<br/>stall = issue & (FIFO & (push ? rx_full : tx_empty)<br/>| WAIT & gpio_in[in_pin] != level)<br/>last = issue ? delay == 0 | REPEAT : counter == 1<br/>skip = SKIP & in_shift_reg[bit] == level<br/>rc_next = rc == 0 ? delay : rc − 1<br/><br/><b>counter</b> reg, 5 bits, rst → 0<br/>issue & !stall → REPEAT ? 0 : delay<br/>counter > 0 → counter − 1<br/><br/><b>rc</b> reg, 5 bits, rst → 0<br/>pc_en & REPEAT → rc_next"]:::comb
+  CU["<b>control</b><br/><br/>cycles = 1 + delay (REPEAT: 1)<br/>halted = pc == N<br/>issue = !halted & counter == 0<br/>stall = issue & (FIFO & (push ? rx_full : tx_empty)<br/>| WAIT & gpio_in[in_pin] != level)<br/>last = issue ? delay == 0 | REPEAT : counter == 1<br/>skip = SKIP & in_shift_reg[bit] == level<br/>| SKIP_RUN & newest n all level | SKIP_NORUN & !(newest n all level)<br/>rc_next = rc == 0 ? delay : rc − 1<br/><br/><b>counter</b> reg, 5 bits, rst → 0<br/>issue & !stall → REPEAT ? 0 : delay<br/>counter > 0 → counter − 1<br/><br/><b>rc</b> reg, 5 bits, rst → 0<br/>pc_en & REPEAT → rc_next"]:::comb
 
   PCI(["pc_en = last & !stall"]):::sig
   PCJ(["pc_jmp = JMP"]):::sig

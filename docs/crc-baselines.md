@@ -33,7 +33,7 @@ the whole table asserted).
 | the delay counter | 5 | every word's bits 12:8 | – |
 | `rc` | 5 | REPEAT | REPEAT, into the pc |
 | `shift_reg` | 8 | PULL, whole, from the host's FIFO; SHIFT_OUT, a shift with zero fill | SHIFT_OUT, one bit onto pin 0 |
-| `in_shift_reg` | 8 | SHIFT_IN, one bit at one end | SKIP, one bit into the pc; PUSH, whole, to the host's FIFO |
+| `in_shift_reg` | 8 | SHIFT_IN, one bit at one end | SKIP, one bit into the pc; PUSH, whole, to the host's FIFO; and, since 2026-09-28, SKIP_RUN and SKIP_NORUN, the newest n bits into the pc, which changes nothing below: the width is the wall |
 | `gpio` | 4 | SET, SHIFT_OUT's own bit, and any word's side effect: a constant | nothing. The pad's readback is an input, which SHIFT_IN samples and WAIT holds on |
 | `open_drain`, `shift_dir` | 4, 1 | CONFIG | the pad; the shifts |
 | the TX FIFO | 4 × 8 | the host | PULL |
