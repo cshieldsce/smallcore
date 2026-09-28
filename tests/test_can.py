@@ -611,12 +611,13 @@ def test_a_host_late_with_the_frame_again_stalls_the_core_on_an_idle_bus(late):
 
 def test_the_ack_slot_is_sampled_on_its_sixth_clock():
     """Where in the slot the transmitter samples, seen from outside, as for
-    stage 1's bits: no receiver acks, and a glitch node pulls the slot
-    dominant for one cycle at each of its eight cycles in turn; the host
-    reads an ACK exactly when the glitch is on the slot's sixth cycle."""
+    stage 1's bits: nobody on the bus but a probe that pulls the slot
+    dominant for one cycle at each of its eight cycles in turn (a receiver
+    that did not ack would take the pulse for a SOF); the host reads an ACK
+    exactly when the pulse is on the slot's sixth cycle."""
     sof = run(ACK, header_bytes(IDENT), [], cycles=400).line.index(0)
     for p in range(BIT):
-        r = run(ACK, header_bytes(IDENT), [Node(), Glitch(sof + HEADER * BIT + p)], cycles=400)
+        r = run(ACK, header_bytes(IDENT), [Glitch(sof + HEADER * BIT + p)], cycles=400)
         assert r.line[sof + HEADER * BIT + p] == 0
         assert r.received[:1] == [ack_byte(IDENT, p == SAMPLE - 1)], f"glitch on cycle {p + 1} of the slot"
 
