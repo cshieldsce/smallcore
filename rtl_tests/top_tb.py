@@ -2235,3 +2235,206 @@ async def can_bit_stuffing_at_the_pins(dut):
         assert received == [byte] and cpu.rx_fifo == [byte]
         assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.tx_fifo.empty.value) == 1
         assert int(dut.gpio_oe.value) & 1 == 0
+
+
+# Stage 5A, a data frame (can_tx_frame.asm): the whole base-format frame,
+# the SOF, the identifier, RTR, IDE, r0, the DLC, one data byte and the CRC
+# the host computed, stuffed as stage 4 stuffs, then the CRC delimiter, the
+# ACK slot let go and sampled, the ACK delimiter, EOF and the intermission,
+# every bit 16 clocks, unopposed. The host's bytes are cut where the
+# program's PULLs fall, {SOF, ID[10], ID[9], 00000} then eight stream bits a
+# byte, six bytes through the 4-deep FIFO as room appears.
+
+CAN_FRAME_BIT = 16  # clocks per bit in can_tx_frame.asm, stage 4's
+CAN_FRAME_SAMPLE = 7  # the clock of a bit whose level can_tx_frame.asm and a node beside it take: the seventh
+CAN_CRC_POLY = 0x4599
+
+
+def can_crc15(bits):
+    """CAN's CRC over `bits`: shift, and XOR in the polynomial when the bit in and the bit out differ."""
+    crc = 0
+    for bit in bits:
+        crc = (crc << 1) & 0x7FFF if bit == crc >> 14 else ((crc << 1) & 0x7FFF) ^ CAN_CRC_POLY
+    return crc
+
+
+def can_frame_bits(ident, data):
+    """The stuffed region before stuffing: the SOF, ID[10:0], RTR, IDE, r0, the DLC, the data, the CRC over all of it."""
+    bits = [0] + [(ident >> i) & 1 for i in range(10, -1, -1)] + [0, 0, 0] + [(len(data) >> i) & 1 for i in range(3, -1, -1)]
+    bits += [(byte >> i) & 1 for byte in data for i in range(7, -1, -1)]
+    return bits + [(can_crc15(bits) >> i) & 1 for i in range(14, -1, -1)]
+
+
+def can_frame_bytes(ident, data):
+    """The host's bytes: the stream's first three bits in the top of the first, eight a byte after it, the last padded."""
+    bits = can_frame_bits(ident, data)
+    padded = bits[:3] + [0] * 5 + bits[3:]
+    padded += [0] * (-len(padded) % 8)
+    return [sum(bit << (7 - i) for i, bit in enumerate(padded[k : k + 8])) for k in range(0, len(padded), 8)]
+
+
+class CanFrame:
+    """tests/test_can.py's Frame receiver, inlined: on the bus from the SOF's
+    edge it takes the level on the `sample`th clock of every 16-clock bit,
+    drops stuff bits through the CRC, reads the fields, checks the CRC and,
+    when it matched, pulls the ACK slot dominant; then the ACK delimiter,
+    EOF and the intermission, and idle. `frame` is (ident, dlc, data, crc
+    matched) once read, `acked` whether it drove the slot, `errors` the
+    stuff errors, `form_errors` dominant bits where the form says recessive."""
+
+    def __init__(self, sample=CAN_FRAME_SAMPLE):
+        self.sample = sample
+        self.line, self.clock, self.phase = 1, None, "idle"
+        self.stream, self.errors, self.form_errors = [], [], []
+        self.level, self.count, self.fixed, self.gap = None, 0, 0, 0
+        self.frame, self.acked = None, False
+
+    def length(self):
+        if len(self.stream) < 19:
+            return None
+        dlc = sum(bit << (3 - i) for i, bit in enumerate(self.stream[15:19]))
+        return 19 + 8 * min(dlc, 8) + 15
+
+    def update(self, line):
+        if self.clock is None and line == 0 and self.line == 1:
+            self.clock, self.phase, self.stream, self.level, self.count = 0, "stuffed", [], None, 0
+        if self.clock is not None:
+            self.clock += 1
+            if self.clock % CAN_FRAME_BIT == self.sample:
+                if self.phase == "stuffed":
+                    if self.count == 5:
+                        if line == self.level:
+                            self.errors.append(len(self.stream))
+                        self.level, self.count = line, 1
+                    else:
+                        self.stream.append(line)
+                        self.level, self.count = (self.level, self.count + 1) if line == self.level else (line, 1)
+                else:
+                    self.fixed += 1
+                    if line == 0 and self.phase != "ack":
+                        self.form_errors.append((self.phase, self.fixed))
+            if self.clock % CAN_FRAME_BIT == 0:
+                if self.phase == "stuffed":
+                    if len(self.stream) == self.length() and self.count != 5:
+                        bits = self.stream
+                        dlc = min(sum(bit << (3 - i) for i, bit in enumerate(bits[15:19])), 8)
+                        data = [sum(bit << (7 - i) for i, bit in enumerate(bits[19 + 8 * k : 27 + 8 * k])) for k in range(dlc)]
+                        crc = sum(bit << (14 - i) for i, bit in enumerate(bits[-15:]))
+                        self.frame = (sum(bit << (10 - i) for i, bit in enumerate(bits[1:12])), dlc, data, can_crc15(bits[:-15]) == crc)
+                        self.acked = self.frame[3]
+                        self.phase = "crc delimiter"
+                elif self.phase == "crc delimiter":
+                    self.phase = "ack"
+                elif self.phase == "ack":
+                    self.phase = "ack delimiter"
+                elif self.phase == "ack delimiter":
+                    self.phase, self.gap = "gap", 0
+                elif self.phase == "gap":
+                    self.gap += 1
+                    if self.gap == CAN_GAP:
+                        self.phase, self.clock = "idle", None
+        self.line = line
+        return 0 if self.phase == "ack" and self.acked else None
+
+
+async def can_frame_host(dut, bytes_, received, full):
+    """The host for can_tx_frame.asm: it pushes `bytes_` in order, one per
+    clock while tx_full is low, pops every byte the core pushes into
+    `received`, and notes in `full` each clock it found the FIFO full. Runs
+    until cancelled."""
+    queue, clock = list(bytes_), -1
+    while True:
+        await FallingEdge(dut.clk)
+        clock += 1
+        dut.tx_push.value = 0
+        dut.rx_pop.value = 0
+        if int(dut.rx_empty.value) == 0:
+            received.append(int(dut.rx_data.value))
+            dut.rx_pop.value = 1
+        if int(dut.tx_full.value):
+            full.append(clock)
+        elif queue:
+            dut.tx_data.value = queue.pop(0)
+            dut.tx_push.value = 1
+
+
+@cocotb.test()
+async def can_data_frame_at_the_pins(dut):
+    """programs/can_tx_frame.asm with a receiver that acks, twice: 0x5A3
+    carrying 0x5A, two stuff bits in all, 57 bits on the bus, 917 clocks
+    from release to halt, the host reading 0xAE, the stream's last seven
+    samples and the ACK 0; 0x7FF carrying 0xFF, five stuff bits, 60 bits,
+    965 clocks, 0x2A. On the bus from the SOF: the stuffed stream, a
+    recessive CRC delimiter, the ACK slot pulled dominant by the receiver
+    with the pad off it, the ACK delimiter, EOF and the intermission, every
+    bit 16 clocks; the receiver reads the identifier, DLC 1, the byte and a
+    CRC that matches, no stuff or form error; the pad drives exactly the
+    dominant bits but the slot; the host's six bytes go in as room appears,
+    the FIFO full from the release until the third PULL, the sixth byte
+    having filled it again after the second, and never a stall; the bus,
+    the pad enable and the byte clock for clock the model's with the same
+    host at a 4-deep FIFO."""
+    program = load_program(PROGRAMS / "can_tx_frame.asm")
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    start_clock(dut)
+    await reset(dut)
+    imem = Imem(dut, program)
+    from cpu import CPU
+    for ident, data, clocks, byte in ((0x5A3, 0x5A, 917, 0xAE), (0x7FF, 0xFF, 965, 0x2A)):
+        bytes_ = can_frame_bytes(ident, [data])
+        bits = can_stuffed(can_frame_bits(ident, [data])) + [1, 0, 1] + [1] * CAN_GAP
+        await FallingEdge(dut.clk)
+        imem.load(program)
+        drive_host(dut, program_words=0)
+        dut.gpio_in.value = 0b0001
+        await reset(dut)
+        await FallingEdge(dut.clk)
+        receiver = CanFrame()
+        received, full = [], []
+        host = cocotb.start_soon(can_frame_host(dut, bytes_, received, full))
+        dut.program_words.value = len(program)
+        bus, pad_drives, _ = await can_bus(dut, [receiver], limit=1100)
+        host.cancel()
+
+        # The model on the same bus, tests/test_can.py's bench inlined, the host at a 4-deep FIFO.
+        cpu = CPU(program, gpio_in=1)
+        model, queue = CanFrame(), list(bytes_)
+        model_bus, model_drives, model_received, line, stalls = [], [], [], 1, 0
+        while not cpu.halted and cpu.cycle < 1100:
+            if queue and len(cpu.tx_fifo) < 4:
+                cpu.tx_fifo.append(queue.pop(0))
+            cpu.step()
+            stalls += cpu.stalled
+            drive = model.update(line)
+            driving = cpu.gpio_oe[CAN_TX] == 1
+            pad = cpu.gpio[CAN_TX] if driving else None
+            line = 0 if pad == 0 or drive == 0 else 1
+            cpu.gpio_in[CAN_TX] = line
+            model_bus.append(line)
+            model_drives.append(int(driving))
+            if cpu.rx_fifo:
+                model_received.append(cpu.rx_fifo.pop(0))
+        assert cpu.halted and stalls == 0 and cpu.cycle == clocks, f"{ident:03x}: the model, {cpu.cycle} cycles"
+        sof = bus.index(0)
+        start = sof - model_bus.index(0)
+        assert bus[start : start + len(model_bus)] == model_bus, f"{ident:03x}: the bus, clock for clock the model's"
+        assert pad_drives[start : start + len(model_drives)] == model_drives, f"{ident:03x}: the pad enable, clock for clock the model's"
+        assert len(bus) - start == cpu.cycle + 2, f"{ident:03x}: {len(bus) - start - 2} clocks from release to halt, the model's {cpu.cycle}"
+        assert received == model_received == [byte]
+
+        cells = [bus[sof + k * CAN_FRAME_BIT : sof + (k + 1) * CAN_FRAME_BIT] for k in range(len(bits))]
+        assert all(len(set(cell)) == 1 for cell in cells), f"{ident:03x}: a bit not held for {CAN_FRAME_BIT} clocks: {cells}"
+        assert [cell[0] for cell in cells] == bits, f"{ident:03x}: the frame on the bus"
+        slot = slice(sof + (len(bits) - CAN_GAP - 2) * CAN_FRAME_BIT, sof + (len(bits) - CAN_GAP - 1) * CAN_FRAME_BIT)
+        assert pad_drives[slot] == [0] * CAN_FRAME_BIT, "the pad off the bus for the ACK slot"
+        outside = [i for i in range(start, len(bus)) if not slot.start <= i < slot.stop]
+        assert [pad_drives[i] for i in outside] == [int(bus[i] == 0) for i in outside], "dominant driven, recessive let go, from the release on"
+        end = sof + len(bits) * CAN_FRAME_BIT
+        assert bus[:sof] == [1] * sof and bus[end:] == [1] * len(bus[end:])
+        assert receiver.frame == (ident, 1, [data], True) and receiver.acked and receiver.errors == [] and receiver.form_errors == []
+        third = len(can_stuffed(can_frame_bits(ident, [data])[:10]))  # the bus bit carrying stream bit 10, whose cell holds the third PULL
+        assert full[0] < sof + CAN_FRAME_BIT and full[-1] == sof + third * CAN_FRAME_BIT + CAN_FRAME_SAMPLE - 2, f"{ident:03x}: the FIFO full until the third PULL, then never: {full[-1] - sof} clocks after the SOF"
+        assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.tx_fifo.empty.value) == 1
+        assert int(dut.gpio_oe.value) & 1 == 0, "the bus let go at the halt"
