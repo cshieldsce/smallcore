@@ -1743,3 +1743,158 @@ async def swd_with_repeat_is_the_canonical_program_at_the_pins(dut):
             # The ACK is bits 7:5 of the byte; after a WAIT the retry's ACK byte carries the first ACK's bits below it.
             assert [b >> 5 for b in received] == ([SWD_OK] if host_kind == "prompt" else [SWD_WAIT, SWD_OK])
             assert written == [(data, True)] and requests == ([0xA9] if host_kind == "prompt" else [0xA9, 0xA9])
+
+
+# CAN: the bench is the bus and the other nodes. Classical CAN, standard
+# 11-bit identifiers, one pin, no clock line: a bit is CAN_BIT clocks, driven
+# on its first and sampled on its seventh, the level the bus held through its
+# sixth. Stage 1, the SOF and the identifier (can_tx.asm): the host writes
+# {SOF, ID[10:4]} and {ID[3:0], 0000}, the node drives the twelve bits,
+# dominant 0 driven, recessive 1 let go, and lets go after ID[0]. The bench
+# resolves the bus every clock as a wired AND of the pad (gpio_out, gpio_oe)
+# and the other nodes and feeds it back on gpio_in[0], the pad readback.
+
+CAN_TX = 0  # the same pin number on gpio_out/gpio_oe (the pad) and gpio_in (the bus): the shift pin
+CAN_BIT = 8  # clocks per bit
+CAN_SAMPLE = 6  # the clock of a bit whose level a node takes: the sixth
+CAN_HEADER = 12  # the SOF and the eleven identifier bits
+
+
+class CanNode:
+    """An ideal receiver on the bus. `update(line)` is called every clock with
+    the bus as it stood at the end of the clock before and returns what the
+    node drives this clock: 0 or None, and this one never drives. Idle, it
+    waits for the bus to fall, the SOF, and counts clocks from that edge: on
+    the sixth clock of every bit it takes the level it was handed. After
+    twelve samples it appends the identifier to `seen` and is idle again."""
+
+    def __init__(self):
+        self.line = 1
+        self.clock = None
+        self.samples = []
+        self.seen = []
+
+    def update(self, line):
+        if self.clock is None and line == 0 and self.line == 1:
+            self.clock = 0
+        if self.clock is not None:
+            self.clock += 1
+            if self.clock % CAN_BIT == CAN_SAMPLE:
+                self.samples.append(line)
+                if len(self.samples) == CAN_HEADER:
+                    assert self.samples[0] == 0, "the SOF: the edge it synced on"
+                    self.seen.append(sum(bit << (10 - i) for i, bit in enumerate(self.samples[1:])))
+                    self.samples, self.clock = [], None
+        self.line = line
+        return None
+
+
+async def can_bus(dut, nodes, limit=300):
+    """The bus, until the core halts plus a few clocks. On every falling edge
+    of clk it shows the nodes the bus as it stood for the core's last edge,
+    resolves it as a wired AND of the pad and what the nodes drive, puts it on
+    gpio_in[0] for the core's next edge, and records it. The pad driving a 1
+    against a node's 0 is a fight, which no CAN node has: it fails here.
+    Returns two lists, one entry per clock: the bus and whether the pad was
+    driving it."""
+    bus, pad_drives = [], []
+    line = 1
+    tail = 4  # clocks recorded after the halt
+    for _ in range(limit):
+        await FallingEdge(dut.clk)
+        out, oe = int(dut.gpio_out.value), int(dut.gpio_oe.value)
+        drives = [node.update(line) for node in nodes]
+        driving = (oe >> CAN_TX) & 1
+        pad = (out >> CAN_TX) & 1 if driving else None
+        assert not (pad == 1 and 0 in drives), "the pad drives a 1 against a node's dominant 0"
+        line = 0 if pad == 0 or 0 in drives else 1
+        dut.gpio_in.value = (int(dut.gpio_in.value) & ~(1 << CAN_TX)) | (line << CAN_TX)
+        bus.append(line)
+        pad_drives.append(driving)
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if int(dut.core_i.halted.value):
+            tail -= 1
+            if tail == 0:
+                return bus, pad_drives
+    raise AssertionError(f"core still running after {limit} clocks")
+
+
+@cocotb.test()
+async def can_sof_and_identifier_to_the_bus(dut):
+    """programs/can_tx.asm end to end on an idle bus with one receiver. The
+    host pushes 0x5A and 0x30, {SOF 0, ID[10:4]} and {ID[3:0], 0000} for the
+    identifier 0x5A3 (101 1010 0011, not a palindrome, no run over three),
+    and releases the core. On the bus, from the SOF's fall: twelve bits of
+    exactly 8 clocks each, 0 1 0 1 1 0 1 0 0 0 1 1, the pad driving exactly
+    the dominant ones and off the bus for the recessive ones, the bus
+    recessive before and after; the receiver, synced on the SOF, reads 0x5A3;
+    the host reads 0xA3, ID[7:0] as the node sampled them, and nothing else;
+    both bytes consumed; halted off the bus; the bus and the pad enable clock
+    for clock what the model's bench shows, 100 clocks from release to the
+    halt."""
+    program = load_program(PROGRAMS / "can_tx.asm")
+    ident = 0x5A3
+    header = [ident >> 4, (ident & 0xF) << 4]
+    bits = [0] + [(ident >> i) & 1 for i in range(10, -1, -1)]
+    node = CanNode()
+    received = []
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001  # the bus idles recessive
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert int(dut.gpio_out.value) & 1 == 1 and int(dut.gpio_oe.value) & 1 == 1, "push-pull high out of reset: the bus pin waits for its CONFIG"
+    assert int(dut.tx_fifo.empty.value) == 1 and int(dut.rx_empty.value) == 1
+
+    # The host queues both bytes, one per clock, then releases the core.
+    for byte in header:
+        await FallingEdge(dut.clk)
+        dut.tx_data.value = byte
+        dut.tx_push.value = 1
+    await FallingEdge(dut.clk)
+    dut.tx_push.value = 0
+    assert int(dut.tx_fifo.count.value) == 2
+    host = cocotb.start_soon(swd_host_drain(dut, received))
+    dut.program_words.value = len(program)
+
+    bus, pad_drives = await can_bus(dut, [node])
+    host.cancel()
+
+    # The model's bench on the same frame: sim/cpu.py on tests/test_can.py's bus.
+    from cpu import CPU
+    cpu = CPU(program, gpio_in=1, tx_data=header)
+    model_bus, model_drives = [], []
+    while not cpu.halted:
+        cpu.step()
+        driving = cpu.gpio_oe[CAN_TX] == 1
+        level = cpu.gpio[CAN_TX] if driving else 1
+        cpu.gpio_in[CAN_TX] = level
+        model_bus.append(level)
+        model_drives.append(int(driving))
+    assert cpu.cycle == 100 and cpu.rx_fifo == [ident & 0xFF]
+
+    sof = bus.index(0)
+    assert sof >= 3, f"the SOF fell {sof} clocks after the release; the model's three are CONFIG, CONFIG, PULL"
+    start = sof - model_bus.index(0)
+    assert bus[start : start + len(model_bus)] == model_bus, "the bus, clock for clock the model's"
+    assert pad_drives[start : start + len(model_drives)] == model_drives, "the pad enable, clock for clock the model's"
+    assert len(bus) - start == 100 + 2, f"{len(bus) - start - 2} clocks from release to halt, the model's 100"  # one entry per clock through the halting edge, two after
+
+    # Twelve bits of 8 clocks, the SOF then ID[10] down to ID[0].
+    cells = [bus[sof + k * CAN_BIT : sof + (k + 1) * CAN_BIT] for k in range(CAN_HEADER)]
+    assert all(len(set(cell)) == 1 for cell in cells), f"a bit not held for {CAN_BIT} clocks: {cells}"
+    assert [cell[0] for cell in cells] == bits
+    end = sof + CAN_HEADER * CAN_BIT
+    assert bus[:sof] == [1] * sof and bus[end:] == [1] * len(bus[end:]), "recessive around the frame"
+    assert pad_drives == [int(level == 0) for level in bus], "the pad drives the dominant bits and only those"
+    assert node.seen == [ident]
+
+    # The host read ID[7:0] as sampled and nothing else; both bytes went out; halted off the bus.
+    assert received == [ident & 0xFF]
+    assert int(dut.rx_empty.value) == 1
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.halted.value) == 1
+    assert int(dut.gpio_oe.value) & 1 == 0 and int(dut.gpio_out.value) & 1 == 1
