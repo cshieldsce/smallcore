@@ -12,7 +12,7 @@ from pathlib import Path
 import cocotb
 from cocotb.triggers import ClockCycles, FallingEdge, ReadOnly, RisingEdge
 
-from cpu import assemble, load_program  # sim/cpu.py
+from cpu import assemble, decode, load_isa, load_program  # sim/cpu.py
 from tb import Imem, drive_host, reset, start_clock
 
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
@@ -1085,16 +1085,18 @@ async def swd_wire(dut, target, limit=600):
     raise AssertionError(f"core still running after {limit} clocks")
 
 
-async def swd_write_host(dut, request, payload, received):
+async def swd_write_host(dut, request, payload, received, delay=0):
     """The host doing one write the way the FIFOs ask. It pushes the request
     and nothing else, because a WAIT would make the retry PULL a data byte as
     the request; it pops every byte the core PUSHes into `received`; on a
-    WAIT it queues the request again, on an OK the `payload`, the four data
-    bytes and the parity byte; and it pushes one queued byte per clock while
-    tx_full is low. Runs until cancelled. Pushes and pops are levels on
-    top's ports: held high across a clock, each acts on that clock."""
+    WAIT it queues the request again, `delay` clocks later, on an OK the
+    `payload`, the four data bytes and the parity byte; and it pushes one
+    queued byte per clock while tx_full is low. Runs until cancelled. Pushes
+    and pops are levels on top's ports: held high across a clock, each acts
+    on that clock."""
     queue = [request]
     acks = 0
+    due = None  # clocks to go before the request is queued again
     while True:
         await FallingEdge(dut.clk)
         dut.tx_push.value = 0
@@ -1106,9 +1108,15 @@ async def swd_write_host(dut, request, payload, received):
             acks = len(received)
             ack = received[-1] >> 5
             if ack == SWD_WAIT:
-                queue.append(request)
+                due = delay
             elif ack == SWD_OK:
                 queue.extend(payload)
+        if due is not None:
+            if due == 0:
+                queue.append(request)
+                due = None
+            else:
+                due -= 1
         if queue and int(dut.tx_full.value) == 0:
             dut.tx_data.value = queue.pop(0)
             dut.tx_push.value = 1
@@ -1133,6 +1141,43 @@ async def swd_host_drain(dut, received):
             dut.rx_pop.value = 1
             await FallingEdge(dut.clk)
             dut.rx_pop.value = 0
+
+
+async def swd_log(dut, log):
+    """One entry per falling edge of clk, (imem_addr, RX FIFO full), indexed
+    like swd_wire's lists when started on the same edge. imem_addr is the pc
+    on a pin. Runs until cancelled."""
+    while True:
+        await FallingEdge(dut.clk)
+        log.append((int(dut.imem_addr.value), int(dut.rx_fifo.full.value)))
+
+
+async def swd_sleeping_host(dut, received, pops, sleep):
+    """The host that does not read: nothing until the RX FIFO is full, then
+    `sleep` more clocks, then one pop, `sleep` clocks again, one more pop,
+    and only then a drain, one byte per clock. Counts clocks from its start,
+    indexed like swd_wire's lists when started on the same edge, and appends
+    the index of every clock it raised rx_pop on to `pops`. Runs until
+    cancelled."""
+    phase, timer, i = "asleep", 0, -1
+    while True:
+        await FallingEdge(dut.clk)
+        i += 1
+        dut.rx_pop.value = 0
+        if phase == "asleep":
+            if int(dut.rx_fifo.full.value):
+                phase, timer = "one", sleep
+        elif phase in ("one", "two"):
+            timer -= 1
+            if timer == 0:
+                received.append(int(dut.rx_data.value))
+                dut.rx_pop.value = 1
+                pops.append(i)
+                phase, timer = ("two", sleep) if phase == "one" else ("draining", 0)
+        elif int(dut.rx_empty.value) == 0:
+            received.append(int(dut.rx_data.value))
+            dut.rx_pop.value = 1
+            pops.append(i)
 
 
 @cocotb.test()
@@ -1171,6 +1216,7 @@ async def swd_write_host_word_to_wire(dut):
 
     swdio, swclk, host_drives, target_drives = await swd_wire(dut, target)
     host.cancel()
+    assert len(swclk) == 384 + 2, f"{len(swclk) - 2} clocks from release to halt, the model's write takes 384"  # one entry per clock through the halting edge, two after
 
     # 46 rises: 8 request, the turnaround, 3 ACK, the turnaround back, 32
     # data, the parity. 8 clocks apart, but for the branch and the first
@@ -1326,6 +1372,7 @@ async def swd_read_ok_data_and_parity_to_host(dut):
 
     swdio, swclk, host_drives, target_drives = await swd_wire(dut, target)
     drain.cancel()
+    assert len(swclk) == 379 + 2, f"{len(swclk) - 2} clocks from release to halt, the model's read takes 379"  # one entry per clock through the halting edge, two after
 
     # 46 rises: 8 request, the turnaround, 3 ACK, 32 data, the parity, the
     # turnaround back. Request, turnaround and ACK clocks 8 apart; the branch
@@ -1364,6 +1411,160 @@ async def swd_read_ok_data_and_parity_to_host(dut):
     assert int(dut.halted.value) == 1
     assert int(dut.gpio_oe.value) & 0b11 == 0b11
     assert int(dut.gpio_out.value) & 0b11 == 0b01
+
+
+@cocotb.test()
+async def swd_read_sleeping_host_stalls_the_fifth_push_and_resumes_once(dut):
+    """The adversarial read: programs/swd_read.asm, a target that says OK and
+    has 0xE31D5396, and a host that reads nothing until the RX FIFO is full,
+    then sleeps 200 more clocks. Four PUSHes fill it (the ACK, data bytes 0,
+    1, 2); the fifth, data byte 3's, finds it full right after the
+    thirty-second data bit and the core stops there for the whole sleep, at
+    the pins: SWCLK stopped high without a glitch; the pad off SWDIO, the
+    target holding bit 31; imem_addr, the pc, on the PUSH; the FIFO full the
+    whole time, so no PUSH repeated. The host pops one byte and execution
+    resumes exactly once: one more rise (the parity's), imem_addr through the
+    PUSH, the parity's SHIFT_IN and the parity's PUSH once each, the FIFO
+    full again with the one byte that PUSH added, SWCLK high and still for
+    the second sleep. The host pops again, then drains: 46 rises in all and
+    the six bytes, byte 3 and the parity whole, which is the proof at the
+    pins that no sample repeated while the clock stood."""
+    program = load_program(PROGRAMS / "swd_read.asm")
+    isa = load_isa()
+    pushes = [i for i, w in enumerate(program) if decode(w, isa).op == "PUSH"]
+    byte, data, sleep, held = 0x8D, 0xE31D5396, 200, 100  # the host sleeps 200 clocks from the FIFO filling: the stall begins 64 later and is held at least 100
+    target = SwdTarget([SWD_OK], data)
+    received, pops, log = [], [], []
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001  # the wire idles high
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.rx_empty.value) == 1
+
+    await FallingEdge(dut.clk)
+    dut.tx_data.value = byte
+    dut.tx_push.value = 1
+    await FallingEdge(dut.clk)
+    dut.tx_push.value = 0
+    dut.program_words.value = len(program)
+    host = cocotb.start_soon(swd_sleeping_host(dut, received, pops, sleep))
+    logger = cocotb.start_soon(swd_log(dut, log))
+
+    swdio, swclk, host_drives, target_drives = await swd_wire(dut, target, limit=1200)
+    host.cancel()
+    logger.cancel()
+    assert len(log) == len(swclk), "the log and the wire count different clocks"
+    pcs, full = [pc for pc, _ in log], [f for _, f in log]
+    ups = rising_edges(swclk)
+    assert len(ups) == SWD_READ_CLOCKS, f"rising edges of SWCLK at {ups}"
+    first, second = pops[0], pops[1]
+
+    # The first stall: from four clocks after the thirty-second data bit's
+    # rise, when the PUSH found the FIFO full, to the host's first pop.
+    stop = ups[43] + 4
+    assert first - stop >= held, "the host popped before the stall had settled"
+    still = slice(stop, first + 1)
+    assert set(swclk[still]) == {1}, "SWCLK moved while the host slept"
+    assert set(host_drives[still]) == {0}, "the pad drove SWDIO during the stall"
+    assert set(target_drives[still]) == set(swdio[still]) == {(data >> 31) & 1}, "the target holds data bit 31 and the wire shows it"
+    assert set(pcs[still]) == {pushes[-2]}, "the pc moved off data byte 3's PUSH"
+    assert set(full[still]) == {1}, "the FIFO was not full the whole stall"
+    assert full[first + 1] == 0, "the pop made room"
+
+    # The resume: one rise, three addresses once each, full again, still again.
+    assert [e for e in ups if first < e <= second] == [ups[44]], "not exactly one more rise, the parity's"
+    visited = [pc for i, pc in enumerate(pcs[first:second + 1]) if i == 0 or pc != pcs[first:second + 1][i - 1]]
+    assert visited == [pushes[-2], pushes[-2] + 1, pushes[-1]], "the PUSH, the parity's SHIFT_IN, the parity's PUSH, once each"
+    assert second - (ups[44] + 4) >= held, "the second stall was not held"
+    again = slice(ups[44] + 4, second + 1)
+    assert set(swclk[again]) == {1} and set(pcs[again]) == {pushes[-1]} and set(full[again]) == {1}
+    assert set(host_drives[again]) == {0} and set(target_drives[again]) == {None} and set(swdio[again]) == {1}, "after the parity the target let go: the wire at the pull-up, the pad still off"
+
+    # After the second pop: the turnaround back and the halt; six bytes, whole.
+    assert ups[45] > second
+    assert received == [SWD_OK << 5, 0x96, 0x53, 0x1D, 0xE3, 0xF1]
+    assert len(pops) == 6
+    assert int(dut.rx_empty.value) == 1
+    assert int(dut.halted.value) == 1
+    assert int(dut.gpio_oe.value) & 0b11 == 0b11
+    assert int(dut.gpio_out.value) & 0b11 == 0b01
+
+
+@cocotb.test()
+async def swd_write_wait_host_takes_its_time_to_push_the_request_again(dut):
+    """The WAIT retry's question: the core cannot resend the request, so the
+    host pushes it again; must it hurry? programs/swd_write.asm, a target
+    that says WAIT then OK, and a host that takes 150 clocks after reading
+    the WAIT to push the request again. After the turnaround back the
+    retry's PULL finds the TX FIFO empty and the core stands still with
+    SWCLK low, SWDIO high and the pad's, imem_addr on the PULL, the target
+    seeing no edge to count, until the byte lands. Then the second
+    transaction is the prompt host's, 46 rises eight clocks apart (the
+    turnaround back to data bit 0 fifteen), the target takes the word with a
+    good parity. SWD moves on SWCLK alone: a slow host costs time, not
+    correctness."""
+    program = load_program(PROGRAMS / "swd_write.asm")
+    byte, data, delay = 0xA9, 0xE31D5396, 150
+    target = SwdTarget([SWD_WAIT, SWD_OK])
+    received, log = [], []
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    await ReadOnly()
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.rx_empty.value) == 1
+
+    host = cocotb.start_soon(swd_write_host(dut, byte, swd_payload(data), received, delay=delay))
+    await FallingEdge(dut.clk)
+    await FallingEdge(dut.clk)
+    dut.program_words.value = len(program)
+    logger = cocotb.start_soon(swd_log(dut, log))
+
+    swdio, swclk, host_drives, target_drives = await swd_wire(dut, target, limit=1000)
+    host.cancel()
+    logger.cancel()
+    assert len(log) == len(swclk)
+    pcs = [pc for pc, _ in log]
+    ups = rising_edges(swclk)
+    assert len(ups) == SWD_CLOCKS + SWD_WRITE_CLOCKS, f"rising edges of SWCLK at {ups}"
+    gaps = [b - a for a, b in zip(ups, ups[1:])]
+    assert gaps[:12] == [8] * 12 and gaps[13:25] == [8] * 12 and gaps[25] == 8 + 4 + 3 and gaps[26:] == [8] * 32
+
+    # The idle: the turnaround back's high half, the take-back's low half,
+    # SKIP, SKIP, JMP, then the PULL at address 1 holds until the byte lands,
+    # four clocks of PULL and four of SHIFT_OUT before the second request's
+    # first rise. Longer than the prompt host's 19 by the host's delay less
+    # the thirteen clocks it had in hand: the WAIT reaches it that long
+    # before the PULL wants the byte.
+    idle = slice(ups[12] + 11, ups[13] - 8)
+    assert gaps[12] == 19 + delay - 13, f"the gap between the transactions was {gaps[12]}"
+    assert idle.stop - idle.start == delay - 13
+    assert set(pcs[idle]) == {1}, "the core was somewhere other than the request's PULL while the host took its time"
+    assert set(pcs[ups[12] + 4:ups[12] + 11]) != {1}, "the words before the PULL"
+    between = slice(ups[12] + 4, ups[13])
+    assert set(swclk[between]) == {0}, "SWCLK moved between the transactions"
+    assert set(host_drives[between]) == {1} and set(swdio[between]) == {1}, "the host did not hold SWDIO high"
+    assert set(target_drives[between]) == {None}
+
+    # The two transactions themselves, as with a prompt host.
+    taken = [swdio[e - 1] for e in ups]
+    assert target.requests == [byte, byte]
+    assert taken[:8] == taken[13:21] == [1, 0, 0, 1, 0, 1, 0, 1]
+    assert taken[9:12] == [0, 1, 0] and taken[22:25] == [1, 0, 0]
+    assert taken[26:58] == [(data >> i) & 1 for i in range(32)] and taken[58] == 1
+    assert target.written == [(data, True)]
+    assert received == [SWD_WAIT << 5, SWD_OK << 5 | SWD_WAIT << 2]
+    assert int(dut.tx_fifo.empty.value) == 1
+    assert int(dut.rx_empty.value) == 1
+    assert int(dut.halted.value) == 1
+    assert int(dut.gpio_oe.value) & 0b11 == 0b11
 
 
 @cocotb.test()
