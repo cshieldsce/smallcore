@@ -171,6 +171,23 @@ SWD by the numbers: one transaction the target says OK to, a host at the FIFOs e
 | TX FIFO fill, most | 1 | 4, the host holding the parity byte for the first data PULL |
 | cycles, release to halt | 379 | 384 |
 
+CAN by the numbers: one frame's SOF and identifier on the bus, a host at the FIFOs every cycle (`tests/test_can.py`'s numbers tests, the cycle counts also on `top.v`). Stages 1 and 2 are the baselines and stay as written; 3 and 4 are stage 1's frame with one more piece each. The inventory for the architecture review, before CRC: two complaints, arbitration and stuffing, and what they share.
+
+| | 1 the frame, `can_tx.asm` | 2 arbitration, `can_tx_arb.asm` | 3 the ACK slot, `can_tx_ack.asm` | 4 stuffing, `can_tx_stuff.asm` |
+|---|---|---|---|---|
+| program words / distinct | 13 / 8 | 95 / 34 | 21 / 16 | 224 / 71 |
+| cycles a bit / the sample on its | 8 / 6th (75%) | 8 / 4th (50%) | 8 / 6th | 16 / 8th (50%) |
+| words per identifier bit | 3, a REPEAT body | 8, written out | 3, a REPEAT body | 27, written out |
+| decision, cycles after the sample | none | 3, on every path | 1, one SKIP | 7 on the longest path, every exit padded |
+| what the decision reads | – | the sent bit and the seen bit: two samples, the pad's own readback for the first | the seen bit alone: the sent bit is the program's constant | the last five samples: bits 4:0 of `in_shift_reg` |
+| REPEAT | yes | no: a JMP out of the body | yes | no: a JMP out of the body |
+| cycles, release to halt | 100 | 100 won; 8 (k + 1) + 4 lost on bit k, 5 before ID[4] | 115 acked; 194 + the host's lateness to the second SOF | 196; 228 with two stuff bits |
+| host interactions | 2 pushes, 1 pop | 2 pushes, 1 pop | 2 pushes, 1 pop; 2 more pushes per retry | 2 pushes, 1 pop |
+| cycles in hand at the mid-frame PULL | 0: a late host stretches ID[4] | 0 | 0; 87 at the retry's PULL, between frames | 0 |
+| what the core lacks, if anything | nothing | the bit it sent, once SHIFT_OUT has put it on the pin | nothing | a run count, or a cheaper five-bit compare; a branch that lands on the next edge from either side |
+
+What the two complaints share: a decision on the last few samples that must leave a loop body and land on the very next bit edge, where a two-way branch is a SKIP and a JMP, one cycle longer on the taken side than the fall-through, so every exit carries a delay and REPEAT is out. What they do not share: arbitration wants a bit the core once had and let go of, stuffing wants a count over bits it still has. Neither is fixed; the candidates come next, on these programs, the way REPEAT's did.
+
 Three kinds of state: instruction (`pc`, the delay counter), stream (the shift registers and FIFOs) and configuration (`shift_dir`, `open_drain`), each a `CONFIG` field. A shift pin or input pin would join the third kind as the last field.
 
 ## Docs
