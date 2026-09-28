@@ -760,6 +760,48 @@ async def run_tests_on_every_run_and_every_break_match_the_model(dut):
 
 
 @cocotb.test()
+async def accumulator_words_match_the_model(dut):
+    """ACC_IN, ACC_CRC and ACC_OUT on every pin, ACC_PUSH and ACC_LOAD,
+    each with a delay of 0..3, edge for edge against the model from forty
+    random acc and poly values and pad levels each: the plain shift, the
+    shift with feedback, the top bit out on its pin, the low byte to the
+    FIFO, the polynomial byte from shift_reg. acc and poly are compared on
+    every edge with the rest of the state. And ACC_PUSH on a full FIFO
+    stalls with acc untouched until there is room."""
+    imem = await bench(dut)
+    rng = random.Random(0x4599)
+    words = [f"ACC_{op} {pin}" for op in ("IN", "CRC", "OUT") for pin in range(4)] + ["ACC_PUSH", "ACC_LOAD"]
+    runs = 0
+    for word in words:
+        for _ in range(40):
+            program = assemble(f"PULL\n{word} [{rng.randrange(4)}]\nSET 0, 0")
+            cpu = CPU(program, tx_data=[rng.randrange(256)])
+            cpu.gpio_in = [rng.randrange(2) for _ in range(4)]
+            await load(dut, imem, program, cpu)
+            await FallingEdge(dut.clk)
+            cpu.acc, cpu.poly = rng.randrange(1 << 16), rng.randrange(1 << 16)
+            dut.acc.value, dut.poly.value = cpu.acc, cpu.poly
+            await cross(dut, cpu)
+            while not cpu.halted:
+                await follow(dut, cpu)
+            runs += 1
+    assert runs == 14 * 40
+    program = assemble("ACC_PUSH\nSET 0, 0")
+    cpu = CPU(program, rx_depth=1)
+    await load(dut, imem, program, cpu)
+    await FallingEdge(dut.clk)
+    cpu.acc, cpu.rx_fifo = 0x8B32, [0]
+    dut.acc.value = 0x8B32
+    for _ in range(3):
+        await cross(dut, cpu)
+        assert cpu.stalled and int(dut.acc.value) == 0x8B32
+        await FallingEdge(dut.clk)
+    cpu.rx_fifo = []
+    await cross(dut, cpu)
+    assert cpu.rx_fifo == [0x32] and int(dut.acc.value) == 0x008B
+
+
+@cocotb.test()
 async def repeat_count_1_2_and_32_match_the_model(dut):
     """A UART-shaped byte: a PULL, then a two-word cell, the shift with its
     clock down and the clock up, REPEATed count times, then the clock down.
@@ -835,7 +877,7 @@ async def stalls_inside_a_repeat_body_leave_rc_alone_and_the_repeat_commits_once
 def random_line(rng):
     """One body word of any kind but JMP and REPEAT, a delay of 0..3, a side
     effect half the time on pins 1..3 so a SHIFT_OUT keeps its own pin; the
-    run tests take none."""
+    run tests and the accumulator's words take none."""
     d = rng.choice((0, 0, 1, 2, 3))
     side = rng.choice(("", f", {rng.randrange(1, 4)}, {rng.randrange(2)}"))
     return rng.choice((
@@ -849,6 +891,11 @@ def random_line(rng):
         f"SKIP {rng.randrange(8)}, {rng.randrange(2)}{side} [{d}]",
         f"SKIP_RUN {rng.randrange(1, 9)}, {rng.randrange(2)} [{d}]",
         f"SKIP_NORUN {rng.randrange(1, 9)}, {rng.randrange(2)} [{d}]",
+        f"ACC_IN {rng.randrange(4)} [{d}]",
+        f"ACC_CRC {rng.randrange(4)} [{d}]",
+        f"ACC_OUT {rng.randrange(4)} [{d}]",
+        f"ACC_PUSH [{d}]",
+        f"ACC_LOAD [{d}]",
         f"CONFIG shift_dir, {rng.randrange(2)}{side} [{d}]",
     ))
 

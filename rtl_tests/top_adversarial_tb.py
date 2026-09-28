@@ -557,7 +557,7 @@ async def random_programs_under_host_pressure_match_the_model(dut):
                 raise AssertionError(f"seed {seed}, program {[f'{w:#06x}' for w in program]}: {e}") from e
             seen["stall" if cpu.stalled else "issue" if counter == 0 else "hold"].add(op)
         popped += len(ls.popped)
-    assert seen["stall"] == {"PULL", "PUSH", "WAIT"}, seen
+    assert seen["stall"] == {"PULL", "PUSH", "WAIT", "ACC_PUSH"}, seen
     assert seen["issue"] == set(OPS) and seen["hold"] == set(OPS) - {"REPEAT"}, seen  # REPEAT holds one cycle, never more
     assert pushed > 0 and popped > 0 and 0 < halted < SEEDS, (pushed, popped, halted)
 
@@ -931,7 +931,7 @@ async def an_open_drain_pin_releases_samples_and_drives(dut):
 
 RESET_CORE = {
     "pc": 0, "counter": 0, "rc": 0, "gpio": [1, 1, 1, 1], "halted": False, "shift_dir": 0, "open_drain": [0, 0, 0, 0],
-    "gpio_oe": [1, 1, 1, 1], "shift_reg": 0, "in_shift_reg": 0,
+    "gpio_oe": [1, 1, 1, 1], "shift_reg": 0, "in_shift_reg": 0, "acc": 0, "poly": 0,
 }
 # Pushes twice, pulls four times: with three bytes preloaded it stalls on the fourth PULL.
 TAKES = "SHIFT_IN 0\nPUSH\nPULL 2, 0\nSHIFT_OUT\nPUSH [5]\nPULL\nPULL\nPULL\nSET 1, 0"
@@ -1268,8 +1268,9 @@ def canonical(word):
     reads its select bits, its operands, the side-effect flag and, when the
     flag is set, the side-effect operands; nothing else, in isa.yaml or in
     core.v. Every opcode is assigned since REPEAT took 111, and REPEAT reads
-    its whole operand byte. A word in NOP's hole that is not a run test,
-    bits 7:5 = 001 or 011, reads nothing: a NOP with its delay."""
+    its whole operand byte. A word in NOP's hole that is not a run test or
+    an accumulator word, bits 7:5 = 011, or 001 with a kind of 101 to 111
+    or a pin on ACC_PUSH or ACC_LOAD, reads nothing: a NOP with its delay."""
     for spec in ISA["instructions"].values():
         select = spec.get("select")
         if spec["opcode"] != word >> 13 or (select and (word >> select["lsb"]) & ((1 << select["bits"]) - 1) != select["value"]):
@@ -1281,7 +1282,7 @@ def canonical(word):
             used |= 0x80 | (0x70 if word & 0x80 else 0)
         return word & ~(0xFF & ~used)
     if word >> 13 == ISA["instructions"]["NOP"]["opcode"] and not word & 0x80:
-        return word & 0xFF00  # NOP's hole outside the run tests: the core reads none of the operand, a NOP
+        return word & 0xFF00  # NOP's hole outside the run tests and the accumulator: the core reads none of the operand, a NOP
     return None
 
 
@@ -1306,14 +1307,14 @@ async def same_run(dut, imem, program, twin, tx=(), gpio_in=0, limit=40):
 
 
 SELF_WORDS = tuple(0xE000 | count << 8 for count in range(DELAY_MAX + 1))  # REPEAT with back 0: it reaches itself
-GARBAGE_WORDS = (0x0020, 0x007F, 0x2005, 0x200D, 0x40FE, 0x400E, 0xA002, 0xA070, 0x8070)  # one of each kind, then random
+GARBAGE_WORDS = (0x002D, 0x007F, 0x2005, 0x200D, 0x40FE, 0x400E, 0xA002, 0xA070, 0x8070)  # one of each kind, then random
 
 
 @cocotb.test()
 async def words_the_isa_rejects_do_what_their_read_bits_say(dut):
-    """The 36,128 words decode() refuses, in two kinds, and what core.v
-    makes of each (37,152 before the run tests took 1,024 of NOP's hole,
-    2026-09-28). 32,512 carry garbage in operand bits their opcode never
+    """The 35,680 words decode() refuses, in two kinds, and what core.v
+    makes of each (37,152 before the run tests took 1,024 of NOP's hole and
+    36,128 before the accumulator took 448, 2026-09-28). 32,064 carry garbage in operand bits their opcode never
     reads, the rest of NOP's hole among them: core.v never reads them
     either, so nine chosen and 400 drawn at random run edge for edge as
     the model runs the word with those bits cleared. 3,616 are well-formed but out of range: CONFIG's unassigned
@@ -1326,7 +1327,7 @@ async def words_the_isa_rejects_do_what_their_read_bits_say(dut):
     rejected = [w for w in range(1 << 16) if not accepted(w)]
     garbage = [w for w in rejected if canonical(w) != w and accepted(canonical(w))]
     semantic = sorted(set(rejected) - set(garbage))
-    assert (len(rejected), len(garbage), len(semantic)) == (36128, 32512, 3616)
+    assert (len(rejected), len(garbage), len(semantic)) == (35680, 32064, 3616)
     assert all(w in garbage for w in GARBAGE_WORDS) and all(w in semantic for w in SELF_WORDS)
     imem = Imem(dut, [])
     start_clock(dut)
@@ -1436,7 +1437,7 @@ async def long_random_programs_under_a_rude_host_with_restarts_match_the_model(d
             if op and roll >= 0.0125:
                 seen["stall" if ls.cpu.stalled else "issue" if counter == 0 else "hold"].add(op)
         dropped, idle_pops, popped = dropped + ls.dropped, idle_pops + ls.idle_pops, popped + len(ls.popped)
-    assert seen["stall"] == {"PULL", "PUSH", "WAIT"}, seen
+    assert seen["stall"] == {"PULL", "PUSH", "WAIT", "ACC_PUSH"}, seen
     assert seen["issue"] == set(OPS) and seen["hold"] == set(OPS) - {"REPEAT"}, seen  # REPEAT holds one cycle, never more
     assert all(hit.values()), hit
     assert dropped > 0 and idle_pops > 0 and popped > 0, (dropped, idle_pops, popped)

@@ -2777,3 +2777,95 @@ async def can_fifo_receiver_with_the_run_test_at_the_pins(dut):
     ack = slice(sof + slot * CAN_BIT, sof + (slot + 1) * CAN_BIT)
     assert pad_drives[ack] == [1] * CAN_BIT and bus[ack] == [0] * CAN_BIT and tx.acked, "the ACK slot pulled dominant"
     assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.gpio_oe.value) & 1 == 0
+
+
+# The accumulator, adopted 2026-09-28 (docs/crc-candidates.md, "Decided"):
+# CRC-15 in 23 words with ACC_CRC, and the destuffing receiver handing the
+# host bytes with ACC_IN, both on the ISA as it is.
+
+
+@cocotb.test()
+async def crc15_on_the_accumulator_at_the_pins(dut):
+    """experiments/acc/crc15.asm, twice: the polynomial 0x8B32 then four host
+    bytes, the pads read back, pin 0 the data out and back into ACC_CRC,
+    then the CRC-15 of the 32 bits out on pin 1 MSB first, each bit two
+    clocks, ACC_OUT and the REPEAT, as the oracle computes it; pins 0 and 1
+    clock for clock the model's under the same readback."""
+    program = load_program(EXPERIMENTS / "acc" / "crc15.asm")
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0
+    start_clock(dut)
+    await reset(dut)
+    imem = Imem(dut, program)
+    from cpu import CPU
+    for bytes_ in ((0x5A, 0x3A, 0x00, 0x5A), (0x12, 0x34, 0x56, 0x78)):
+        bits = [(byte >> i) & 1 for byte in bytes_ for i in range(7, -1, -1)]
+        queue = [0x32, 0x8B] + list(bytes_)
+        await FallingEdge(dut.clk)
+        imem.load(program)
+        drive_host(dut, program_words=0)
+        dut.gpio_in.value = 0
+        await reset(dut)
+        for value in queue[:4]:  # the FIFO holds four: the rest as the core pulls
+            await FallingEdge(dut.clk)
+            dut.tx_data.value = value
+            dut.tx_push.value = 1
+        await FallingEdge(dut.clk)
+        dut.tx_push.value = 0
+
+        async def feed(rest=queue[4:]):
+            for value in rest:
+                await FallingEdge(dut.clk)
+                while int(dut.tx_fifo.full.value):  # checked on the edge the push is set up on
+                    await FallingEdge(dut.clk)
+                dut.tx_data.value = value
+                dut.tx_push.value = 1
+                await FallingEdge(dut.clk)
+                dut.tx_push.value = 0
+
+        feeder = cocotb.start_soon(feed())
+        dut.program_words.value = len(program)
+        levels, enables = await readback(dut, (0, 1))
+        feeder.cancel()
+
+        cpu = CPU(program, tx_data=queue)
+        model = []
+        while not cpu.halted:
+            cpu.step()
+            model.append((cpu.gpio[0], cpu.gpio[1]))
+            cpu.gpio_in[0], cpu.gpio_in[1] = cpu.gpio[0], cpu.gpio[1]
+        start = len(levels) - 2 - len(model)
+        assert levels[start : start + len(model)] == model, f"{bytes_}: pins 0 and 1, clock for clock the model's"
+        value = crc_bits(bits, 0x4599, 15)
+        emitted = [pin1 for _, pin1 in levels[start + len(model) - 30 : start + len(model)]]
+        assert emitted == [(value >> i) & 1 for i in range(14, -1, -1) for _ in range(2)], f"{bytes_}: the CRC-15 on pin 1"
+        assert all(oe & 0b11 == 0b11 for oe in enables)
+
+
+@cocotb.test()
+async def can_bytes_receiver_on_the_accumulator_at_the_pins(dut):
+    """experiments/acc/can_rx_bytes.asm with the bench transmitter sending
+    0x5A3 carrying 0x5A at 8 clocks a bit: the raw history in in_shift_reg
+    for the run test, the data bits in acc, a byte to the host every eight:
+    the destuffed stream as five bytes and the last two bits, the ACK slot
+    pulled dominant; the bus, the pad enable and the bytes clock for clock
+    the model's."""
+    program = load_program(EXPERIMENTS / "acc" / "can_rx_bytes.asm")
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    start_clock(dut)
+    await reset(dut)
+    bits, slot = can_frame_on_the_bus(0x5A3, [0x5A])
+    bus, pad_drives, outs, received, cpu, model_bus, model_drives, model_received, tx = await can_receive(dut, program, bits, slot, 800)
+    sof = bus.index(0)
+    start = sof - model_bus.index(0)
+    assert bus[start : start + len(model_bus)] == model_bus, "the bus, clock for clock the model's"
+    assert pad_drives[start : start + len(model_drives)] == model_drives, "the pad enable, clock for clock the model's"
+    stream = can_frame_bits(0x5A3, [0x5A])
+    expected = [sum(b << (7 - i) for i, b in enumerate(stream[8 * k : 8 * k + 8])) for k in range(5)] + [stream[40] << 1 | stream[41]]
+    assert received == model_received == expected, "the destuffed stream, a byte at a time"
+    ack = slice(sof + slot * CAN_BIT, sof + (slot + 1) * CAN_BIT)
+    assert pad_drives[ack] == [1] * CAN_BIT and bus[ack] == [0] * CAN_BIT and tx.acked, "the ACK slot pulled dominant"
+    assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.gpio_oe.value) & 1 == 0
