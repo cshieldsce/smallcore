@@ -2282,8 +2282,8 @@ class CanFrame:
     matched) once read, `acked` whether it drove the slot, `errors` the
     stuff errors, `form_errors` dominant bits where the form says recessive."""
 
-    def __init__(self, sample=CAN_FRAME_SAMPLE):
-        self.sample = sample
+    def __init__(self, sample=CAN_FRAME_SAMPLE, bit=CAN_FRAME_BIT):
+        self.sample, self.bit = sample, bit
         self.line, self.clock, self.phase = 1, None, "idle"
         self.stream, self.errors, self.form_errors = [], [], []
         self.level, self.count, self.fixed, self.gap = None, 0, 0, 0
@@ -2300,7 +2300,7 @@ class CanFrame:
             self.clock, self.phase, self.stream, self.level, self.count = 0, "stuffed", [], None, 0
         if self.clock is not None:
             self.clock += 1
-            if self.clock % CAN_FRAME_BIT == self.sample:
+            if self.clock % self.bit == self.sample:
                 if self.phase == "stuffed":
                     if self.count == 5:
                         if line == self.level:
@@ -2313,7 +2313,7 @@ class CanFrame:
                     self.fixed += 1
                     if line == 0 and self.phase != "ack":
                         self.form_errors.append((self.phase, self.fixed))
-            if self.clock % CAN_FRAME_BIT == 0:
+            if self.clock % self.bit == 0:
                 if self.phase == "stuffed":
                     if len(self.stream) == self.length() and self.count != 5:
                         bits = self.stream
@@ -2869,3 +2869,158 @@ async def can_bytes_receiver_on_the_accumulator_at_the_pins(dut):
     ack = slice(sof + slot * CAN_BIT, sof + (slot + 1) * CAN_BIT)
     assert pad_drives[ack] == [1] * CAN_BIT and bus[ack] == [0] * CAN_BIT and tx.acked, "the ACK slot pulled dominant"
     assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.gpio_oe.value) & 1 == 0
+
+
+# The combined programs (experiments/combined/, tests/test_can_combined.py):
+# the run test and the accumulator on the whole frame at 8 clocks a bit.
+
+COMBINED = EXPERIMENTS / "combined"
+CAN_POLY = [0x32, 0x8B]  # 0x4599 left-aligned, low byte first
+
+
+async def can_tx_at_the_pins(dut, program, bytes_, limit):
+    """`program` on top.v with a receiver at 8 clocks a bit sampling the
+    third clock, the host pushing `bytes_` as room appears and popping what
+    the core pushes; then the model on the same bus with the same host at a
+    4-deep FIFO. Returns the RTL's bus, pad enables, bytes and receiver, and
+    the model's bus, pad enables and bytes."""
+    await FallingEdge(dut.clk)
+    Imem(dut, program).load(program)
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    await reset(dut)
+    await FallingEdge(dut.clk)
+    receiver = CanFrame(sample=3, bit=CAN_BIT)
+    received, full = [], []
+    host = cocotb.start_soon(can_frame_host(dut, bytes_, received, full))
+    dut.program_words.value = len(program)
+    bus, pad_drives, _ = await can_bus(dut, [receiver], limit=limit)
+    host.cancel()
+
+    from cpu import CPU
+    cpu = CPU(program, gpio_in=1)
+    model, queue = CanFrame(sample=3, bit=CAN_BIT), list(bytes_)
+    model_bus, model_drives, model_received, line = [], [], [], 1
+    while not cpu.halted and cpu.cycle < limit:
+        if queue and len(cpu.tx_fifo) < 4:
+            cpu.tx_fifo.append(queue.pop(0))
+        cpu.step()
+        drive = model.update(line)
+        driving = cpu.gpio_oe[CAN_TX] == 1
+        pad = cpu.gpio[CAN_TX] if driving else None
+        line = 0 if pad == 0 or drive == 0 else 1
+        cpu.gpio_in[CAN_TX] = line
+        model_bus.append(line)
+        model_drives.append(int(driving))
+        if cpu.rx_fifo:
+            model_received.append(cpu.rx_fifo.pop(0))
+    assert cpu.halted
+    return bus, pad_drives, received, receiver, model_bus, model_drives, model_received
+
+
+def can_bits_to_bytes(bits):
+    bits = bits + [0] * (-len(bits) % 8)
+    return [sum(b << (7 - i) for i, b in enumerate(bits[k : k + 8])) for k in range(0, len(bits), 8)]
+
+
+@cocotb.test()
+async def can_frame_with_the_crc_in_the_core_at_the_pins(dut):
+    """experiments/combined/can_tx_combined.asm, stage 6A: the host writes the
+    polynomial and 0x5A3 carrying 0x5A with no CRC, then 0x7FF carrying
+    0xFF; the core computes the CRC in acc from the bits it sent and sends
+    it stuffed, 8 clocks a bit. The receiver reads the frame with its CRC
+    matching and acks; the host reads the ACK 0; the bus, the pad enable
+    and the bytes clock for clock the model's; acc clear at the halt."""
+    program = load_program(COMBINED / "can_tx_combined.asm")
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    start_clock(dut)
+    await reset(dut)
+    for ident, data in ((0x5A3, 0x5A), (0x7FF, 0xFF)):
+        stream = can_frame_bits(ident, [data])[:-15]
+        bytes_ = CAN_POLY + can_bits_to_bytes(stream[:3] + [0] * 5 + stream[3:])
+        bus, pad_drives, received, receiver, model_bus, model_drives, model_received = await can_tx_at_the_pins(dut, program, bytes_, 900)
+        sof = bus.index(0)
+        start = sof - model_bus.index(0)
+        assert bus[start : start + len(model_bus)] == model_bus, f"{ident:03x}: the bus, clock for clock the model's"
+        assert pad_drives[start : start + len(model_drives)] == model_drives, f"{ident:03x}: the pad enable"
+        bits = can_stuffed(can_frame_bits(ident, [data]))
+        assert [bus[sof + k * CAN_BIT + 3] for k in range(len(bits))] == bits, f"{ident:03x}: the stuffed frame, the core's CRC in it"
+        assert receiver.frame == (ident, 1, [data], True) and receiver.acked and not receiver.errors
+        assert received == model_received and received[-1] & 1 == 0
+        assert int(dut.core_i.acc.value) == 0 and int(dut.halted.value) == 1
+
+
+@cocotb.test()
+async def can_arbitrating_frame_at_the_pins(dut):
+    """experiments/combined/can_tx_arb_5a3.asm, stage 6B, alone on the bus:
+    the header written out in the program, the data from the host a bit
+    late, the CRC the core's: the receiver reads 0x5A3 carrying 0x5A with
+    its CRC matching and acks, one byte to the host, clock for clock the
+    model's."""
+    program = load_program(COMBINED / "can_tx_arb_5a3.asm")
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    start_clock(dut)
+    await reset(dut)
+    bits = [(0x5A >> i) & 1 for i in range(7, -1, -1)]
+    bytes_ = CAN_POLY + can_bits_to_bytes(bits[:1] + [0] * 7 + bits[1:] + [0])
+    bus, pad_drives, received, receiver, model_bus, model_drives, model_received = await can_tx_at_the_pins(dut, program, bytes_, 900)
+    sof = bus.index(0)
+    start = sof - model_bus.index(0)
+    assert bus[start : start + len(model_bus)] == model_bus and pad_drives[start : start + len(model_drives)] == model_drives
+    assert receiver.frame == (0x5A3, 1, [0x5A], True) and receiver.acked
+    assert received == model_received and len(received) == 1 and received[0] & 1 == 0
+
+
+@cocotb.test()
+async def can_receiver_with_the_crc_in_the_core_at_the_pins(dut):
+    """experiments/combined/can_rx_crc.asm, stage 6C: the polynomial from the
+    host, then the bench transmitter's 0x5A3 carrying 0x5A at 8 clocks a
+    bit: bit 0 of the first 42 bytes the destuffed stream, the last two the
+    CRC residue, 0 and 0; then a frame with a wrong CRC: a residue that is
+    not 0, and the ACK pulled all the same. Clock for clock the model's."""
+    program = load_program(COMBINED / "can_rx_crc.asm")
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    start_clock(dut)
+    await reset(dut)
+    right = can_frame_bits(0x5A3, [0x5A])
+    for crc_ok in (True, False):
+        stream = right if crc_ok else right[:-15] + [1 - b for b in right[-15:]]
+        bits = can_stuffed(stream) + [1, 1, 1] + [1] * CAN_GAP
+        slot = len(bits) - CAN_GAP - 2
+        await FallingEdge(dut.clk)
+        Imem(dut, program).load(program)
+        drive_host(dut, program_words=0)
+        dut.gpio_in.value = 0b0001
+        await reset(dut)
+        await FallingEdge(dut.clk)
+        received, full = [], []
+        host = cocotb.start_soon(can_frame_host(dut, CAN_POLY, received, full))
+        tx = CanTransmitter(bits, slot=slot)
+        dut.program_words.value = len(program)
+        bus, pad_drives, _ = await can_bus(dut, [tx], limit=800)
+        host.cancel()
+
+        from cpu import CPU
+        cpu = CPU(program, gpio_in=1, tx_data=list(CAN_POLY))
+        model_tx, model_received, model_bus, line = CanTransmitter(bits, slot=slot), [], [], 1
+        while not cpu.halted and cpu.cycle < 800:
+            cpu.step()
+            drive = model_tx.update(line)
+            pad = cpu.gpio[CAN_TX] if cpu.gpio_oe[CAN_TX] == 1 else None
+            line = 0 if pad == 0 or drive == 0 else 1
+            cpu.gpio_in[CAN_TX] = line
+            model_bus.append(line)
+            if cpu.rx_fifo:
+                model_received.append(cpu.rx_fifo.pop(0))
+        sof = bus.index(0)
+        start = sof - model_bus.index(0)
+        assert bus[start : start + len(model_bus)] == model_bus, "the bus, clock for clock the model's"
+        assert received == model_received and len(received) == 44
+        assert [b & 1 for b in received[:42]] == stream, "the destuffed stream, a bit a byte"
+        assert (received[42:] == [0, 0]) == crc_ok and tx.acked, "the residue says; the ACK does not"
