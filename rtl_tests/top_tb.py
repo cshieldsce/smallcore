@@ -1761,6 +1761,9 @@ async def swd_with_repeat_is_the_canonical_program_at_the_pins(dut):
 # bit, a receiver that took the frame pulls it dominant, the delimiter is
 # recessive; not acked, the transmitter reports, waits out EOF and the
 # intermission and sends the frame again when the host queues it again.
+# Stage 4, bit stuffing (can_tx_stuff.asm): after five bits of one level the
+# transmitter inserts one of the other, a full bit; 16 clocks a bit there,
+# the decision taking seven after the sample.
 
 CAN_TX = 0  # the same pin number on gpio_out/gpio_oe (the pad) and gpio_in (the bus, or TXD read back): the shift pin
 CAN_RXD = 1  # gpio_in pin can_tx_arb.asm listens to the bus on
@@ -2157,3 +2160,78 @@ async def can_ack_slot_from_the_receiver_at_the_pins(dut):
         assert receiver.seen == [ident] * len(acks)
         assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.tx_fifo.empty.value) == 1
         assert int(dut.gpio_oe.value) & 1 == 0, "the bus let go at the halt"
+
+
+def can_stuffed(bits):
+    """The bits as they go on the bus: after five of one level, one of the other."""
+    out, level, count = [], None, 0
+    for bit in bits:
+        out.append(bit)
+        level, count = (level, count + 1) if bit == level else (bit, 1)
+        if count == 5:
+            out.append(1 - bit)
+            level, count = 1 - bit, 1
+    return out
+
+
+@cocotb.test()
+async def can_bit_stuffing_at_the_pins(dut):
+    """programs/can_tx_stuff.asm on an idle bus, twice. 0x7FF, the SOF and
+    eleven recessive bits: on the bus a dominant stuff bit after the fifth
+    and after the tenth, fourteen bits of 16 clocks, the host reading the
+    last eight samples, 0x7D, halted a clock after the last bit, 228 clocks.
+    0x5A3, no run over three: the twelve bits unchanged, 196 clocks, 0xA3.
+    The pad drives exactly the dominant bits, stuff bits included; the bus
+    and the pad enable clock for clock the model's."""
+    program = load_program(PROGRAMS / "can_tx_stuff.asm")
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=0)
+    dut.gpio_in.value = 0b0001
+    start_clock(dut)
+    await reset(dut)
+    imem = Imem(dut, program)
+    from cpu import CPU
+    for ident, byte, clocks in ((0x7FF, 0x7D, 228), (0x5A3, 0xA3, 196)):
+        header = [ident >> 4, (ident & 0xF) << 4]
+        bits = can_stuffed([0] + [(ident >> i) & 1 for i in range(10, -1, -1)])
+        await FallingEdge(dut.clk)
+        imem.load(program)
+        drive_host(dut, program_words=0)
+        dut.gpio_in.value = 0b0001
+        await reset(dut)
+        received = []
+        for value in header:
+            await FallingEdge(dut.clk)
+            dut.tx_data.value = value
+            dut.tx_push.value = 1
+        await FallingEdge(dut.clk)
+        dut.tx_push.value = 0
+        host = cocotb.start_soon(swd_host_drain(dut, received))
+        dut.program_words.value = len(program)
+        bus, pad_drives, _ = await can_bus(dut, [], limit=400)
+        host.cancel()
+
+        cpu = CPU(program, gpio_in=1, tx_data=list(header))
+        model_bus, model_drives = [], []
+        while not cpu.halted:
+            cpu.step()
+            driving = cpu.gpio_oe[CAN_TX] == 1
+            line = cpu.gpio[CAN_TX] if driving else 1
+            cpu.gpio_in[CAN_TX] = line
+            model_bus.append(line)
+            model_drives.append(int(driving))
+        sof = bus.index(0)
+        start = sof - model_bus.index(0)
+        assert bus[start : start + len(model_bus)] == model_bus, f"{ident:03x}: the bus, clock for clock the model's"
+        assert pad_drives[start : start + len(model_drives)] == model_drives, f"{ident:03x}: the pad enable, clock for clock the model's"
+        assert len(bus) - start == cpu.cycle + 2 and cpu.cycle == clocks, f"{ident:03x}: {len(bus) - start - 2} clocks from release to halt"
+
+        cells = [bus[sof + k * 16 : sof + (k + 1) * 16] for k in range(len(bits))]
+        assert all(len(set(cell)) == 1 for cell in cells), f"{ident:03x}: a bit not held for 16 clocks: {cells}"
+        assert [cell[0] for cell in cells] == bits, f"{ident:03x}: the stuffed header"
+        end = sof + len(bits) * 16
+        assert bus[:sof] == [1] * sof and bus[end:] == [1] * len(bus[end:])
+        assert pad_drives == [int(level == 0) for level in bus]
+        assert received == [byte] and cpu.rx_fifo == [byte]
+        assert int(dut.halted.value) == 1 and int(dut.rx_empty.value) == 1 and int(dut.tx_fifo.empty.value) == 1
+        assert int(dut.gpio_oe.value) & 1 == 0
