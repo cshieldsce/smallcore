@@ -18,14 +18,20 @@ is BIT cycles long and every node samples it at the same point.
      queues it again;
   4. bit stuffing: after five bits of one level the transmitter inserts one
      of the other, a full bit, and a receiver drops it; six of one level are
-     a stuff error.
+     a stuff error;
+  5. a data frame, stage 5A: the SOF, the identifier, RTR, IDE, r0, the DLC,
+     the data, the 15-bit CRC the host computed, stuffed throughout; then
+     the fixed form, the CRC delimiter, the ACK slot let go and sampled, the
+     ACK delimiter, EOF and the intermission, every bit the same length; a
+     receiver that drops the stuff bits, checks the CRC and acks.
 
 programs/can_tx.asm is stage 1; can_tx_arb.asm is stage 2, and sees the bus
 the way a controller behind a transceiver does, because with the pad on the
 bus the core cannot tell a lost bit from its own dominant one; can_tx_ack.asm
 is stage 3, stage 1's frame with the ACK slot after it; can_tx_stuff.asm is
 stage 4, stage 1's frame stuffed, at 16 cycles a bit because the decision
-takes seven after the sample. Stages 1 and 2 stay as they are, the baselines.
+takes seven after the sample; can_tx_frame.asm is stage 5A, the whole frame
+at stage 4's bit, unopposed. Stages 1 to 4 stay as they are, the baselines.
 
 The bench is the bus and the other nodes. The bus is a wired AND resolved
 every cycle from the node under test and every other node: 0, dominant, if
@@ -45,7 +51,7 @@ from typing import NamedTuple
 
 import pytest
 
-from cpu import CPU, decode, load_isa, load_program
+from cpu import CPU, Instruction, decode, encode, load_isa, load_program
 
 PROGRAMS = Path(__file__).resolve().parent.parent / "programs"
 TX = PROGRAMS / "can_tx.asm"
@@ -228,6 +234,7 @@ class Run(NamedTuple):
     stalls: list  # one per cycle: was the core stalled
     rx_peak: int  # the most bytes the RX FIFO held after any cycle, before the host's pop
     tx_peak: int  # the most bytes the TX FIFO held after any cycle
+    issues: list  # one per cycle: the op that issued that cycle, or None while one holds or stalls
 
 
 class Bus:
@@ -251,6 +258,7 @@ class Bus:
         self.drain, self.host, self.rxd = drain, host, rxd
         self.line = 1
         self.lines, self.owned, self.txds, self.driven, self.received, self.stalls = [], [], [], [], [], []
+        self.issues = []
         self.rx_peak = self.tx_peak = 0
 
     def go(self, cycles):
@@ -260,7 +268,9 @@ class Bus:
             if self.host:
                 self.host(cpu, self.received)
             self.tx_peak = max(self.tx_peak, len(cpu.tx_fifo))
+            op = decode(cpu.program[cpu.pc], cpu.isa).op if cpu.counter == 0 else None
             cpu.step()
+            self.issues.append(None if cpu.stalled else op)
             self.rx_peak = max(self.rx_peak, len(cpu.rx_fifo))
             drives = [node.update(self.line) for node in self.nodes]
             driving = cpu.gpio_oe[CAN_TX] == 1
@@ -286,7 +296,7 @@ class Bus:
         return self
 
     def result(self):
-        return Run(self.lines, self.owned, self.txds, self.driven, self.received, self.nodes, self.cpu, self.stalls, self.rx_peak, self.tx_peak)
+        return Run(self.lines, self.owned, self.txds, self.driven, self.received, self.nodes, self.cpu, self.stalls, self.rx_peak, self.tx_peak, self.issues)
 
 
 def run(program, tx_data, nodes=None, cycles=2000, drain=True, host=None, rxd=None):
@@ -772,3 +782,548 @@ def test_stuffing_by_the_numbers():
     assert two.cpu.cycle == 3 + (HEADER + 2) * STUFF_BIT + 1 == 228
     assert (none.tx_peak, none.rx_peak, len(none.received)) == (2, 1, 1)
     assert (STUFF_BIT, STUFF_SAMPLE, STUFF_BIT - STUFF_SAMPLE) == (16, 8, 8), "seven cycles of decision after the sample, and one over"
+
+
+# --- stage 5A: a data frame -----------------------------------------------------------
+
+
+FRAME = PROGRAMS / "can_tx_frame.asm"
+FRAME_BIT = 16  # cycles per bit in can_tx_frame.asm: stage 4's, the stuffing decision unchanged
+FRAME_SAMPLE = 7  # the clock of a bit whose level can_tx_frame.asm takes: the seventh, read by the SHIFT_IN on the eighth (43.75%)
+CONTROL = 3  # RTR, IDE, r0, all dominant in a base-format data frame
+DLC_BITS = 4
+CRC_BITS = 15
+CRC_POLY = 0x4599  # x^15 + x^14 + x^10 + x^8 + x^7 + x^4 + x^3 + 1
+FRAME_DLC = 1  # the program's payload: the REPEAT count is 4 + DLC, so one program sends one length
+FIFO = 4  # the TX FIFO's depth on the chip: the host at it never queues more
+BODY = 8  # the bits one run of the program's stuffed cell body sends: a host byte, its PULL in the first
+LEAD = 3  # the stream bits before the body: the SOF, ID[10], ID[9], the first host byte's top three
+FRAME_VECTORS = ((0x5A3, 0x5A), (0x7FF, 0xFF), (0x000, 0x00), (0x07C, 0x00), (0x555, 0xAA), (0x123, 0x01))
+
+
+def crc15(bits):
+    """CAN's CRC over `bits`, the spec's register: shift, and XOR in the
+    polynomial when the bit in and the bit out differ."""
+    crc = 0
+    for bit in bits:
+        crc = (crc << 1) & 0x7FFF if bit == crc >> 14 else ((crc << 1) & 0x7FFF) ^ CRC_POLY
+    return crc
+
+
+def int_bits(value, n):
+    return [(value >> i) & 1 for i in range(n - 1, -1, -1)]
+
+
+def frame_bits(ident, data):
+    """The stuffed region of a base-format data frame, before stuffing: the
+    SOF, ID[10:0], RTR, IDE, r0, the DLC, the data bytes MSB first, and the
+    CRC over everything before it."""
+    assert 0 <= ident < 1 << ID_BITS and len(data) <= 8
+    bits = header_bits(ident) + [0] * CONTROL + int_bits(len(data), DLC_BITS)
+    for byte in data:
+        bits += int_bits(byte, 8)
+    return bits + int_bits(crc15(bits), CRC_BITS)
+
+
+def frame_bytes(ident, data):
+    """The bytes the host writes for a frame, the stream cut where the
+    program's PULLs fall: {SOF, ID[10], ID[9], 00000}, then eight bits a
+    byte, the last one padded with zeros: 5 + DLC bytes."""
+    bits = frame_bits(ident, data)
+    padded = bits[:LEAD] + [0] * (8 - LEAD) + bits[LEAD:]
+    padded += [0] * (-len(padded) % 8)
+    return [bits_to_int(padded[i : i + 8]) for i in range(0, len(padded), 8)]
+
+
+def frame_names(ident, data):
+    """A name per bit on the bus for a frame, stuff bits marked."""
+    names = list(NAMES) + ["rtr", "ide", "r0"] + [f"dlc{i}" for i in range(DLC_BITS - 1, -1, -1)]
+    for k in range(len(data)):
+        names += [f"d{k}.{i}" for i in range(7, -1, -1)]
+    names += [f"crc{i}" for i in range(CRC_BITS - 1, -1, -1)]
+    out, level, count = [], None, 0
+    for name, bit in zip(names, frame_bits(ident, data)):
+        out.append(name)
+        level, count = (level, count + 1) if bit == level else (bit, 1)
+        if count == 5:
+            out.append("stuff")
+            level, count = 1 - bit, 1
+    return out + ["crcdel", "ack", "ackdel"] + [f"eof{i}" for i in range(7)] + [f"ifs{i}" for i in range(3)]
+
+
+def frame_end(ident, data, acked=True):
+    """The bus from the SOF for a frame: the stuffed stream, then the fixed
+    form, the CRC delimiter, the ACK slot, the ACK delimiter, EOF and the
+    intermission."""
+    return stuffed(frame_bits(ident, data)) + [1, 0 if acked else 1, 1] + [1] * GAP
+
+
+def host_byte(ident, data, acked=True):
+    """What the host reads after a frame: the last eight samples, the stuffed
+    stream's last seven and the ACK slot's."""
+    return bits_to_int(stuffed(frame_bits(ident, data))[-7:] + [0 if acked else 1])
+
+
+class Received(NamedTuple):
+    ident: int
+    rtr: int
+    ide: int
+    r0: int
+    dlc: int
+    data: tuple
+    crc: int
+    crc_ok: bool
+    acked: bool  # did this receiver pull the ACK slot dominant
+
+
+class Frame:
+    """A receiver for data frames on the bus, `update(line)` and `drive()`
+    as a Node's: idle, it waits for the bus to fall, the SOF, and counts
+    clocks from that edge, `bit` to a bit, taking the level on the
+    `sample`th clock of every bit. From the SOF through the CRC it drops
+    stuff bits, after five of one level the next, and a sixth of the same
+    level is a stuff error, its index in `samples` in `errors`; the bits
+    that remain are the identifier, RTR, IDE, r0, the DLC, DLC data bytes
+    and the CRC, checked over the bits before it. Then the fixed form, not
+    stuffed: the CRC delimiter; the ACK slot, which it pulls dominant when
+    it `ack`s (a bool, or one per frame, the last repeating) and the CRC
+    matched; the ACK delimiter; EOF and the intermission, ten bits. A
+    dominant bit where the form says recessive goes to `form_errors` as
+    (phase, bit). Every frame goes to `received` as a Received and its
+    identifier to `seen`."""
+
+    def __init__(self, sample=FRAME_SAMPLE, ack=True, bit=FRAME_BIT):
+        self.sample, self.bit = sample, bit
+        self.acks = list(ack) if isinstance(ack, (list, tuple)) else [ack]
+        self.line = 1
+        self.clock = None
+        self.phase = "idle"
+        self.samples, self.stream, self.fixed, self.errors, self.form_errors = [], [], [], [], []
+        self.level, self.count = None, 0
+        self.seen, self.received = [], []
+        self.frames, self.gap = 0, 0
+        self.driving = False
+
+    @property
+    def acking(self):
+        return self.acks[min(self.frames, len(self.acks) - 1)]
+
+    def length(self):
+        """How long the stuffed region is once the DLC is in, else None."""
+        head = HEADER + CONTROL + DLC_BITS
+        if len(self.stream) < head:
+            return None
+        return head + 8 * min(bits_to_int(self.stream[HEADER + CONTROL : head]), 8) + CRC_BITS
+
+    def update(self, line):
+        if self.clock is None and line == 0 and self.line == 1:
+            self.clock, self.phase = 0, "stuffed"
+            self.samples, self.stream, self.fixed = [], [], []
+            self.level, self.count, self.driving = None, 0, False
+        if self.clock is not None:
+            self.clock += 1
+            if self.clock % self.bit == self.sample:
+                self.samples.append(line)
+                if self.phase == "stuffed":
+                    if self.count == 5:
+                        if line == self.level:
+                            self.errors.append(len(self.samples) - 1)
+                        self.level, self.count = line, 1
+                    else:
+                        self.stream.append(line)
+                        self.level, self.count = (self.level, self.count + 1) if line == self.level else (line, 1)
+                else:
+                    self.fixed.append(line)
+                    if line == 0 and self.phase != "ack":
+                        self.form_errors.append((self.phase, len(self.fixed) - 1))
+            if self.clock % self.bit == 0:
+                if self.phase == "stuffed":
+                    if len(self.stream) == self.length() and self.count != 5:
+                        self.end_of_stream()
+                        self.phase = "crc delimiter"
+                elif self.phase == "crc delimiter":
+                    self.phase = "ack"
+                elif self.phase == "ack":
+                    self.phase, self.driving = "ack delimiter", False
+                elif self.phase == "ack delimiter":
+                    self.phase, self.gap = "gap", 0
+                elif self.phase == "gap":
+                    self.gap += 1
+                    if self.gap == GAP:
+                        self.phase, self.clock, self.frames = "idle", None, self.frames + 1
+        self.line = line
+        return self.drive()
+
+    def end_of_stream(self):
+        bits = self.stream
+        head = HEADER + CONTROL + DLC_BITS
+        dlc = bits_to_int(bits[HEADER + CONTROL : head])
+        data = tuple(bits_to_int(bits[head + 8 * k : head + 8 * k + 8]) for k in range(min(dlc, 8)))
+        crc = bits_to_int(bits[-CRC_BITS:])
+        ok = crc15(bits[:-CRC_BITS]) == crc
+        self.driving = self.acking and ok
+        self.received.append(Received(bits_to_int(bits[1:HEADER]), *bits[HEADER : HEADER + CONTROL], dlc, data, crc, ok, self.driving))
+        self.seen.append(self.received[-1].ident)
+
+    def feed(self, bits):
+        """Drive this receiver from a bus the bench makes up: `bits`, each
+        held for a bit time, then idle."""
+        for level in [1] + bits + [1] * 2:
+            for _ in range(self.bit):
+                self.update(level)
+
+    def drive(self):
+        return 0 if self.phase == "ack" and self.driving else None
+
+
+def frame_host(bytes_, late=(), depth=FIFO):
+    """A host at the TX FIFO, `depth` deep: it queues `bytes_` in order, each
+    on the first cycle the FIFO has room for it, or, for the bytes in
+    `late`, {k: n}, n cycles after that. `queued` records the cycle each
+    byte went in."""
+    late, queue, state, queued = dict(late), list(bytes_), {"room": None}, []
+
+    def host(cpu, received):
+        if not queue or len(cpu.tx_fifo) >= depth:
+            state["room"] = None
+            return
+        if state["room"] is None:
+            state["room"] = cpu.cycle
+        if cpu.cycle >= state["room"] + late.get(len(queued), 0):
+            cpu.tx_fifo.append(queue.pop(0))
+            queued.append(cpu.cycle)
+            state["room"] = None
+
+    host.queued = queued
+    return host
+
+
+def stalled_host(bytes_, k, late, depth=FIFO):
+    """A host that queues `bytes_` promptly but byte `k`, which it pushes
+    `late` cycles (1 or more) after the core first stalled for it: the stall
+    lasts exactly `late` cycles."""
+    queue, state = list(bytes_), {"stall": None}
+
+    def host(cpu, received):
+        if not queue or len(cpu.tx_fifo) >= depth:
+            return
+        if len(bytes_) - len(queue) != k:
+            cpu.tx_fifo.append(queue.pop(0))
+            return
+        if cpu.stalled and state["stall"] is None:
+            state["stall"] = cpu.cycle - 1
+        if state["stall"] is not None and cpu.cycle == state["stall"] + late:
+            cpu.tx_fifo.append(queue.pop(0))
+
+    return host
+
+
+def retry_host(bytes_):
+    """A host for can_tx_frame.asm that queues `bytes_` promptly and, when it
+    reads a byte that says not acked and has nothing left to queue, queues
+    them again, once."""
+    prompt = frame_host(list(bytes_) * 2)
+    state = {"held": len(bytes_), "again": False}
+
+    def host(cpu, received):
+        if not state["again"] and received and received[-1] & 1 and len(prompt.queued) == state["held"]:
+            state["again"] = True
+        if len(prompt.queued) < state["held"] or state["again"]:
+            prompt(cpu, received)
+
+    host.queued = prompt.queued
+    return host
+
+
+def run_frame(ident, data, nodes=None, host=None, cycles=1500, **kw):
+    """can_tx_frame.asm on the bus with a receiver that acks unless told
+    otherwise, the host at a 4-deep FIFO, `data` the payload bytes."""
+    return run(FRAME, [], [Frame()] if nodes is None else nodes, host=host or frame_host(frame_bytes(ident, data)), cycles=cycles, **kw)
+
+
+def pulls(r):
+    """(cycle, clock of the bus bit from the SOF, bit index) for every PULL and PUSH that issued, from the SOF's edge; bit and clock None before it."""
+    sof = r.line.index(0)
+    out = []
+    for cycle, op in enumerate(r.issues):
+        if op in ("PULL", "PUSH"):
+            at = cycle - sof
+            out.append((op, cycle, at // FRAME_BIT if at >= 0 else None, at % FRAME_BIT + 1 if at >= 0 else None))
+    return out
+
+
+@pytest.fixture(params=FRAME_VECTORS, ids=lambda v: f"{v[0]:03x}-{v[1]:02x}")
+def vector(request):
+    return request.param
+
+
+def test_crc15_is_cans():
+    """The bench's CRC against the catalogue's check value for CRC-15/CAN,
+    "123456789" MSB first, 0x059e; and a frame with one bit flipped fails
+    the check while the frame passes."""
+    assert crc15([b for byte in b"123456789" for b in int_bits(byte, 8)]) == 0x059E
+    bits = frame_bits(IDENT, [0x5A])
+    assert crc15(bits[:-CRC_BITS]) == bits_to_int(bits[-CRC_BITS:])
+    flipped = bits[:20] + [1 - bits[20]] + bits[21:]
+    assert crc15(flipped[:-CRC_BITS]) != bits_to_int(flipped[-CRC_BITS:])
+
+
+def test_the_frame_receiver_reads_a_made_up_frame_and_flags_what_is_wrong():
+    """The bench's receiver on a bus the bench makes up: a whole frame reads
+    back whole, CRC matched, acked; the same with a data bit flipped reads
+    with the CRC unmatched and no ACK; six of one level are a stuff error; a
+    dominant bit in EOF is a form error; a frame with DLC 2 reads two bytes."""
+    node = Frame()
+    node.feed(frame_end(IDENT, [0x5A]))
+    assert node.received == [Received(IDENT, 0, 0, 0, 1, (0x5A,), crc15(frame_bits(IDENT, [0x5A])[:-CRC_BITS]), True, True)]
+    assert node.errors == [] and node.form_errors == [] and node.seen == [IDENT] and node.frames == 1
+    bits = frame_bits(IDENT, [0x5A])
+    node = Frame()
+    node.feed(stuffed(bits[:24] + [1 - bits[24]] + bits[25:]) + [1, 1, 1] + [1] * GAP)
+    assert node.received[0].ident == IDENT and node.received[0].data == (0x5A ^ 0x04,)
+    assert not node.received[0].crc_ok and not node.received[0].acked and node.form_errors == []
+    node = Frame()
+    node.feed(frame_bits(0x7FF, [0xFF]) + [1, 0, 1] + [1] * GAP)
+    assert node.errors[:3] == [6, 11, 17], "unstuffed: the sixth of each run is an error, the identifier's two and the control field's zeros"
+    node = Frame()
+    node.feed(frame_end(IDENT, [0x5A])[:-5] + [0] + [1] * 4)
+    assert node.form_errors == [("gap", 8)] and node.received[0].crc_ok
+    node = Frame()
+    node.feed(frame_end(0x123, [0x01, 0x02]))
+    assert node.received[0].dlc == 2 and node.received[0].data == (0x01, 0x02) and node.received[0].acked
+
+
+def test_the_host_bytes_cut_the_stream_where_the_pulls_fall():
+    """The first byte carries the SOF, ID[10] and ID[9] in its top three bits,
+    every byte after it eight stream bits, the last padded: 5 + DLC bytes,
+    and back to back, the top three of the first and the rest, they are the
+    stream."""
+    for ident, data in FRAME_VECTORS:
+        bytes_ = frame_bytes(ident, [data])
+        assert len(bytes_) == 5 + 1 and bytes_[0] & 0x1F == 0
+        bits = int_bits(bytes_[0], 8)[:LEAD] + [b for byte in bytes_[1:] for b in int_bits(byte, 8)]
+        assert bits[: len(frame_bits(ident, [data]))] == frame_bits(ident, [data])
+    assert len(frame_bytes(IDENT, [1, 2, 3, 4, 5, 6, 7, 8])) == 13
+
+
+def test_the_data_frame_reaches_the_receiver(vector, wave):
+    """can_tx_frame.asm with the host's 5 + DLC bytes and a receiver that
+    acks: on the bus, from the SOF's edge, the stuffed stream, a recessive
+    CRC delimiter, the ACK slot pulled dominant by the receiver with the pad
+    off it, the ACK delimiter, EOF and the intermission, every bit 16
+    cycles; the receiver reads the identifier, DLC 1, the byte and a CRC
+    that matches, no stuff or form error; the pad drives dominant bits and
+    lets go for recessive ones; the bus recessive before and after; the host
+    reads the last eight samples, the ACK 0 last; halted a cycle after the
+    intermission, no stall anywhere."""
+    ident, data = vector
+    r = run_frame(ident, [data])
+    show(wave, r, FRAME_BIT, FRAME_SAMPLE, frame_names(ident, [data]))
+    sof = r.line.index(0)
+    bits = frame_end(ident, [data])
+    assert cells(r.line, sof, len(bits), FRAME_BIT) == bits
+    rx = r.nodes[0]
+    assert rx.received == [Received(ident, 0, 0, 0, 1, (data,), crc15(frame_bits(ident, [data])[:-CRC_BITS]), True, True)]
+    assert rx.errors == [] and rx.form_errors == []
+    slot = slice(sof + (len(bits) - GAP - 2) * FRAME_BIT, sof + (len(bits) - GAP - 1) * FRAME_BIT)
+    assert r.owned[slot] == [False] * FRAME_BIT and [d[0] for d in r.driven[slot]] == [0] * FRAME_BIT, "the receiver's bit, the pad off the bus"
+    outside = [i for i in range(len(r.line)) if not slot.start <= i < slot.stop]
+    assert [r.owned[i] for i in outside] == [r.line[i] == 0 for i in outside], "dominant driven, recessive let go"
+    end = sof + len(bits) * FRAME_BIT
+    assert r.line[:sof] == [1] * sof and r.line[end:] == [1] * len(r.line[end:])
+    assert r.received == [host_byte(ident, [data])]
+    assert r.cpu.halted and r.cpu.cycle == end + 1 and r.stalls.count(True) == 0
+
+
+def test_frames_across_the_range_reach_the_receiver():
+    """The walking ones and zeros of the identifier with three payloads, and
+    every 97th identifier with its low byte as the payload: the bus is the
+    reference's frame, the receiver reads it whole and acks."""
+    walking = [1 << i for i in range(ID_BITS)] + [(1 << ID_BITS) - 1 - (1 << i) for i in range(ID_BITS)]
+    frames = [(ident, data) for ident in walking for data in (0x00, 0xFF, 0x55)] + [(i, i & 0xFF) for i in range(0, 1 << ID_BITS, 97)]
+    for ident, data in frames:
+        r = run_frame(ident, [data])
+        bits = frame_end(ident, [data])
+        assert cells(r.line, r.line.index(0), len(bits), FRAME_BIT) == bits, f"frame {ident:03x} {data:02x}"
+        rx = r.nodes[0].received
+        assert rx and rx[0][:6] == (ident, 0, 0, 0, 1, (data,)) and rx[0].crc_ok and rx[0].acked, f"frame {ident:03x} {data:02x}"
+        assert r.nodes[0].errors == [] and r.received == [host_byte(ident, [data])], f"frame {ident:03x} {data:02x}"
+
+
+def probe_bit(ident, data):
+    """A bit to glitch: the last recessive bit of the stuffed stream whose
+    four samples before it are neither all dominant nor all recessive, so
+    that one dominant sample in it changes no stuffing decision on either
+    side, only the bit itself, which lands in the host's byte."""
+    bits = stuffed(frame_bits(ident, data))
+    for k in range(len(bits) - 1, len(bits) - 8, -1):
+        if bits[k] == 1 and len(set(bits[k - 4 : k])) == 2:
+            return k, bits
+    raise AssertionError("no such bit in the last seven")
+
+
+def test_the_frame_sample_point_is_the_seventh_clock_of_the_bit():
+    """Where can_tx_frame.asm samples, seen from outside: a probe pulls the
+    bus dominant for one cycle of a recessive CRC bit at each of its sixteen
+    cycles in turn. The host's byte loses that bit exactly when the pulse is
+    on the seventh cycle, and the receiver, sampling at the same point, sees
+    a CRC that does not match then and only then, so it does not ack: the
+    byte's ACK bit says so too."""
+    sof = run_frame(IDENT, [0x5A], nodes=[]).line.index(0)
+    k, bits = probe_bit(IDENT, [0x5A])
+    for p in range(FRAME_BIT):
+        r = run_frame(IDENT, [0x5A], nodes=[Frame(), Glitch(sof + k * FRAME_BIT + p)])
+        hit = p == FRAME_SAMPLE - 1
+        byte = host_byte(IDENT, [0x5A], acked=not hit) & ~(hit << (len(bits) - k))
+        assert r.received == [byte], f"pulse on cycle {p + 1} of the bit"
+        rx = r.nodes[0].received[0]
+        assert rx.ident == IDENT and rx.crc_ok == (not hit) and rx.acked == (not hit), f"pulse on cycle {p + 1} of the bit"
+
+
+@pytest.mark.parametrize("k", range(1, 6))
+@pytest.mark.parametrize("late", (1, 6, 7, 40))
+def test_a_host_late_with_a_frame_byte_stretches_the_bit_under_its_pull(k, late):
+    """The PULL for byte k issues on the seventh clock of the first bit of
+    the k-th body run, stream bit 3 + 8 (k - 1) counting the SOF as 0, stuff
+    bits before it not counted; a host `late` cycles after it first waits
+    stretches that bit by exactly `late`, the bus holding its level, and
+    every later bit is late by as much. The transmitter's samples move with
+    its bits; a receiver counting from the SOF reads the frame right while
+    its sample still falls inside the moved bit, up to 6 cycles, and from 7
+    reads a CRC that does not match and does not ack. On record: a PULL
+    inside a frame is a timing fault, and there are five of them."""
+    ident, data = IDENT, [0x5A]
+    bits = frame_end(ident, data)
+    stream = frame_bits(ident, data)
+    j = LEAD + BODY * (k - 1) - 1  # the stream bit whose cell holds the PULL
+    on_bus = len(stuffed(stream[:j]))  # the bus bit that carries stream bit j: the stuff bits before it counted
+    r = run_frame(ident, data, host=stalled_host(frame_bytes(ident, data), k, late), cycles=2000)
+    sof = r.line.index(0)
+    assert cells(r.line, sof, on_bus, FRAME_BIT) == bits[:on_bus], "the bits before it on time"
+    held = r.line[sof + on_bus * FRAME_BIT : sof + (on_bus + 1) * FRAME_BIT + late]
+    assert held == [bits[on_bus]] * (FRAME_BIT + late), f"the bit under the PULL held {len(held)} cycles"
+    stuffed_stream = stuffed(stream)
+    late_bits = cells(r.line, sof + (on_bus + 1) * FRAME_BIT + late, len(stuffed_stream) - on_bus - 1, FRAME_BIT)
+    assert late_bits == stuffed_stream[on_bus + 1 :], "the rest of the stream, late"
+    first = r.stalls.index(True)
+    assert first == sof + on_bus * FRAME_BIT + FRAME_SAMPLE - 1, "the PULL waited on the seventh clock of that bit"
+    assert r.stalls[first : first + late + 1] == [True] * late + [False], f"for {late} cycles"
+    acked = late < FRAME_SAMPLE
+    rx = r.nodes[0].received[0]
+    assert (rx.crc_ok, rx.acked) == (acked, acked), f"the receiver's view {late} cycles late"
+    slot = sof + (len(stuffed_stream) + 1) * FRAME_BIT  # the receiver's ACK slot, on its clock from the SOF, not the transmitter's
+    assert [d[0] for d in r.driven[slot : slot + FRAME_BIT]] == [0 if acked else None] * FRAME_BIT
+    assert r.received == [host_byte(ident, data, acked)], "the transmitter samples its own bits where it drives them, the slot included"
+
+
+def test_every_point_where_a_stall_would_corrupt_the_frame():
+    """The census: with a prompt host, what issues against a FIFO inside the
+    frame. Five PULLs, one on the seventh clock of the first bit of every
+    body run, the bit carrying stream bit 2, 10, 18, 26 and 34 (bus bits
+    later by the stuff bits before them); one PUSH, on the first clock of
+    the ACK delimiter; and the PULL before the SOF, on an idle bus. A PULL
+    late by one cycle at any of the five stretches the frame by one from
+    that bit on, the receiver still reading it; the PUSH stalled, the RX
+    FIFO full because the host never reads, holds the ACK delimiter, which
+    is recessive as EOF and the intermission are: the one stall point in the
+    frame that corrupts nothing but the node's own intermission."""
+    ident, data = 0x7FF, [0xFF]
+    r = run_frame(ident, data)
+    sof = r.line.index(0)
+    stream = frame_bits(ident, data)
+    census = pulls(r)
+    on_bus = [len(stuffed(stream[: LEAD + BODY * k - 1])) for k in range(5)]
+    assert census[0] == ("PULL", sof - 1, None, None), "the first byte, before the frame"
+    assert census[1:6] == [("PULL", sof + b * FRAME_BIT + FRAME_SAMPLE - 1, b, FRAME_SAMPLE) for b in on_bus]
+    ack_delimiter = len(frame_end(ident, data)) - GAP - 1
+    assert census[6] == ("PUSH", sof + ack_delimiter * FRAME_BIT, ack_delimiter, 1)
+    assert len(census) == 7
+    end = sof + len(stuffed(stream)) * FRAME_BIT  # the stream's end, the transmitter's alone; the ACK after it is on the receiver's clock
+    for k, b in enumerate(on_bus, start=1):
+        late = run_frame(ident, data, host=stalled_host(frame_bytes(ident, data), k, 1), cycles=2000)
+        assert late.cpu.cycle == r.cpu.cycle + 1 and late.stalls.index(True) == sof + b * FRAME_BIT + FRAME_SAMPLE - 1
+        assert late.line[: sof + b * FRAME_BIT] == r.line[: sof + b * FRAME_BIT] and late.line[sof + b * FRAME_BIT + 1 : end + 1] == r.line[sof + b * FRAME_BIT : end]
+        assert late.nodes[0].received[0].acked and late.received == r.received, "one cycle late: read whole"
+    bus = Bus(FRAME, [], [Frame(ack=False)], drain=False, host=frame_host(frame_bytes(ident, data) * 2))
+    bus.cpu.rx_depth = 1
+    full = bus.go(3000).result()
+    assert full.nodes[0].frames == 2 and full.issues.count("PUSH") == 1, "the second frame's PUSH never issues"
+    stall = full.stalls.index(True)
+    second = full.line.index(0, sof + (len(frame_end(ident, data)) - 1) * FRAME_BIT)
+    assert stall == second + ack_delimiter * FRAME_BIT, "stalled on the ACK delimiter's first clock"
+    assert full.stalls[stall:] == [True] * len(full.stalls[stall:]) and full.line[stall:] == [1] * len(full.line[stall:]), "recessive throughout: harmless"
+    assert full.nodes[0].received[1].ident == ident and full.nodes[0].form_errors == []
+
+
+def test_not_acked_the_host_queues_the_frame_again_after_the_intermission():
+    """A receiver that does not ack the first frame and acks the second: the
+    slot stays recessive, the host reads the ACK as 1 and queues the six
+    bytes again; the transmitter holds EOF and the intermission, ten
+    recessive bits, and the second SOF falls four cycles after them, SKIP,
+    JMP, the idle sample and the PULL; the receiver reads the frame twice
+    and acks the second, the host reads the ACK as 0; halted after the
+    second intermission."""
+    ident, data = IDENT, [0x5A]
+    r = run_frame(ident, data, nodes=[Frame(ack=[False, True])], host=retry_host(frame_bytes(ident, data)), cycles=3000)
+    sof = r.line.index(0)
+    first, second = frame_end(ident, data, acked=False), frame_end(ident, data)
+    assert cells(r.line, sof, len(first), FRAME_BIT) == first
+    sof2 = sof + len(first) * FRAME_BIT + 4
+    assert r.line[sof + len(first) * FRAME_BIT : sof2] == [1] * 4 and r.line[sof2] == 0
+    assert cells(r.line, sof2, len(second), FRAME_BIT) == second
+    assert [f.acked for f in r.nodes[0].received] == [False, True] and r.nodes[0].seen == [ident, ident]
+    assert r.received == [host_byte(ident, data, False), host_byte(ident, data, True)]
+    assert r.stalls.count(True) == 0 and r.cpu.halted and r.cpu.cycle == sof2 + len(second) * FRAME_BIT + 1
+
+
+def body_repeat(words):
+    """The address of the REPEAT that runs the stuffed cell body, the one with count 4 + DLC."""
+    return next(i for i, w in enumerate(words) if decode(w, load_isa()).op == "REPEAT" and decode(w, load_isa()).delay == 4 + FRAME_DLC - 1)
+
+
+def test_the_same_words_send_eight_bytes_with_the_repeat_count_changed():
+    """One program per payload length: the body runs 4 + DLC times, so the
+    same words with the body's REPEAT count 12 send a DLC 8 frame, 98
+    stream bits, 13 host bytes, of which the host queues nine inside the
+    frame as the PULLs make room; the receiver reads the eight bytes."""
+    words = load_program(FRAME)
+    words[body_repeat(words)] = encode(Instruction("REPEAT", (decode(words[body_repeat(words)], load_isa()).args[0],), 11), load_isa())
+    ident, data = 0x5A3, [0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF]
+    bits = frame_end(ident, data)
+    assert len(frame_bits(ident, data)) == 98 and len(frame_bytes(ident, data)) == 13
+    host = frame_host(frame_bytes(ident, data))
+    bus = Bus(FRAME, [], [Frame()], host=host, cpu=CPU(words, gpio_in=1))
+    r = bus.go(3000).result()
+    sof = r.line.index(0)
+    assert cells(r.line, sof, len(bits), FRAME_BIT) == bits
+    assert r.nodes[0].received[0][:6] == (ident, 0, 0, 0, 8, tuple(data)) and r.nodes[0].received[0].acked
+    assert r.tx_peak == FIFO and sum(1 for c in host.queued if c >= sof) == 9 and r.stalls.count(True) == 0
+    assert r.received == [host_byte(ident, data)]
+
+
+def test_frame_by_the_numbers():
+    """Stage 5A measured: the words, the cycles, the bit, the host's part,
+    and the cycles in hand at every PULL for a host that fills the FIFO as
+    room appears: bytes 1 to 3 have everything from the release, byte 4
+    from the first PULL, before the SOF, and byte 5, as every byte after it
+    would, the time from the PULL four bytes before it to its own: 32 stream
+    bits and the stuff bits among them, less a cycle, 511 at the least."""
+    words = load_program(FRAME)
+    assert len(words) == 233
+    assert len(set(words)) == 86
+    r = run_frame(IDENT, [0x5A])
+    sof = r.line.index(0)
+    assert sof == 4, "cycles from release to the SOF's edge"
+    assert len(frame_end(IDENT, [0x5A])) == 57, "42 stream bits, two stuff bits, the delimiter, the slot, the delimiter, ten"
+    assert r.cpu.cycle == sof + 57 * FRAME_BIT + 1 == 917
+    assert (r.tx_peak, r.rx_peak, len(r.received)) == (FIFO, 1, 1), "6 pushes through a 4-deep FIFO, 1 pop"
+    census = [p for p in pulls(r) if p[0] == "PULL"]
+    room = [0] * FIFO + [census[k - FIFO][1] + 1 for k in range(FIFO, 6)]
+    in_hand = [census[k][1] - room[k] for k in range(6)]
+    assert in_hand == [3, 42, 170, 314, 438, 543]
+    for ident, data in FRAME_VECTORS:
+        stream = frame_bits(ident, [data])
+        census = [p for p in pulls(run_frame(ident, [data])) if p[0] == "PULL"]
+        between = len(stuffed(stream[: LEAD + 4 * BODY - 1])) - len(stuffed(stream[: LEAD - 1]))  # bus bits from byte 1's PULL to byte 5's
+        assert census[5][1] - census[1][1] - 1 == between * FRAME_BIT - 1 >= 4 * BODY * FRAME_BIT - 1 == 511, f"frame {ident:03x} {data:02x}"
+    assert (FRAME_BIT, FRAME_SAMPLE) == (16, 7), "stage 4's bit and the loop form's sample point"
