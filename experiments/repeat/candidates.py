@@ -8,7 +8,8 @@ sim/cpu.py, isa.yaml or the RTL: the 103- and 106-word programs stay as the
 baseline.
 
   A  REPEAT count, label   a counted backward branch at the end of the body,
-                           the count in the word's delay bits, one counter
+                           count - 1 in the word's delay bits, the distance
+                           back in its operand byte, one counter
   B  REPEAT_NEXT count     the next word again, count times: one-word bodies only
   C  LOAD count / DJNZ label
                            the conventional shape: a counter loaded by one word,
@@ -63,11 +64,12 @@ class Candidate(CPU):
         """The candidate's own registers, for a test to watch."""
         return ()
 
-    def restart(self):
+    def restart(self, program=None):
         """The chip's restart: the core back to reset, the FIFOs, the pins the
-        outside world drives, the cycle count and the trace kept."""
+        outside world drives, the cycle count and the trace kept. With a
+        `program`, a slot change: the same, under the new program."""
         keep = self.tx_fifo, self.rx_fifo, self.gpio_in, self.cycle, self.trace
-        self.__init__(self.program, gpio_in=0, rx_depth=self.rx_depth, isa=self.isa)
+        self.__init__(self.program if program is None else program, gpio_in=0, rx_depth=self.rx_depth, isa=self.isa)
         self.tx_fifo, self.rx_fifo, self.gpio_in, self.cycle, self.trace = keep
 
     # -- the step, as cpu.CPU.step, with the hooks ------------------------------------
@@ -160,21 +162,32 @@ FREE = 0b111  # the opcode isa.yaml leaves free
 
 class A(Candidate):
     """REPEAT count, label: at the end of a body, back to `label` until the
-    body has run `count` times. One 5-bit counter `rc`: 0 between loops; the
-    first arrival loads it with the count, every arrival decrements it and
-    jumps while it is not yet 0. The count sits in bits 12:8, where every
-    other word has its delay: REPEAT holds one cycle and has no delay of its
-    own. The target takes the operand byte, as JMP's does. A JMP out of a
-    body leaves `rc` where it was: the next loop's first arrival would then
-    not load. Restart clears it."""
+    body has run `count` times, 1..32, `count - 1` in bits 12:8 (the delay
+    bits of every other word: REPEAT holds one cycle and has no delay). Bits
+    7:0 are `back`, the body's length in words, 1..255: pc <- pc - back, so
+    the reach is bounded and the program is not. No side effect: no bits are
+    left for one. The counter `rc`, six bits, is 0 while no loop is under
+    way. The REPEAT's one cycle is when it changes, and the only time: on
+    arrival with rc == 0 it loads `count`; every arrival then takes one off
+    and jumps back while the result is not 0. A body word stalling, or
+    holding its delay, does nothing to rc. Reset and restart clear it.
+
+    Programs that keep the rules the assembler checks (`assemble`): a body
+    holds no REPEAT (no nesting, no overlap); a JMP in a body lands in it,
+    from the label to the REPEAT; the body's last word is not a SKIP (it
+    would step over the REPEAT); nothing outside jumps or skips into a body
+    past its label. Outside the rules the hardware still does the one thing
+    above with whatever rc holds."""
 
     NEW = {
         "REPEAT": {
             "opcode": FREE,
-            "description": "pc <- target while the body has not run `count` times; bits 12:8 hold the count, one cycle.",
-            "operands": [{"name": "target", "lsb": 0, "bits": 8}],
+            "description": "pc <- pc - back while the body has not run count times; bits 12:8 hold count - 1, one cycle, no side effect.",
+            "operands": [{"name": "back", "lsb": 0, "bits": 8}],
         }
     }
+    COUNT_MAX = 32
+    BACK_MAX = 255
 
     def reset_state(self):
         self.rc = 0
@@ -192,11 +205,33 @@ class A(Candidate):
     def advance(self, instr):
         if instr.op == "REPEAT":
             if self.rc == 0:
-                self.rc = instr.delay  # the count
+                self.rc = instr.delay + 1  # the count
             self.rc -= 1
-            self.pc = instr.args[0] if self.rc > 0 else self.pc + 1
+            self.pc = self.pc - instr.args[0] if self.rc > 0 else self.pc + 1
         else:
             super().advance(instr)
+
+
+    @staticmethod
+    def unroll(words):
+        """What a REPEAT program means, as a program for the ISA as it is: each
+        body `count` times over, a NOP after each for the REPEAT's cycle. The
+        oracle the corner tests hold A to. Bodies must not hold a JMP: the
+        addresses move."""
+        isa = A.isa()
+        nop = 0
+        out = []
+        for word in words:
+            instr = decode(word, isa)
+            if instr.op == "REPEAT":
+                back, count = instr.args[0], instr.delay + 1
+                body = out[-back:]
+                out.append(nop)
+                for _ in range(count - 1):
+                    out.extend(body + [nop])
+            else:
+                out.append(word)
+        return out
 
 
 class B(Candidate):
@@ -360,22 +395,64 @@ REPEAT_RE = re.compile(r"^(\s*(?:\w+:)?\s*)REPEAT\s+(\w+)\s*,\s*(\w+)\s*$")
 
 
 def assemble(source, candidate):
-    """cpu.assemble with the candidate's ISA. For A, `REPEAT count, label`
-    is written the natural way round and put into the word as `REPEAT label
-    [count]`: the count in the delay bits, 1..31."""
-    from cpu import assemble as base
+    """cpu.assemble with the candidate's ISA. For A, `REPEAT count, label` is
+    written the natural way round and put into the word as `count - 1` in the
+    delay bits and the distance back to the label in the operand byte; the
+    rules in A's docstring are checked here and a program that breaks one is
+    refused with a SyntaxError, as any other bad program is."""
+    from cpu import LINE_RE, assemble as base
 
-    lines = []
-    for line in source.splitlines():
-        code, _, comment = line.partition("#")
+    if candidate is not A:
+        return base(source, candidate.isa())
+    labels, addresses, address = {}, {}, 0  # label -> address; line number -> address of the word on it
+    lines = source.splitlines()
+    for lineno, line in enumerate(lines, start=1):
+        code = line.partition("#")[0].strip()
+        m = LINE_RE.match(code)
+        if not m:
+            raise SyntaxError(f"line {lineno}: can't parse {code!r}")
+        if m["label"]:
+            labels[m["label"]] = address
+        if m["op"]:
+            addresses[lineno] = address
+            address += 1
+    bodies = []  # (start, end) per REPEAT at `end`
+    out = []
+    for lineno, line in enumerate(lines, start=1):
+        code, hash_, comment = line.partition("#")
         m = REPEAT_RE.match(code)
         if m:
-            count = int(m[2], 0)
-            if not 1 <= count <= 31:
-                raise SyntaxError(f"REPEAT count {count} outside 1..31")
-            code = f"{m[1]}REPEAT {m[3]} [{count}]"
-        lines.append(code + ("#" + comment if _ else ""))
-    return base("\n".join(lines), candidate.isa())
+            count, target = int(m[2], 0), m[3]
+            if not 1 <= count <= A.COUNT_MAX:
+                raise SyntaxError(f"line {lineno}: REPEAT count {count} outside 1..{A.COUNT_MAX}")
+            if target not in labels:
+                raise SyntaxError(f"line {lineno}: unknown label {target!r}")
+            back = addresses[lineno] - labels[target]
+            if not 1 <= back <= A.BACK_MAX:
+                raise SyntaxError(f"line {lineno}: REPEAT reaches {back} words back, not 1..{A.BACK_MAX}")
+            code = f"{m[1]}REPEAT {back} [{count - 1}]"
+            bodies.append((addresses[lineno] - back, addresses[lineno]))
+        out.append(code + hash_ + comment)
+    program = base("\n".join(out), A.isa())
+    isa = A.isa()
+    ops = [decode(w, isa) for w in program]
+    for start, end in bodies:
+        for other_start, other_end in bodies:
+            if (other_start, other_end) != (start, end) and start <= other_end <= end:
+                raise SyntaxError(f"REPEAT at {end}: a REPEAT at {other_end} inside its body, or bodies overlapping")
+        if ops[end - 1].op == "SKIP":
+            raise SyntaxError(f"REPEAT at {end}: the body's last word is a SKIP, which would step over the REPEAT")
+        for address, instr in enumerate(ops):
+            inside = start <= address < end
+            if instr.op == "JMP":
+                target = instr.args[0]
+                if inside and not start <= target <= end:
+                    raise SyntaxError(f"REPEAT at {end}: the JMP at {address} leaves the body")
+                if not inside and start < target <= end:
+                    raise SyntaxError(f"REPEAT at {end}: the JMP at {address} lands inside the body past its label")
+            if instr.op == "SKIP" and not inside and start < address + 2 <= end:
+                raise SyntaxError(f"REPEAT at {end}: the SKIP at {address} steps into the body past its label")
+    return program
 
 
 def load_program(name, candidate):

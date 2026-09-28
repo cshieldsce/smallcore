@@ -294,3 +294,219 @@ def test_a_loop_word_right_after_a_stalling_word_moves_the_stall_by_a_cycle(tag)
         assert b.cpu.cycle - a.cpu.cycle == longer, f"late by {late}: {b.cpu.cycle - a.cpu.cycle} cycles longer"
         if longer:
             assert sum(b.swclk) - sum(a.swclk) == longer, "the extra cycle is SWCLK high"
+
+
+# --- A alone: the spec's corners, and the other protocols -------------------------------------
+#
+# The reviewer's last model-only round for A. Two oracles: `A.unroll`, what a
+# REPEAT program means as a program for the ISA as it is (each body count
+# times, a NOP after each for the REPEAT's cycle), and the canonical program
+# itself where a variant of it is spliced. Either is run against the A program
+# in lockstep under the same random outside world: the same pins every cycle,
+# the same bytes into the TX FIFO at random moments, the same pops of the RX
+# FIFO, and every cycle the pins, the pads, the stall and both FIFOs must
+# agree, to the halt or for as long as the run goes.
+
+import random  # noqa: E402
+
+A_ = CANDIDATES["A"]
+
+
+def lockstep(a, b, seed, cycles=4000, feed=0.05, pop=0.3):
+    """Step `a` and `b` together under one random outside world; return the
+    cycles `a` stalled on. Fails on the first cycle they differ."""
+    rng = random.Random(seed)
+    stalls = []
+    for _ in range(cycles):
+        if a.halted or b.halted:
+            break
+        pins = [rng.randrange(2) for _ in range(4)]
+        a.gpio_in, b.gpio_in = list(pins), list(pins)
+        if rng.random() < feed:
+            byte = rng.randrange(256)
+            a.tx_fifo.append(byte)
+            b.tx_fifo.append(byte)
+        if rng.random() < pop and a.rx_fifo and b.rx_fifo:
+            a.rx_fifo.pop(0)
+            b.rx_fifo.pop(0)
+        a.step()
+        b.step()
+        assert (a.gpio, a.gpio_oe, a.stalled, a.rx_fifo, a.tx_fifo) == (b.gpio, b.gpio_oe, b.stalled, b.rx_fifo, b.tx_fifo), f"cycle {a.cycle}"
+        if a.stalled:
+            stalls.append(a.cycle)
+    assert a.halted == b.halted and a.cycle == b.cycle
+    return stalls
+
+
+def a_program(source, tx=()):
+    words = assemble_candidate(source, A_)
+    return A_(words, tx_data=list(tx)), words
+
+
+def unrolled(words, tx=()):
+    return CPU(A_.unroll(words), tx_data=list(tx))
+
+
+CANONICAL = {  # programs/<name>.asm words -> experiments/repeat/<name>_A.asm words
+    "uart_tx_0x55": (11, 4), "uart_tx_pull": (11, 5), "uart_tx_loop": (12, 6), "uart_rx": (12, 6),
+    "spi_tx_lsb": (21, 8), "spi_tx_msb": (21, 8), "spi_duplex_lsb": (22, 9), "spi_duplex_msb": (22, 9),
+    "i2c_write": (34, 14), "i2c_write_stretch": (45, 18), "i2c_write_addr_data": (64, 24),
+}
+
+
+@pytest.mark.parametrize("name", sorted(CANONICAL))
+def test_a_on_the_other_protocols_is_the_canonical_program_under_any_outside_world(name):
+    """Cross-protocol applicability. REPEAT spliced into every program in the
+    ROM's manifest, the canonical program untouched: the variant and the
+    canonical run in lockstep under ten random outside worlds and agree every
+    cycle. The words: UART 11, 11, 12, 12 to 4, 5, 6, 6; SPI 21 and 22 to 8
+    and 9; I²C 34, 45, 64 to 14, 18, 24. The eleven programs: 275 words to
+    111."""
+    canonical = load_program(PROGRAMS / f"{name}.asm")
+    variant = load_candidate(f"{name}_A", A_)
+    assert (len(canonical), len(variant)) == CANONICAL[name]
+    for seed in range(10):
+        stalls = lockstep(A_(variant), CPU(canonical), seed, cycles=3000)
+        if name == "uart_rx":
+            assert stalls, "the receiver never waited for a start bit"
+
+
+def test_the_rom_would_be_275_words_to_111():
+    assert sum(c for c, _ in CANONICAL.values()) == 275 and sum(a for _, a in CANONICAL.values()) == 111
+
+
+@pytest.mark.parametrize("count", (1, 2, 32))
+def test_count_1_to_32_encoded_as_count_less_one(count):
+    """REPEAT count, label runs the body count times, 1..32, the word holding
+    count - 1 in bits 12:8: 32 in five bits with no rule about zero. Against
+    the unrolled program, under ten outside worlds."""
+    source = f"        PULL\nbit:    SHIFT_OUT 1, 0 [1]\n        SET 1, 1\n        REPEAT {count}, bit\n        SET 1, 0"
+    _, words = a_program(source)
+    assert decode(words[3], A_.isa()) == ("REPEAT", (2,), count - 1, None)
+    assert len(A_.unroll(words)) == 1 + 3 * count + 1, "a PULL, then the two-word body and a NOP count times, then a SET"
+    for seed in range(10):
+        lockstep(a_program(source)[0], unrolled(words), seed)
+
+
+def test_the_shortest_body_is_one_word():
+    source = "        PULL\nbit:    SHIFT_OUT [2]\n        REPEAT 8, bit\n        SET 0, 1"
+    _, words = a_program(source)
+    assert decode(words[2], A_.isa()).args == (1,)
+    for seed in range(10):
+        lockstep(a_program(source)[0], unrolled(words), seed)
+
+
+def test_the_longest_body_is_255_words_and_256_is_refused():
+    """255 back is the operand byte's reach; with the REPEAT the program is
+    256 words, the memory. One more word of body is refused."""
+    lines = [f"        SET {i % 4}, {i % 2} [{i % 3}]" for i in range(256)]
+    source = "start:" + "\n".join(lines[:255])[6:] + "\n        REPEAT 3, start"
+    _, words = a_program(source)
+    assert len(words) == 256 and decode(words[-1], A_.isa()).args == (255,)
+    for seed in range(3):
+        lockstep(a_program(source)[0], unrolled(words), seed, cycles=3000)
+    longer = "start:" + "\n".join(lines)[6:] + "\n        REPEAT 3, start"
+    with pytest.raises(SyntaxError, match="256 words back"):
+        a_program(longer)
+
+
+@pytest.mark.parametrize("bad, message", [
+    ("bit:    SET 0, 0\n        REPEAT 0, bit", "count 0"),
+    ("bit:    SET 0, 0\n        REPEAT 33, bit", "count 33"),
+    ("        REPEAT 2, ahead\nahead:  SET 0, 0", "words back"),
+    ("bit:    SET 0, 0\n        REPEAT 2, bit\n        REPEAT 2, bit", "inside its body"),
+    ("outer:  SET 0, 0\ninner:  SET 0, 1\n        REPEAT 2, inner\n        REPEAT 2, outer", "inside its body"),
+    ("bit:    SET 0, 0\n        JMP out\n        REPEAT 2, bit\nout:    SET 0, 1", "leaves the body"),
+    ("bit:    SET 0, 0\n        SKIP 0, 0\n        REPEAT 2, bit\n        SET 0, 1", "last word is a SKIP"),
+    ("        JMP in\nbit:    SET 0, 0\nin:     SET 0, 1\n        REPEAT 2, bit", "lands inside the body"),
+    ("        SKIP 0, 0\nbit:    SET 0, 0\n        SET 0, 1\n        REPEAT 2, bit", "steps into the body"),
+])
+def test_the_assembler_refuses_what_the_hardware_would_do_something_odd_with(bad, message):
+    """The control-flow corners are closed by the assembler, not by machinery:
+    count outside 1..32, a label ahead, a REPEAT inside a body, a JMP out
+    of a body, a SKIP as the body's last word, a JMP or SKIP into a body
+    past its label."""
+    with pytest.raises(SyntaxError, match=message):
+        a_program(bad)
+
+
+def test_what_the_assembler_allows_around_a_body():
+    """A SKIP just before the label landing on it, and two bodies one after
+    the other: fine, and the unrolled program."""
+    source = ("        SKIP 0, 0\n        SET 0, 1\nbit:    SET 0, 0\n        SET 1, 1\n        REPEAT 3, bit\n"
+              "two:    SET 2, 0\n        SET 2, 1\n        REPEAT 2, two\n        SET 3, 0")
+    _, words = a_program(source)
+    for seed in range(5):
+        lockstep(a_program(source)[0], unrolled(words), seed)
+
+
+def test_a_stall_on_the_bodys_first_and_last_word_leaves_the_count_alone():
+    """The body starts with a PULL and ends with a PUSH, the outside world
+    handing over a byte only once the FIFO is empty and slow to pop: both
+    stall, again and again over 32 iterations, and the run is the unrolled
+    program's. rc is watched: it changes only on the REPEAT's cycle, never
+    during a stall or a delay."""
+    source = "byte:   PULL 1, 0 [1]\n        SHIFT_OUT 1, 1 [1]\n        SHIFT_IN 0 [1]\n        PUSH 1, 0\n        REPEAT 32, byte\n        SET 2, 0"
+    cpu, words = a_program(source)
+    ref = unrolled(words)
+    rng = random.Random(3)
+    seen, first, last = [], 0, 0
+    while not cpu.halted and cpu.cycle < 8000:
+        pins = [rng.randrange(2) for _ in range(4)]
+        cpu.gpio_in, ref.gpio_in = list(pins), list(pins)
+        if not cpu.tx_fifo and rng.random() < 0.05:
+            byte = rng.randrange(256)
+            cpu.tx_fifo.append(byte)
+            ref.tx_fifo.append(byte)
+        if rng.random() < 0.02 and cpu.rx_fifo and ref.rx_fifo:
+            cpu.rx_fifo.pop(0)
+            ref.rx_fifo.pop(0)
+        at = decode(cpu.program[cpu.pc], A_.isa()).op
+        rc_before = cpu.rc
+        cpu.step()
+        ref.step()
+        assert (cpu.gpio, cpu.gpio_oe, cpu.stalled, cpu.rx_fifo, cpu.tx_fifo) == (ref.gpio, ref.gpio_oe, ref.stalled, ref.rx_fifo, ref.tx_fifo), f"cycle {cpu.cycle}"
+        if cpu.stalled:
+            first += at == "PULL"
+            last += at == "PUSH"
+            assert cpu.rc == rc_before, "rc moved during a stall"
+        elif at != "REPEAT":
+            assert cpu.rc == rc_before, f"rc moved on a {at}"
+        seen.append(cpu.rc)
+    assert cpu.halted and ref.halted
+    assert first > 100 and last > 100, f"stalls on the first word {first}, on the last {last}"
+    assert sorted(set(seen)) == list(range(32))
+
+
+def test_restart_in_every_cycle_of_a_loop_starts_clean_and_a_slot_change_too():
+    """At every cycle t of a run, restart: the core back to reset, rc 0, the
+    FIFOs kept, and the run from there is a fresh run with those FIFOs. And
+    at every t, a slot change to another program: a fresh run of that one."""
+    loop = "        PULL\nbit:    SHIFT_OUT 1, 0 [2]\n        SET 1, 1 [1]\n        REPEAT 4, bit\n        SET 1, 0"
+    other = "        SET 3, 0 [2]\nbit:    SHIFT_OUT [1]\n        REPEAT 3, bit\n        SET 3, 1"
+    _, words = a_program(loop)
+    _, other_words = a_program(other)
+    whole = A_(words, tx_data=[0x96])
+    whole.run()
+    total = whole.cycle
+    for t in range(1, total):
+        for program in (None, other_words):
+            cpu = A_(words, tx_data=[0x96, 0x53])
+            cpu.run_cycles(t)
+            cpu.restart(program)
+            assert cpu.pc == 0 and cpu.rc == 0 and cpu.counter == 0 and not cpu.stalled and cpu.gpio == [1] * 4 and cpu.cycle == t
+            fresh = A_(words if program is None else program, tx_data=list(cpu.tx_fifo))
+            fresh.rx_fifo = list(cpu.rx_fifo)
+            cpu.run()
+            fresh.run()
+            assert cpu.trace[t:] == fresh.trace, f"restart at cycle {t}"
+            assert cpu.rx_fifo == fresh.rx_fifo and cpu.cycle - t == fresh.cycle
+
+
+def test_repeat_has_no_side_effect_bits_to_reserve():
+    """Opcode 3, count 5, back 8: sixteen. Nothing left for a side effect,
+    nothing to declare reserved; a side effect written on a REPEAT is refused."""
+    spec = A_.isa()["instructions"]["REPEAT"]
+    assert not spec.get("side_effect") and spec["operands"] == [{"name": "back", "lsb": 0, "bits": 8}]
+    with pytest.raises(SyntaxError):
+        a_program("bit:    SET 0, 0\n        REPEAT 2, bit, 1, 0")
