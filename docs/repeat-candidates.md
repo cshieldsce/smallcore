@@ -289,8 +289,14 @@ A, in this order: isa.yaml got the word above and the ISA-definition tests
 their new contract; the adversarial suite's model of a word got its clause
 (bits 12:8 are a count in one word; one word goes backward besides JMP; a
 REPEAT is its body count times over with a cycle between); cpu.py got the
-counter and the assembler the rules; core.v gets the counter and the
-subtract next, with the RTL differential tests on the same corners; the
+counter and the assembler the rules; core.v got the counter and the
+subtract, `rc[4:0]`, `rc_next`, one term in `last`, one in `gpio_en`, the
+pc mux's fourth way, and the RTL differential tests the same corners
+(`rtl_tests/core_tb.py`: counts 1, 2, 32; one- and 255-word bodies; a PULL
+withheld 73 clocks and a PUSH held 20 inside a body with `rc` watched; forty
+random bodies under random stalls; reset at every clock of a loop; the wrap;
+bit 7 of `back`), and the 40-word SWD programs clock for clock the 103- and
+106-word ones at the pins under four hosts (`rtl_tests/top_tb.py`); the
 103- and 106-word programs stay in `programs/` as the record of why. Opcode
 111's accidental self-trap went with it, which is convenient, not a reason.
 

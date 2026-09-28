@@ -21,6 +21,7 @@ module core(
     localparam [2:0] OP_CONFIG  = 3'b100;
     localparam [2:0] OP_WAIT    = 3'b101;
     localparam [2:0] OP_SKIP    = 3'b110;
+    localparam [2:0] OP_REPEAT  = 3'b111;
 
     // config
     localparam [1:0] CFG_SHIFT_DIR = 2'd0;
@@ -29,6 +30,7 @@ module core(
     
     reg  [8:0] pc;
     reg  [4:0] delay_counter;
+    reg  [4:0] rc;
 
     wire [2:0] opcode;
     wire [4:0] delay;
@@ -59,6 +61,7 @@ module core(
     wire is_config;
     wire is_wait;
     wire is_skip;
+    wire is_repeat;
 
     assign is_nop_set = (opcode == OP_NOP_SET);
     assign is_shift   = (opcode == OP_SHIFT);
@@ -67,6 +70,7 @@ module core(
     assign is_config  = (opcode == OP_CONFIG);
     assign is_wait    = (opcode == OP_WAIT);
     assign is_skip    = (opcode == OP_SKIP);
+    assign is_repeat  = (opcode == OP_REPEAT);
 
     // own decode
     wire       shift_select;
@@ -99,13 +103,13 @@ module core(
             (is_wait && (gpio_in[input_pin] != level))
         );
 
-    assign last = issue ? (delay == 5'd0) : (delay_counter == 5'd1);
+    assign last = issue ? (delay == 5'd0 || is_repeat) : (delay_counter == 5'd1);
 
     wire pc_en;
     assign pc_en = last && !stall;
 
     wire gpio_en;
-    assign gpio_en = issue && !stall && side && !is_jmp;
+    assign gpio_en = issue && !stall && side && !is_jmp && !is_repeat;
 
     reg       shift_dir;
     reg [3:0] open_drain;
@@ -135,6 +139,10 @@ module core(
     wire   skip_taken;
     assign skip_taken = is_skip && (in_shift_reg[skip_bit] == level);
 
+    // repeat
+    wire [4:0] rc_next;
+    assign rc_next = (rc == 5'd0) ? delay : rc - 5'd1;
+
     // pull
     assign pull_en = issue && is_fifo && !fifo_select && !tx_empty;
 
@@ -147,6 +155,7 @@ module core(
             // Reset sets PC=0, Counter=0, GPIO=1111 
             pc            <= 9'd0;
             delay_counter <= 5'd0;
+            rc            <= 5'd0;
             gpio_out      <= 4'b1111;
             shift_dir     <= 1'b0;
             open_drain    <= 4'b0000;
@@ -157,7 +166,7 @@ module core(
         else begin
             // Counter
             if (issue && !stall) begin
-                delay_counter <= delay;
+                delay_counter <= is_repeat ? 5'd0 : delay;
             end
             else if (delay_counter > 5'd0) begin
                 delay_counter <= delay_counter - 5'd1;
@@ -171,9 +180,17 @@ module core(
                 else if (is_skip) begin
                     pc <= pc + (skip_taken ? 9'd2 : 9'd1);
                 end
+                else if (is_repeat) begin
+                    pc <= (rc_next != 5'd0) ? pc - {1'b0, operand} : pc + 9'd1;
+                end
                 else if (is_nop_set || is_config || is_shift || is_wait || is_fifo) begin
                     pc <= pc + 9'd1;
                 end
+            end
+
+            // Repeat
+            if (pc_en && is_repeat) begin
+                rc <= rc_next;
             end
 
             // GPIO

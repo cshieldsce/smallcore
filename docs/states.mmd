@@ -5,9 +5,10 @@ stateDiagram-v2
   [*] --> Issue
 
   Issue : Issue (counter == 0)
-  Issue : run imem[pc], counter ← delay
-  Issue : last cycle: pc ← JMP ? target : pc + 1 + skip
+  Issue : run imem[pc], counter ← delay (REPEAT: 0)
+  Issue : last cycle: pc ← JMP ? target : REPEAT and rc_next ≠ 0 ? pc − back : pc + 1 + skip
   Issue : (skip = SKIP and in_shift_reg[bit] == level)
+  Issue : (REPEAT: rc ← rc_next = rc == 0 ? count − 1 : rc − 1, on this edge only)
 
   Hold : Hold (counter > 0)
   Hold : counter ← counter − 1

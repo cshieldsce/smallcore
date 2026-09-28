@@ -92,6 +92,7 @@ def rtl_state(dut):
     return {
         "pc": int(dut.pc.value),
         "counter": int(dut.delay_counter.value),
+        "rc": int(dut.rc.value),
         "gpio": gpio_bits(dut.gpio_out.value),
         "halted": bool(dut.halted.value),
         "shift_dir": int(dut.shift_dir.value),
@@ -106,6 +107,7 @@ def model_state(cpu):
     return {
         "pc": cpu.pc,
         "counter": cpu.counter,
+        "rc": cpu.rc,
         "gpio": list(cpu.gpio),
         "halted": cpu.halted,
         "shift_dir": cpu.shift_dir,
