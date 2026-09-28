@@ -15,13 +15,17 @@ is BIT cycles long and every node samples it at the same point.
      and samples it; a receiver that took the frame pulls it dominant; the
      ACK delimiter is recessive; not acked, the transmitter reports, waits
      out EOF and the intermission and sends the frame again when the host
-     queues it again.
+     queues it again;
+  4. bit stuffing: after five bits of one level the transmitter inserts one
+     of the other, a full bit, and a receiver drops it; six of one level are
+     a stuff error.
 
 programs/can_tx.asm is stage 1; can_tx_arb.asm is stage 2, and sees the bus
 the way a controller behind a transceiver does, because with the pad on the
 bus the core cannot tell a lost bit from its own dominant one; can_tx_ack.asm
-is stage 3, stage 1's frame with the ACK slot after it. Stages 1 and 2 stay
-as they are, the baselines.
+is stage 3, stage 1's frame with the ACK slot after it; can_tx_stuff.asm is
+stage 4, stage 1's frame stuffed, at 16 cycles a bit because the decision
+takes seven after the sample. Stages 1 and 2 stay as they are, the baselines.
 
 The bench is the bus and the other nodes. The bus is a wired AND resolved
 every cycle from the node under test and every other node: 0, dominant, if
@@ -59,6 +63,23 @@ NAMES = ("sof",) + tuple(f"id{i}" for i in range(ID_BITS - 1, -1, -1))
 ACK = PROGRAMS / "can_tx_ack.asm"
 ACK_FRAME = HEADER + 2  # the header, the ACK slot, the ACK delimiter: the bits stage 3 sends
 GAP = 10  # EOF and the intermission: recessive bits before the next frame may start
+STUFF = PROGRAMS / "can_tx_stuff.asm"
+STUFF_BIT = 16  # cycles per bit in can_tx_stuff.asm: the stuffing decision takes seven after the sample
+STUFF_SAMPLE = 8  # the clock of a bit can_tx_stuff.asm samples on: the eighth
+STUFF_IDENTS = (0x7FF, 0x000, 0x07C, 0x7C0, 0x5A3, 0x555)  # runs of eleven, of five then five, and none
+
+
+def stuffed(bits):
+    """The bits as they go on the bus: after five of one level, one of the
+    other, which starts the count again; the SOF counts."""
+    out, level, count = [], None, 0
+    for bit in bits:
+        out.append(bit)
+        level, count = (level, count + 1) if bit == level else (bit, 1)
+        if count == 5:
+            out.append(1 - bit)
+            level, count = 1 - bit, 1
+    return out
 
 
 def header_bytes(ident):
@@ -82,22 +103,29 @@ class Node:
     """An ideal receiver on the bus. `update(line)` is called every cycle with
     the bus as it stood at the end of the cycle before and returns what the
     node drives this cycle: 0 or None. Idle, it waits for the bus to fall,
-    the SOF, and counts clocks from that edge: on the `sample`th clock of
-    every bit it takes the level it was handed, the one the bus held as that
-    clock began. When the HEADER bits are over it appends the identifier to
-    `seen`; then, if it `ack`s the frame (a bool, or one per frame, the last
-    repeating), it pulls the next bit, the ACK slot, dominant and lets go for
-    the delimiter; a receiver that does not ack goes idle at once, ready for
-    the next SOF, as stage 1's did. `samples` is every level taken this
-    frame, the ACK slot's and the delimiter's included when it acks."""
+    the SOF, and counts clocks from that edge, `bit` to a bit: on the
+    `sample`th clock of every bit it takes the level it was handed, the one
+    the bus held as that clock began. When the HEADER bits are over it
+    appends the identifier to `seen`; then, if it `ack`s the frame (a bool,
+    or one per frame, the last repeating), it pulls the next bit, the ACK
+    slot, dominant and lets go for the delimiter; a receiver that does not
+    ack goes idle at once, ready for the next SOF, as stage 1's did.
+    `samples` is every level taken this frame, the ACK slot's and the
+    delimiter's included when it acks; `data` is the samples without the
+    stuff bits when it `destuff`s: after five of one level the next is a
+    stuff bit and is dropped, and if it is the same level again that is a
+    stuff error, its index in `samples` appended to `errors`; the header is
+    over when its twelve data bits and the stuff bit a run of five at its
+    end calls for are in."""
 
-    def __init__(self, sample=SAMPLE, ack=False):
-        self.sample = sample
+    def __init__(self, sample=SAMPLE, ack=False, bit=BIT, destuff=False):
+        self.sample, self.bit, self.destuff = sample, bit, destuff
         self.acks = list(ack) if isinstance(ack, (list, tuple)) else [ack]
         self.line = 1  # the bus as last seen
         self.clock = None  # clocks since the SOF's edge, None between frames
         self.phase = "idle"  # "header", then "ack" and "delimiter" when it acks
-        self.samples = []
+        self.samples, self.data, self.errors = [], [], []
+        self.level, self.count = None, 0  # the run: the last level and how many of it
         self.seen = []
         self.frames = 0
 
@@ -107,24 +135,41 @@ class Node:
 
     def update(self, line):
         if self.clock is None and line == 0 and self.line == 1:
-            self.clock, self.phase, self.samples = 0, "header", []
+            self.clock, self.phase, self.samples, self.data = 0, "header", [], []
+            self.level, self.count = None, 0
         if self.clock is not None:
             self.clock += 1
-            if self.clock % BIT == self.sample:
+            if self.clock % self.bit == self.sample:
                 self.samples.append(line)
-                self.sampled(len(self.samples) - 1, line)
-            if self.clock == HEADER * BIT:
-                assert self.samples[0] == 0, "the SOF: the edge it synced on"
-                self.seen.append(bits_to_int(self.samples[1:HEADER]))
-                self.phase = "ack" if self.acking else "idle"
-            elif self.clock == (HEADER + 1) * BIT:
-                self.phase = "delimiter"
-            elif self.clock == (HEADER + 2) * BIT:
-                self.phase = "idle"
-            if self.phase == "idle":
-                self.clock, self.frames = None, self.frames + 1
+                if self.phase == "header" and self.destuff and self.count == 5:
+                    if line == self.level:
+                        self.errors.append(len(self.samples) - 1)
+                    self.level, self.count = line, 1
+                else:
+                    if self.phase == "header":
+                        self.data.append(line)
+                        self.sampled(len(self.data) - 1, line)
+                    self.level, self.count = (self.level, self.count + 1) if line == self.level else (line, 1)
+            if self.clock % self.bit == 0:
+                if self.phase == "header" and len(self.data) == HEADER and not (self.destuff and self.count == 5):
+                    assert self.data[0] == 0, "the SOF: the edge it synced on"
+                    self.seen.append(bits_to_int(self.data[1:HEADER]))
+                    self.phase = "ack" if self.acking else "idle"
+                elif self.phase == "ack":
+                    self.phase = "delimiter"
+                elif self.phase == "delimiter":
+                    self.phase = "idle"
+                if self.phase == "idle":
+                    self.clock, self.frames = None, self.frames + 1
         self.line = line
         return self.drive()
+
+    def feed(self, bits):
+        """Drive this node from a bus the bench makes up: `bits`, each held
+        for a bit time, then idle; returns nothing, the node's lists tell."""
+        for level in [1] + bits + [1] * 2:
+            for _ in range(self.bit):
+                self.update(level)
 
     def drive(self):
         return 0 if self.phase == "ack" else None
@@ -151,7 +196,7 @@ class Competitor(Node):
     def drive(self):
         if self.clock is None or self.lost is not None or self.phase != "header":
             return super().drive()
-        return 0 if self.bits[self.clock // BIT] == 0 else None
+        return 0 if self.bits[self.clock // self.bit] == 0 else None
 
     def sampled(self, k, level):
         if self.lost is None and k < HEADER and self.bits[k] == 1 and level == 0:
@@ -259,21 +304,21 @@ def pairs(bits):
     return bits_to_int([b for bit in bits[-4:] for b in (bit, bit)])
 
 
-def cells(line, start, count=HEADER):
-    """The bus from `start`, the SOF's edge, cut into `count` bits of BIT
+def cells(line, start, count=HEADER, bit=BIT):
+    """The bus from `start`, the SOF's edge, cut into `count` bits of `bit`
     cycles: what a receiver with a perfect clock sees. Every cycle of a bit
     must hold the same level, so a bit that stretches or glitches fails here
     rather than decoding by luck."""
     bits = []
     for k in range(count):
-        cell = line[start + k * BIT : start + (k + 1) * BIT]
-        assert len(cell) == BIT, f"the bus ends inside bit {k}"
-        assert len(set(cell)) == 1, f"bit {k} ({NAMES[k]}) not held for {BIT} cycles: {cell}"
+        cell = line[start + k * bit : start + (k + 1) * bit]
+        assert len(cell) == bit, f"the bus ends inside bit {k}"
+        assert len(set(cell)) == 1, f"bit {k} ({NAMES[k] if k < len(NAMES) else k}) not held for {bit} cycles: {cell}"
         bits.append(cell[0])
     return bits
 
 
-def show(wave, r):
+def show(wave, r, bit=BIT, sample=SAMPLE, names=NAMES):
     wave.add("bus", r.line, group="bus")
     wave.add("txd", r.txd, group="bus")
     wave.add("pad drives", [int(o) for o in r.owned], group="bus")
@@ -281,8 +326,8 @@ def show(wave, r):
         wave.add(f"node {i} drives", ["-" if d[i] is None else str(d[i]) for d in r.driven], group="bus")
     labels = ["-"] * len(r.line)
     sof = r.line.index(0)
-    for k, name in enumerate(NAMES):
-        at = sof + k * BIT + SAMPLE - 1
+    for k, name in enumerate(names):
+        at = sof + k * bit + sample - 1
         if at < len(labels):
             labels[at] = name
     wave.add("sampled", labels)
@@ -629,3 +674,100 @@ def test_ack_by_the_numbers():
     r = run(ACK, header_bytes(IDENT), [Node(ack=True)])
     assert r.cpu.cycle == 3 + ACK_FRAME * BIT == 115
     assert (r.tx_peak, r.rx_peak, len(r.received)) == (2, 1, 1)
+
+
+# --- stage 4: bit stuffing ------------------------------------------------------------
+
+
+def stuffing_names(ident):
+    """A name per bit on the bus, stuff bits marked."""
+    names, level, count = [], None, 0
+    for name, bit in zip(NAMES, header_bits(ident)):
+        names.append(name)
+        level, count = (level, count + 1) if bit == level else (bit, 1)
+        if count == 5:
+            names.append("stuff")
+            level, count = 1 - bit, 1
+    return names
+
+
+def receiver():
+    return Node(STUFF_SAMPLE, bit=STUFF_BIT, destuff=True)
+
+
+@pytest.mark.parametrize("ident", STUFF_IDENTS, ids=lambda i: f"{i:03x}")
+def test_a_stuff_bit_after_five_bits_of_one_level(ident, wave):
+    """can_tx_stuff.asm on an idle bus with a receiver that drops stuff bits:
+    from the SOF, the identifier's bits with one of the other level after
+    every five of one, every bit held 16 cycles; the receiver reads the
+    identifier with no stuff error; the bus recessive after; the host reads
+    the last eight samples, stuff bits among them; halted a cycle after the
+    last bit. 0x7FF and 0x000 take two stuff bits, 0x5A3 and 0x555 none."""
+    r = run(STUFF, header_bytes(ident), [receiver()])
+    show(wave, r, STUFF_BIT, STUFF_SAMPLE, stuffing_names(ident))
+    sof = r.line.index(0)
+    bits = stuffed(header_bits(ident))
+    assert len(bits) - HEADER == {0x7FF: 2, 0x000: 2, 0x07C: 2, 0x7C0: 2, 0x5A3: 0, 0x555: 0}[ident]
+    assert cells(r.line, sof, len(bits), STUFF_BIT) == bits
+    assert r.nodes[0].seen == [ident] and r.nodes[0].errors == []
+    assert r.owned == [level == 0 for level in r.line], "dominant driven, recessive let go, stuff bits too"
+    end = sof + len(bits) * STUFF_BIT
+    assert r.line[end:] == [1] * len(r.line[end:]) and r.cpu.halted and r.cpu.cycle == end + 1
+    assert r.received == [bits_to_int(bits[-8:])]
+
+
+def test_identifiers_across_the_range_are_stuffed():
+    """The walking ones and zeros and every eleventh identifier: the bus is
+    the reference's stuffing of the header, the receiver reads each back."""
+    walking = [1 << i for i in range(ID_BITS)] + [(1 << ID_BITS) - 1 - (1 << i) for i in range(ID_BITS)]
+    for ident in walking + list(range(0, 1 << ID_BITS, ID_BITS)):
+        r = run(STUFF, header_bytes(ident), [receiver()])
+        bits = stuffed(header_bits(ident))
+        assert cells(r.line, r.line.index(0), len(bits), STUFF_BIT) == bits, f"identifier {ident:03x}"
+        assert r.nodes[0].seen == [ident] and r.nodes[0].errors == [], f"identifier {ident:03x}"
+
+
+def test_the_receiver_drops_stuff_bits_and_flags_six_of_one_level():
+    """The bench's receiver on a bus the bench makes up: the stuffed header
+    of 0x7FF reads as 0x7FF with no error; the same header unstuffed, eleven
+    recessive bits in a row, is a stuff error on the sixth and, the count
+    starting again there, on the eleventh, and the receiver still counts
+    twelve data bits; a stuff bit that is one too early, after four, is read
+    as data, so the identifier comes out wrong. The tests above can fail for
+    the right reason."""
+    node = receiver()
+    node.feed(stuffed(header_bits(0x7FF)))
+    assert node.seen == [0x7FF] and node.errors == []
+    node = receiver()
+    node.feed(header_bits(0x7FF))
+    assert node.errors == [6, 11] and node.seen == [0x7FF]
+    node = receiver()
+    node.feed([0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1])
+    assert node.seen != [0x7FF] and node.errors == []
+
+
+def test_the_stuffing_sample_point_is_the_eighth_clock_of_the_bit():
+    """Where can_tx_stuff.asm samples, seen from outside: a probe pulls the
+    bus dominant for one cycle of ID[7], a recessive bit of 0x5A3, at each of
+    its sixteen cycles in turn; the host's byte and the receiver's identifier
+    lose that bit exactly when the pulse is on the eighth cycle (no stuff
+    bit either way: 0x5A3 has no run of four for the pulse to complete)."""
+    sof = run(STUFF, header_bytes(IDENT), []).line.index(0)
+    k = NAMES.index("id7")
+    for p in range(STUFF_BIT):
+        r = run(STUFF, header_bytes(IDENT), [receiver(), Glitch(sof + k * STUFF_BIT + p)])
+        hit = p == STUFF_SAMPLE - 1
+        assert r.received == [IDENT & 0xFF & ~(hit << 7)], f"the transmitter's sample, pulse on cycle {p + 1} of the bit"
+        assert r.nodes[0].seen == [IDENT & ~(hit << 7)], f"the receiver's sample, pulse on cycle {p + 1} of the bit"
+
+
+def test_stuffing_by_the_numbers():
+    """Stage 4 measured against stage 1: the words, the cycles, the bit time, the host's part."""
+    words, plain = load_program(STUFF), load_program(TX)
+    assert (len(words), len(set(words))) == (224, 71)
+    assert (len(plain), len(set(plain))) == (13, 8)
+    none, two = run(STUFF, header_bytes(0x5A3), [receiver()]), run(STUFF, header_bytes(0x7FF), [receiver()])
+    assert none.cpu.cycle == 3 + HEADER * STUFF_BIT + 1 == 196
+    assert two.cpu.cycle == 3 + (HEADER + 2) * STUFF_BIT + 1 == 228
+    assert (none.tx_peak, none.rx_peak, len(none.received)) == (2, 1, 1)
+    assert (STUFF_BIT, STUFF_SAMPLE, STUFF_BIT - STUFF_SAMPLE) == (16, 8, 8), "seven cycles of decision after the sample, and one over"
