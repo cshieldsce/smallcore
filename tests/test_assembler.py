@@ -53,6 +53,10 @@ def isa():
     (Instruction("SKIP", (7, 1), 0), 0xC00F),  # 110 00000 00001111
     (Instruction("SKIP", (0, 0), 3, side=(1, 0)), 0xC3A0),  # 110 00011 10100000  decide, and drop gpio[1] on the same edge
     (Instruction("SKIP", (5, 1), 31, side=(3, 1)), 0xDFFB),  # 110 11111 11111011
+    (Instruction("REPEAT", (1,), 0), 0xE001),  # 111 00000 00000001  count 1 as 0 in the delay bits, 1 word back
+    (Instruction("REPEAT", (2,), 7), 0xE702),  # 111 00111 00000010  REPEAT 8, two words back
+    (Instruction("REPEAT", (128,), 0), 0xE080),  # 111 00000 10000000  bit 7 is the top of back, no side effect
+    (Instruction("REPEAT", (255,), 31), 0xFFFF),  # 111 11111 11111111  REPEAT 32, 255 back
 ])
 def test_encoding(isa, instr, word):
     assert encode(instr, isa) == word
@@ -75,6 +79,8 @@ def test_encoding(isa, instr, word):
                                   "CONFIG open_drain01, 4", "CONFIG open_drain23, 4", "CONFIG open_drain, 3",
                                   "SHIFT_IN", "SHIFT_IN 4", "SHIFT_IN 3, 1", "SHIFT_IN 3, 4, 1", "SHIFT_IN 3, 1, 2",
                                   "SHIFT_IN 3, 1, 1, 0",
+                                  "REPEAT", "REPEAT 2", "REPEAT 0, 0", "REPEAT 33, 0", "REPEAT 2, 0", "REPEAT 2, 1",
+                                  "REPEAT 2, nowhere", "REPEAT 2, 0 [1]", "REPEAT 2, 0, 1, 0", "REPEAT x, 0",
                                   "1: SET 0, 0", "loop:: SET 0, 0"])
 def test_assembler_rejects_bad_lines(line):
     with pytest.raises(SyntaxError):
@@ -118,8 +124,27 @@ def test_pull_and_push_are_one_opcode_with_a_push_bit(isa):
     assert assemble("PULL 2, 0 [3]")[0] ^ assemble("PUSH 2, 0 [3]")[0] == 0b1
 
 
-def test_one_opcode_is_free(isa):
-    assert sorted({spec["opcode"] for spec in isa["instructions"].values()}) == [0b000, 0b001, 0b010, 0b011, 0b100, 0b101, 0b110]
+def test_every_opcode_is_assigned_the_last_to_repeat(isa):
+    """Opcode 111 was free until SWD; it is REPEAT's, alone, and REPEAT's
+    bits 12:8 are its count, not a delay."""
+    assert sorted({spec["opcode"] for spec in isa["instructions"].values()}) == list(range(8))
+    assert [op for op, spec in isa["instructions"].items() if spec["opcode"] == 0b111] == ["REPEAT"]
+    assert isa["instructions"]["REPEAT"]["operands"] == [{"name": "back", "lsb": 0, "bits": 8, "min": 1}]
+
+
+def test_repeat_takes_a_count_then_a_label_behind_it():
+    """`REPEAT 8, bit`: the body from bit to here runs 8 times. The word
+    holds 7 in the delay bits and the distance back to bit, 2, in the
+    operand byte; the label may be an address, as JMP's target may. No
+    `[n]`, no side effect: the bits are taken."""
+    assert assemble("bit: SET 0, 0\nSET 0, 1\nREPEAT 8, bit") == assemble("SET 0, 0\nSET 0, 1\nrepeat 8,0") == [0x0080, 0x0090, 0xE702]
+    assert decode(0xE702, load_isa()) == Instruction("REPEAT", (2,), 7)
+    assert assemble("bit: SET 0, 0\nREPEAT 1, bit")[-1] == 0xE001
+    assert assemble("bit: SET 0, 0\nREPEAT 32, bit")[-1] == 0xFF01
+    with pytest.raises(SyntaxError, match="takes no delay"):
+        assemble("bit: SET 0, 0\nREPEAT 8, bit [1]")
+    with pytest.raises(SyntaxError, match="takes a count and a label"):
+        assemble("bit: SET 0, 0\nREPEAT 8, bit, 1, 0")
 
 
 def test_shift_out_and_shift_in_are_one_opcode_with_an_in_bit(isa):
@@ -136,8 +161,9 @@ def test_shift_out_and_shift_in_are_one_opcode_with_an_in_bit(isa):
 def test_the_side_effect_is_one_field_shared_by_every_instruction_but_jmp(isa):
     """One pin-write port: operand[7] enables it, operand[6:5] is the pin and
     operand[4] the value, on every opcode. SET's operands are those bits, and
-    every instruction allows the side effect except JMP, whose target needs
-    all eight operand bits, and NOP, which with the side effect is SET."""
+    every instruction allows the side effect except JMP and REPEAT, whose
+    target and distance need all eight operand bits, and NOP, which with the
+    side effect is SET."""
     side = isa["side_effect"]
     assert side["flag"] == {"lsb": 7, "bits": 1}
     assert [(o["name"], o["lsb"], o["bits"]) for o in side["operands"]] == [("pin", 5, 2), ("value", 4, 1)]
@@ -145,7 +171,7 @@ def test_the_side_effect_is_one_field_shared_by_every_instruction_but_jmp(isa):
     assert isa["instructions"]["SET"]["select"] == {"name": "side", "lsb": 7, "bits": 1, "value": 1}
     allows = {op: bool(spec.get("side_effect")) for op, spec in isa["instructions"].items()}
     assert allows == {"NOP": False, "SET": False, "SHIFT_OUT": True, "SHIFT_IN": True,
-                      "PULL": True, "PUSH": True, "WAIT": True, "SKIP": True, "JMP": False, "CONFIG": True}
+                      "PULL": True, "PUSH": True, "WAIT": True, "SKIP": True, "JMP": False, "CONFIG": True, "REPEAT": False}
     assert assemble("PULL 2, 0 [3]") == [0x43C0]
     assert assemble("CONFIG shift_dir, 1, 1, 0") == [0x80A1]
     for line in ("SET 3, 1", "SHIFT_OUT 3, 1", "SHIFT_IN 0, 3, 1", "PULL 3, 1", "WAIT 0, 0, 3, 1",

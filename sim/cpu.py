@@ -12,17 +12,21 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 ISA_PATH = ROOT / "isa.yaml"
 
-# e.g. "SET 0, 1 [7]", "SHIFT_OUT [7]", "SHIFT_OUT 1, 0 [3]", "SHIFT_IN 3, 1, 1 [3]", "CONFIG shift_dir, 1", "loop:", "JMP loop"
+# e.g. "SET 0, 1 [7]", "SHIFT_OUT [7]", "SHIFT_OUT 1, 0 [3]", "SHIFT_IN 3, 1, 1 [3]", "CONFIG shift_dir, 1", "loop:", "JMP loop",
+# "REPEAT 8, bit"
 LINE_RE = re.compile(
     r"^(?:(?P<label>[A-Za-z_]\w*):)?\s*"
     r"(?:(?P<op>\w+)(?P<args>[^\[]*?)\s*(?:\[\s*(?P<delay>\w+)\s*\])?)?$"
 )
 
 
+PC_BITS = 9  # the pc: room for the halt address 256 and a SKIP's pc + 2 past it, as in core.v
+
+
 class Instruction(NamedTuple):
     op: str
     args: tuple
-    delay: int = 0
+    delay: int = 0  # bits 12:8; for REPEAT the count - 1, and the word holds one cycle
     side: tuple = None  # (pin, value) GPIO side effect, or None
 
 
@@ -95,9 +99,9 @@ def check_operands(instr, isa):
             raise ValueError("SHIFT_OUT side effect pin 0 is the shift pin")
         checks += zip(instr.side, side["operands"])
     for value, operand in checks:
-        if not 0 <= value < 1 << operand["bits"]:
+        if not operand.get("min", 0) <= value < 1 << operand["bits"]:
             raise ValueError(
-                f"{instr.op} {operand['name']}={value} outside 0..{(1 << operand['bits']) - 1}"
+                f"{instr.op} {operand['name']}={value} outside {operand.get('min', 0)}..{(1 << operand['bits']) - 1}"
             )
     if instr.op == "CONFIG":
         field, value = instr.args
@@ -173,10 +177,14 @@ def decode(word, isa):
 def assemble(source, isa=None):
     """Turn assembly text into a list of instruction words.
 
-    `label:` names the address of the next instruction, for `JMP label`.
-    Operands after an instruction's own are its GPIO side effect: `SHIFT_OUT
-    1, 0 [3]`. CONFIG takes its field by name: `CONFIG shift_dir, 1`. Labels
-    and names never reach the words.
+    `label:` names the address of the next instruction, for `JMP label` and
+    `REPEAT count, label`. Operands after an instruction's own are its GPIO
+    side effect: `SHIFT_OUT 1, 0 [3]`. CONFIG takes its field by name:
+    `CONFIG shift_dir, 1`. REPEAT is written the natural way round, the count
+    then the label, and goes into the word as count - 1 in bits 12:8 and the
+    distance back in the operand byte; it takes no `[n]`. Labels and names
+    never reach the words. A program whose REPEAT bodies break the rules in
+    check_bodies() is refused.
     """
     isa = isa or load_isa()
     labels = {}
@@ -209,8 +217,11 @@ def assemble(source, isa=None):
             raise SyntaxError(f"line {lineno}: unknown label {text!r}") from None
 
     words = []
-    for lineno, op, args, delay in lines:
+    for address, (lineno, op, args, delay) in enumerate(lines):
         try:
+            if op == "REPEAT":
+                words.append(encode(repeat(address, args, delay, labels, isa), isa))
+                continue
             args = tuple(operand(lineno, a, op if i == 0 else None) for i, a in enumerate(args))
             delay = int(delay, 0) if delay else 0
             n = len(isa["instructions"][op]["operands"])
@@ -218,7 +229,70 @@ def assemble(source, isa=None):
             words.append(encode(Instruction(op, args[:n] if side else args, delay, side), isa))
         except ValueError as e:
             raise SyntaxError(f"line {lineno}: {e}") from None
+    try:
+        check_bodies(words, isa)
+    except ValueError as e:
+        raise SyntaxError(str(e)) from None
     return words
+
+
+def repeat(address, args, delay, labels, isa):
+    """`REPEAT count, label` at `address` as an Instruction: count - 1 in the
+    delay bits, the label's distance back as the operand. The label may be an
+    address, as JMP's target may. No `[n]`: bits 12:8 are the count."""
+    if delay is not None:
+        raise ValueError("REPEAT takes no delay: bits 12:8 hold the count")
+    if len(args) != 2:
+        raise ValueError(f"REPEAT takes a count and a label, got {len(args)} operand(s)")
+    count_max = 1 << isa["fields"]["delay"]["bits"]
+    back = next(o for o in isa["instructions"]["REPEAT"]["operands"] if o["name"] == "back")
+    try:
+        count = int(args[0], 0)
+    except ValueError:
+        raise ValueError(f"REPEAT count {args[0]!r} is not a number") from None
+    if not 1 <= count <= count_max:
+        raise ValueError(f"REPEAT count {count} outside 1..{count_max}")
+    if args[1] in labels:
+        target = labels[args[1]]
+    else:
+        try:
+            target = int(args[1], 0)
+        except ValueError:
+            raise ValueError(f"unknown label {args[1]!r}") from None
+    distance = address - target
+    if not back["min"] <= distance < 1 << back["bits"]:
+        raise ValueError(f"REPEAT reaches {distance} words back, not {back['min']}..{(1 << back['bits']) - 1}")
+    return Instruction("REPEAT", (distance,), count - 1)
+
+
+def check_bodies(words, isa):
+    """The rules that keep a REPEAT body plain, so the hardware needs no
+    machinery for odd control flow: a body (the words from the label to the
+    REPEAT) holds no REPEAT, so no nesting and no overlap; a JMP in a body
+    lands in it, from the label to the REPEAT; the body's last word is not a
+    SKIP, which would step over the REPEAT; nothing outside jumps or skips
+    into a body past its label. Raises ValueError. Outside these rules the
+    hardware still does the one thing REPEAT does with whatever rc holds."""
+    ops = [decode(w, isa) for w in words]
+    bodies = [(end - instr.args[0], end) for end, instr in enumerate(ops) if instr.op == "REPEAT"]
+    for start, end in bodies:
+        for other_start, other_end in bodies:
+            if start <= other_end < end:
+                raise ValueError(f"REPEAT at {end}: a REPEAT at {other_end} inside its body, or bodies overlapping")
+        if start < 0:
+            raise ValueError(f"REPEAT at {end}: reaches {end - start} words back, before the program")
+        if ops[end - 1].op == "SKIP":
+            raise ValueError(f"REPEAT at {end}: the body's last word is a SKIP, which would step over the REPEAT")
+        for address, instr in enumerate(ops):
+            inside = start <= address < end
+            if instr.op == "JMP":
+                target = instr.args[0]
+                if inside and not start <= target <= end:
+                    raise ValueError(f"REPEAT at {end}: the JMP at {address} leaves the body")
+                if not inside and start < target <= end:
+                    raise ValueError(f"REPEAT at {end}: the JMP at {address} lands inside the body past its label")
+            if instr.op == "SKIP" and not inside and start < address + 2 <= end:
+                raise ValueError(f"REPEAT at {end}: the SKIP at {address} steps into the body past its label")
 
 
 def load_program(path, isa=None):
@@ -226,7 +300,7 @@ def load_program(path, isa=None):
 
 
 def cycles(instr):
-    return 1 + instr.delay
+    return 1 if instr.op == "REPEAT" else 1 + instr.delay  # REPEAT's bits 12:8 are its count, not a delay
 
 
 class CPU:
@@ -248,8 +322,17 @@ class CPU:
         self.stalled = False  # True while a PULL waits on an empty TX FIFO, a PUSH on a full RX FIFO or a WAIT on a pin level
         self.cycle = 0
         self.counter = 0  # cycles left in the current instruction
+        self.rc = 0  # REPEAT's counter, 5 bits: runs of the body still to go, 0 between loops; moves on a REPEAT's cycle only
         self.halted = not self.program
         self.trace = []  # gpio levels (gpio[0], gpio[1], ...) at the end of each cycle
+
+    def restart(self, program=None):
+        """The chip's restart (top.v's `restart`, a CONTROL write): the core
+        back to reset, the FIFOs, the input pins, the cycle count and the
+        trace kept. With `program`, a slot change: the same, under it."""
+        keep = self.tx_fifo, self.rx_fifo, self.gpio_in, self.cycle, self.trace
+        self.__init__(self.program if program is None else program, rx_depth=self.rx_depth, isa=self.isa)
+        self.tx_fifo, self.rx_fifo, self.gpio_in, self.cycle, self.trace = keep
 
     @property
     def gpio_oe(self):
@@ -322,11 +405,18 @@ class CPU:
         self.counter -= 1
         if self.counter == 0:
             # Last cycle of the instruction: JMP loads its target, SKIP steps over the next word
-            # (pc + 2) when the bit of in_shift_reg it names holds the level, everything else pc + 1.
+            # (pc + 2) when the bit of in_shift_reg it names holds the level, REPEAT goes back
+            # while runs of the body are left, everything else pc + 1.
             if instr.op == "JMP":
                 self.pc = instr.args[0]
             elif instr.op == "SKIP" and (self.in_shift_reg >> instr.args[0]) & 1 == instr.args[1]:
                 self.pc += 2
+            elif instr.op == "REPEAT":
+                # The one cycle rc changes: 0 loads count - 1, the runs still to go; any other
+                # rc loses one. Back to the label while any are left; a back past word 0 wraps
+                # the nine-bit pc past the end, as core.v's subtract does, and halts.
+                self.rc = instr.delay if self.rc == 0 else self.rc - 1
+                self.pc = (self.pc - instr.args[0]) % (1 << PC_BITS) if self.rc else self.pc + 1
             else:
                 self.pc += 1
             self.halted = self.pc >= len(self.program)
@@ -360,6 +450,8 @@ if __name__ == "__main__":
     for addr, word in enumerate(program):
         instr = decode(word, isa)
         args = ", ".join(str(a) for a in instr.args + (instr.side or ()))
+        if instr.op == "REPEAT":  # as written: the count, then the label's address
+            args = f"{instr.delay + 1}, {addr - instr.args[0]}"
         print(f"{addr:3}  {word:04x}  {instr.op} {args} [{instr.delay}]")
     cpu = CPU(program, tx_data=tx_data, isa=isa)
     while not cpu.halted and not cpu.stalled and cpu.cycle < 100_000:

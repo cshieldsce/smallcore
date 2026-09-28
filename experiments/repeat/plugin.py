@@ -7,7 +7,12 @@ modules import them, so every test that builds a CPU or assembles a program
 does so on the candidate. CANDIDATE=base runs `Candidate` itself, the copy of
 the step with nothing added, which must pass everything. A candidate that
 gives the free opcode or a spare bit a meaning fails the tests that pin them
-free, and nothing else: that is the check that it disturbs no program."""
+free, and nothing else: that is the check that it disturbs no program.
+
+Since REPEAT was adopted (2026-09-27) the suite carries REPEAT's own contract,
+which every candidate's ISA lacks by design, so the numbers in
+docs/repeat-candidates.md are those of the suite as it stood at commit
+ae8fe2c, the last before adoption."""
 
 import os
 

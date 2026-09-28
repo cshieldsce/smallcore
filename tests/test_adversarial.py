@@ -7,15 +7,21 @@ world that feeds and drains the FIFOs and wiggles the inputs at random, and
 checks per-cycle invariants: what a stall, a delay cycle and each operation
 may and may not touch. The metamorphic one compares pairs of programs that
 must agree: a delay only holds, a side effect only adds one pin, LSB and MSB
-first mirror each other, a stall only prepends hold cycles."""
+first mirror each other, a stall only prepends hold cycles.
+
+REPEAT's clause in the model of a word: one word, opcode 111, whose bits 12:8
+are a count and not a delay, that holds one cycle, and that goes backward,
+as only JMP did; its counter rc moves on that word's cycle and no other. A
+REPEAT is its body count times over with a cycle between."""
 
 import itertools
 import random
 
 import pytest
 
-from cpu import Instruction, assemble, cycles, decode, encode, load_isa
+from cpu import PC_BITS, Instruction, assemble, cycles, decode, encode, load_isa
 from cpu import CPU as _CPU
+from test_repeat import lockstep, unroll
 
 ISA = load_isa()
 
@@ -30,13 +36,26 @@ class CPU(_CPU):
 OPS = tuple(ISA["instructions"])
 WORD_BITS = ISA["word_bits"]
 DELAY_MAX = (1 << ISA["fields"]["delay"]["bits"]) - 1
-STATE = ("pc", "gpio", "open_drain", "shift_reg", "in_shift_reg", "shift_dir", "tx_fifo", "rx_fifo", "counter", "halted")
+STATE = ("pc", "gpio", "open_drain", "shift_reg", "in_shift_reg", "shift_dir", "tx_fifo", "rx_fifo", "counter", "rc", "halted")
 
 
 def to_asm(instr):
-    """Instruction -> one assembly line, the inverse of assemble() for one word."""
+    """Instruction -> one assembly line, the inverse of assemble() for one word.
+    A REPEAT's line names a label `back` words before it, so its line here
+    is not one assemble() takes: see reassemble()."""
+    if instr.op == "REPEAT":
+        return f"REPEAT {instr.delay + 1}, {instr.args[0]} back"
     args = ", ".join(str(a) for a in instr.args + (instr.side or ()))
     return f"{instr.op} {args} [{instr.delay}]"
+
+
+def reassemble(instr):
+    """The word `instr` assembles to. A REPEAT is given its body: `back` NOPs
+    from a label."""
+    if instr.op == "REPEAT":
+        back, count = instr.args[0], instr.delay + 1
+        return assemble("body:\n" + "NOP\n" * back + f"REPEAT {count}, body", ISA)[-1]
+    return assemble(to_asm(instr), ISA)[0]
 
 
 def every_instruction():
@@ -44,7 +63,7 @@ def every_instruction():
     independently of decode()."""
     side_pins, side_values = [o["bits"] for o in ISA["side_effect"]["operands"]]
     for op, spec in ISA["instructions"].items():
-        ranges = [range(1 << o["bits"]) for o in spec["operands"]]
+        ranges = [range(o.get("min", 0), 1 << o["bits"]) for o in spec["operands"]]
         sides = [None]
         if spec.get("side_effect"):
             sides += [(p, v) for p in range(1 << side_pins) for v in range(1 << side_values)
@@ -72,7 +91,8 @@ VALID = dict(zip(WORDS, INSTRUCTIONS))
 def test_every_word_decodes_or_is_rejected_deliberately():
     """Each of the 65,536 words is a valid instruction that round-trips through
     encode and the assembler unchanged, or decode raises ValueError. Nothing
-    else may happen: no other exception, no silent acceptance."""
+    else may happen: no other exception, no silent acceptance. A REPEAT's
+    bits 12:8 come back as `delay`, count - 1."""
     accepted = {}
     for word in range(1 << WORD_BITS):
         try:
@@ -81,13 +101,13 @@ def test_every_word_decodes_or_is_rejected_deliberately():
             continue
         accepted[word] = instr
         assert encode(instr, ISA) == word, f"{word:#06x} re-encodes differently"
-        assert assemble(to_asm(instr), ISA) == [word], f"{word:#06x}: {to_asm(instr)} assembles differently"
+        assert reassemble(instr) == word, f"{word:#06x}: {to_asm(instr)} assembles differently"
         assert instr.delay == (word >> ISA["fields"]["delay"]["lsb"]) & DELAY_MAX
     assert accepted == VALID, "decode accepts a different set of words than the ISA's operand ranges enumerate"
 
 
 def test_valid_word_count_per_instruction():
-    """The claim, in numbers: 20,224 of 65,536 words mean something."""
+    """The claim, in numbers: 28,384 of 65,536 words mean something."""
     counts = {op: sum(1 for i in VALID.values() if i.op == op) for op in OPS}
     assert counts == {
         "NOP": 32,          # delay only
@@ -100,8 +120,9 @@ def test_valid_word_count_per_instruction():
         "CONFIG": (2 + 4 + 4) * 9 * 32,  # shift_dir 0 or 1, open_drain01 and open_drain23 0..3, x side
         "WAIT": 4 * 2 * 9 * 32,     # pin x level x side
         "SKIP": 8 * 2 * 9 * 32,     # bit x level x side
+        "REPEAT": 255 * 32,         # back 1..255 x count 1..32
     }
-    assert len(VALID) == 20224
+    assert len(VALID) == 28384
 
 
 def test_words_wider_than_16_bits_are_rejected():
@@ -110,19 +131,24 @@ def test_words_wider_than_16_bits_are_rejected():
             decode(word, ISA)
 
 
-def test_unused_opcodes_are_rejected_whatever_the_operand_bits():
+def test_every_opcode_is_assigned_and_of_111s_words_only_back_0_is_rejected():
+    """No opcode is free since REPEAT took 111. Of its 8192 words the 32 with
+    back 0 are rejected, a REPEAT cannot reach itself; the rest are REPEATs,
+    bit 7 the top of `back`, not a side-effect flag."""
     used = {spec["opcode"] for spec in ISA["instructions"].values()}
-    for opcode in range(1 << ISA["fields"]["opcode"]["bits"]):
-        if opcode in used:
-            continue
-        for low in (0x0000, 0x1FFF, 0x0080, 0x1F00, 0x00FF):
-            assert (opcode << 13 | low) not in VALID
+    assert used == set(range(1 << ISA["fields"]["opcode"]["bits"]))
+    rejected = [w for w in range(0xE000, 1 << WORD_BITS) if w not in VALID]
+    assert rejected == [0xE000 | count << 8 for count in range(DELAY_MAX + 1)]
+    assert VALID[0xE080] == Instruction("REPEAT", (128,), 0) and VALID[0xE080].side is None
 
 
-def test_every_instruction_has_every_delay():
+def test_every_instruction_has_every_delay_and_every_repeat_every_count():
     valid = set(VALID.values())
     for instr in VALID.values():
+        if instr.op == "REPEAT":
+            continue  # bits 12:8 are its count, not a delay
         assert all(instr._replace(delay=d) in valid for d in (0, DELAY_MAX))
+    assert all(Instruction("REPEAT", (back,), count) in valid for back in (1, 128, 255) for count in (0, 1, DELAY_MAX))
 
 
 # --- Random walk under invariants --------------------------------------------
@@ -132,7 +158,7 @@ def snapshot(cpu):
     return {
         "pc": cpu.pc, "gpio": list(cpu.gpio), "open_drain": list(cpu.open_drain), "shift_reg": cpu.shift_reg,
         "in_shift_reg": cpu.in_shift_reg, "shift_dir": cpu.shift_dir, "tx_fifo": list(cpu.tx_fifo),
-        "rx_fifo": list(cpu.rx_fifo), "counter": cpu.counter, "halted": cpu.halted,
+        "rx_fifo": list(cpu.rx_fifo), "counter": cpu.counter, "rc": cpu.rc, "halted": cpu.halted,
     }
 
 
@@ -155,6 +181,7 @@ def checked_step(cpu):
     assert 0 <= after["shift_reg"] <= 0xFF and 0 <= after["in_shift_reg"] <= 0xFF
     assert after["shift_dir"] in (0, 1)
     assert len(after["rx_fifo"]) <= cpu.rx_depth
+    assert 0 <= after["rc"] <= DELAY_MAX, "rc is five bits: the runs still to go, at most 31"
 
     stalling = before["counter"] == 0 and (
         (instr.op == "PULL" and not before["tx_fifo"]) or (instr.op == "PUSH" and len(before["rx_fifo"]) >= cpu.rx_depth)
@@ -198,7 +225,7 @@ def checked_step(cpu):
         if pin_write is not None:
             pin, value = pin_write
             expected["gpio"][pin] = value
-        expected["counter"] = instr.delay
+        expected["counter"] = 0 if instr.op == "REPEAT" else instr.delay  # REPEAT holds one cycle: its bits 12:8 are the count
         kind = "issue"
     else:
         # Hold cycle: the operation does not happen again, only the counter moves.
@@ -207,11 +234,15 @@ def checked_step(cpu):
         kind = "hold"
     if expected["counter"] == 0:
         # Last cycle: the pc moves, JMP to its target, SKIP over the next word if its bit holds
-        # the level, everything else to the next word.
+        # the level, REPEAT back while runs of the body are left, everything else to the next
+        # word. rc moves here and nowhere else: 0 loads count - 1, any other rc loses one.
         if instr.op == "JMP":
             expected["pc"] = instr.args[0]
         elif instr.op == "SKIP" and (before["in_shift_reg"] >> instr.args[0]) & 1 == instr.args[1]:
             expected["pc"] = before["pc"] + 2
+        elif instr.op == "REPEAT":
+            expected["rc"] = instr.delay if before["rc"] == 0 else before["rc"] - 1
+            expected["pc"] = (before["pc"] - instr.args[0]) % (1 << PC_BITS) if expected["rc"] else before["pc"] + 1
         else:
             expected["pc"] = before["pc"] + 1
         expected["halted"] = expected["pc"] >= len(cpu.program)
@@ -220,17 +251,24 @@ def checked_step(cpu):
     return kind
 
 
-def random_instruction(rng, n_words):
-    op = rng.choice(OPS)
+def random_instruction(rng, n_words, address=0, ops=OPS):
+    """A valid instruction: an opcode from `ops`, operands in range, a JMP
+    target inside the program or its halt address, a REPEAT at `address`
+    reaching back into the program nine times in ten and anywhere in 1..255
+    otherwise, its delay bits a count of 1, 2, 3, 4 or 32."""
+    op = rng.choice(ops)
     spec = ISA["instructions"][op]
     delay = rng.choice((0, 0, 0, 1, 2, 3, DELAY_MAX))
     if op == "JMP":
         return Instruction(op, (rng.randrange(n_words + 1),), delay)  # n_words is the halt address
+    if op == "REPEAT":
+        back = rng.randrange(1, address + 1) if address and rng.random() < 0.9 else rng.randrange(1, 256)
+        return Instruction(op, (back,), delay)
     if op == "CONFIG":
         cfg = rng.choice(list(ISA["config"].values()))
         args = (cfg["field"], rng.randrange(1 << cfg["bits"]))
     else:
-        args = tuple(rng.randrange(1 << o["bits"]) for o in spec["operands"])
+        args = tuple(rng.randrange(o.get("min", 0), 1 << o["bits"]) for o in spec["operands"])
     side = None
     if spec.get("side_effect") and rng.random() < 0.5:
         side = (rng.choice((1, 2, 3)) if op == "SHIFT_OUT" else rng.randrange(4), rng.randrange(2))
@@ -239,7 +277,7 @@ def random_instruction(rng, n_words):
 
 def random_program(rng):
     n = rng.randrange(2, 12)
-    return [encode(random_instruction(rng, n), ISA) for _ in range(n)]
+    return [encode(random_instruction(rng, n, address), ISA) for address in range(n)]
 
 
 def outside_world(rng, cpu, tx_max=6):
@@ -268,8 +306,11 @@ def test_random_program_under_invariants(seed):
 
 
 def test_random_walk_reaches_every_kind_of_cycle():
-    """The sweep is only worth something if the programs actually stall, hold and halt."""
+    """The sweep is only worth something if the programs actually stall, hold
+    and halt, and if REPEATs go back and fall through, both, from an rc the
+    loop set and from a fresh one."""
     kinds, halted, ops = set(), 0, set()
+    back, through = 0, 0
     for seed in range(300):
         rng = random.Random(seed)
         program = random_program(rng)
@@ -280,11 +321,16 @@ def test_random_walk_reaches_every_kind_of_cycle():
                 halted += 1
                 break
             outside_world(rng, cpu)
-            kinds.add((decode(program[cpu.pc], ISA).op, checked_step(cpu)))
+            op, pc = decode(program[cpu.pc], ISA).op, cpu.pc
+            kinds.add((op, checked_step(cpu)))
+            if op == "REPEAT":
+                back += cpu.pc != pc + 1
+                through += cpu.pc == pc + 1
     assert ops == set(OPS)
     assert {k for _, k in kinds} == {"stall", "issue", "hold"}
     assert {op for op, k in kinds if k == "stall"} == {"PULL", "PUSH", "WAIT"}
-    assert {op for op, k in kinds if k == "hold"} == set(OPS)
+    assert {op for op, k in kinds if k == "hold"} == set(OPS) - {"REPEAT"}, "REPEAT holds one cycle, never more"
+    assert back > 100 and through > 30, f"REPEATs going back {back}, falling through {through}"
     assert 50 < halted < 300
 
 
@@ -293,7 +339,7 @@ def test_reset_state():
         cpu = CPU([0x0000], gpio=gpio, gpio_in=gpio_in)
         assert snapshot(cpu) == {
             "pc": 0, "gpio": [gpio] * 4, "open_drain": [0, 0, 0, 0], "shift_reg": 0, "in_shift_reg": 0, "shift_dir": 0,
-            "tx_fifo": [], "rx_fifo": [], "counter": 0, "halted": False,
+            "tx_fifo": [], "rx_fifo": [], "counter": 0, "rc": 0, "halted": False,
         }
         assert cpu.gpio_oe == [1, 1, 1, 1], "push-pull is the reset: every pin driven"
         assert (cpu.gpio_in, cpu.cycle, cpu.stalled, cpu.trace) == ([gpio_in] * 4, 0, False, [])
@@ -322,7 +368,7 @@ def state(cpu):
     return {k: v for k, v in snapshot(cpu).items() if k != "counter"}
 
 
-BASE = sorted(w for w, i in VALID.items() if i.delay == 0)
+BASE = sorted(w for w, i in VALID.items() if i.delay == 0 and i.op != "REPEAT")  # REPEAT's bits 12:8 are no delay: below
 
 
 @pytest.mark.parametrize("word", BASE, ids=lambda w: to_asm(VALID[w]).replace(" ", "").replace(",", "_"))
@@ -348,6 +394,25 @@ def test_a_delay_only_holds_the_state_the_first_cycle_produced(word):
                        {k: v for k, v in held.items() if k not in ("pc", "halted")}
             assert state(slow) == state(quick)
             assert slow.trace == [quick.trace[0]] * (delay + 1)
+
+
+NO_LOOP = tuple(op for op in OPS if op not in ("JMP", "REPEAT"))
+
+
+@pytest.mark.parametrize("seed", range(100))
+def test_a_repeat_is_its_body_count_times_over_with_a_cycle_between(seed):
+    """REPEAT's clause: `body; REPEAT n, body` is the body n times with a NOP
+    after each, cycle for cycle under a random outside world, for a body of
+    1..6 random words of any kind but JMP and REPEAT, a SKIP anywhere but
+    last, and any count 1..32; then a word after the loop."""
+    rng = random.Random(seed)
+    n = rng.randrange(1, 7)
+    body = [random_instruction(rng, 0, ops=NO_LOOP) for _ in range(n)]
+    while body[-1].op == "SKIP":
+        body[-1] = random_instruction(rng, 0, ops=NO_LOOP)
+    words = [encode(i, ISA) for i in body] + [encode(Instruction("REPEAT", (n,), rng.randrange(DELAY_MAX + 1)), ISA)]
+    words.append(encode(Instruction("SET", (rng.randrange(4), rng.randrange(2))), ISA))
+    lockstep(CPU(words), CPU(unroll(words)), seed, cycles=2000, feed=0.2)
 
 
 WITH_SIDE = sorted(w for w, i in VALID.items() if i.delay == 0 and i.side is not None) + \
@@ -535,8 +600,8 @@ def test_shift_out_and_shift_in_never_see_each_others_register():
         cpu.shift_dir = rng.randrange(2)
         while not cpu.halted:
             op = decode(cpu.program[cpu.pc], ISA).op
-            if op == "JMP":
-                break
+            if op in ("JMP", "REPEAT"):
+                break  # the two words that go backward: the walk is one pass over the program
             before = snapshot(cpu)
             cpu.gpio_in = [rng.randrange(2) for _ in cpu.gpio_in]
             if cpu.rx_fifo:
@@ -550,7 +615,7 @@ def test_shift_out_and_shift_in_never_see_each_others_register():
                 assert cpu.shift_reg == before["shift_reg"] >> 1
             if op == "SHIFT_OUT" and cpu.shift_dir == 1:
                 assert cpu.shift_reg == (before["shift_reg"] << 1) & 0xFF
-            if op in ("SET", "NOP", "CONFIG", "JMP", "WAIT", "SKIP"):
+            if op in ("SET", "NOP", "CONFIG", "JMP", "WAIT", "SKIP", "REPEAT"):
                 assert (cpu.shift_reg, cpu.in_shift_reg) == (before["shift_reg"], before["in_shift_reg"])
 
 

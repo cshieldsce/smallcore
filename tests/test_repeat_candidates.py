@@ -507,6 +507,6 @@ def test_repeat_has_no_side_effect_bits_to_reserve():
     """Opcode 3, count 5, back 8: sixteen. Nothing left for a side effect,
     nothing to declare reserved; a side effect written on a REPEAT is refused."""
     spec = A_.isa()["instructions"]["REPEAT"]
-    assert not spec.get("side_effect") and spec["operands"] == [{"name": "back", "lsb": 0, "bits": 8}]
+    assert not spec.get("side_effect") and spec["operands"] == load_isa()["instructions"]["REPEAT"]["operands"]
     with pytest.raises(SyntaxError):
         a_program("bit:    SET 0, 0\n        REPEAT 2, bit, 1, 0")

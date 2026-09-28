@@ -7,7 +7,8 @@
 #    opcode  |     delay    |  side   |  own
 #
 # delay: `[n]` after the operands holds for n extra cycles, `SET 0, 1 [7]`
-#        takes 8. Every instruction takes 1 + delay cycles, after any stall.
+#        takes 8. Every instruction takes 1 + delay cycles, after any stall,
+#        but REPEAT: its bits 12:8 hold count - 1 and it holds one cycle.
 # side:  the GPIO side effect, `pin, value` written after the instruction's
 #        own operands: gpio[pin] <- value on the instruction's first cycle,
 #        the same edge as the operation itself. Bit 7 is the flag, 6:5 the
@@ -16,8 +17,10 @@
 #        One pin-write port serves them all.
 # own:   the instruction's own operands (`lsb` counts from operand bit 0).
 #        A `select` bit here lets two mnemonics share an opcode: SHIFT_OUT /
-#        SHIFT_IN (bit 1), PULL / PUSH (bit 0). Unused bits must be 0.
-#        Opcode 111 is free.
+#        SHIFT_IN (bit 1), PULL / PUSH (bit 0). Unused bits must be 0. An
+#        operand with a `min` refuses the values below it: REPEAT's back is
+#        1..255. Opcode 111 is REPEAT, the last one, taken 2026-09-27 when SWD
+#        measured 89 of its 103 words repeating an earlier one.
 #
 # shift_dir picks which end of both shift registers is the wire: 0 = bit 0,
 # LSB first (reset), 1 = bit 7, MSB first. SHIFT_OUT sends that end and
@@ -135,6 +138,25 @@ instructions:
     description: pc <- target after the delay. No side effect, the target takes the whole operand.
     operands:
       - {name: target, lsb: 0, bits: 8}
+
+  REPEAT:
+    opcode: 0b111
+    description: >
+      `REPEAT count, label`: pc <- pc - back until the body, the words from
+      the label to here, has run count times, 1..32. Bits 12:8 hold count - 1,
+      so the word takes no `[n]` and holds one cycle. back, 1..255, is the
+      label's distance back, the assembler's to write. The counter rc, five
+      bits, is the runs still to go, 0 between loops; it changes on the
+      REPEAT's cycle and at no other time: rc 0 loads count - 1, any other rc
+      loses one, and pc goes back while the result is not 0, else on. A body
+      word's stall or delay, a SKIP, a JMP leave rc alone; reset and restart
+      clear it. No side effect: no bits are left for one. The assembler keeps
+      a body plain: no REPEAT inside it, no JMP out of it, no SKIP as its last
+      word, nothing jumping or skipping into it past its label; the label is
+      an ordinary entry from outside, rc 0 since the loop before it finished.
+      A back past word 0 wraps the nine-bit pc past the end: halted.
+    operands:
+      - {name: back, lsb: 0, bits: 8, min: 1}
 
   CONFIG:
     opcode: 0b100

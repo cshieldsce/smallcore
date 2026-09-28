@@ -394,7 +394,7 @@ def test_decode_rejects_bad_words(isa):
     with pytest.raises(ValueError):
         decode(0xC010, isa)  # SKIP with the side value set but no side flag
     with pytest.raises(ValueError):
-        decode(0xE000, isa)  # opcode 0b111 unassigned
+        decode(0xE000, isa)  # REPEAT with back 0: a REPEAT cannot reach itself, back is 1..255
 
 
 # SHIFT_IN: gpio_in[pin] -> input shift register, obeying shift_dir.

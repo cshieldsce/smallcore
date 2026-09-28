@@ -7,7 +7,12 @@ function with how many of their cases failed.
 The failures a candidate is allowed are the tests that pin the free opcode or
 the spare bit it uses and the adversarial sweep's model of a word; any other
 failure is a program it disturbed. The counts differ by candidate because the
-sweep enumerates the ISA's words: more words, more cases."""
+sweep enumerates the ISA's words: more words, more cases.
+
+Since REPEAT was adopted (2026-09-27) the suite carries REPEAT's own contract,
+which every candidate's ISA lacks by design, so the numbers in
+docs/repeat-candidates.md are those of the suite as it stood at commit
+ae8fe2c, the last before adoption."""
 
 import re
 import subprocess

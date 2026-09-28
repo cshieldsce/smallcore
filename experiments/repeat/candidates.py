@@ -21,17 +21,23 @@ baseline.
 
 `Candidate` is cpu.CPU's step word for word with hooks for the new words, so
 the existing suite run against it (`suite.py`) checks the copy before the
-extensions. `restart()` is what the chip's restart does to the core: every
-register back to reset, the FIFOs kept, so a candidate's state has to go too.
+extensions. The chip's restart, every register back to reset with the FIFOs
+kept, is cpu.CPU.restart(); a candidate's own state goes with the rest.
+
+A was adopted on 2026-09-27: REPEAT is isa.yaml's opcode 111, the counter
+cpu.py's `rc`, the rules the assembler's. The candidates here start from the
+ISA as it stood for the comparison, opcode 111 free, so the comparison runs as
+it ran; A's word is the adopted one, spec for spec, and its assembler is the
+assembler.
 """
 
 import copy
-import re
 from pathlib import Path
 
 from cpu import CPU, Instruction, cycles, decode, load_isa
 
 HERE = Path(__file__).resolve().parent
+FREE = 0b111  # the opcode isa.yaml left free until REPEAT took it
 
 
 class Candidate(CPU):
@@ -45,8 +51,10 @@ class Candidate(CPU):
 
     @classmethod
     def isa(cls):
-        if cls._isa is None:
+        if cls.__dict__.get("_isa") is None:  # one cache per class, not the parent's
             isa = copy.deepcopy(load_isa())
+            for name in [n for n, spec in isa["instructions"].items() if spec["opcode"] == FREE]:
+                del isa["instructions"][name]  # the ISA as it stood for the comparison: 111 free
             for name, select in cls.SELECTS.items():
                 isa["instructions"][name]["select"] = select
             isa["instructions"].update(copy.deepcopy(cls.NEW))
@@ -63,14 +71,6 @@ class Candidate(CPU):
     def state(self):
         """The candidate's own registers, for a test to watch."""
         return ()
-
-    def restart(self, program=None):
-        """The chip's restart: the core back to reset, the FIFOs, the pins the
-        outside world drives, the cycle count and the trace kept. With a
-        `program`, a slot change: the same, under the new program."""
-        keep = self.tx_fifo, self.rx_fifo, self.gpio_in, self.cycle, self.trace
-        self.__init__(self.program if program is None else program, gpio_in=0, rx_depth=self.rx_depth, isa=self.isa)
-        self.tx_fifo, self.rx_fifo, self.gpio_in, self.cycle, self.trace = keep
 
     # -- the step, as cpu.CPU.step, with the hooks ------------------------------------
 
@@ -157,9 +157,6 @@ class Candidate(CPU):
         self.finish()
 
 
-FREE = 0b111  # the opcode isa.yaml leaves free
-
-
 class A(Candidate):
     """REPEAT count, label: at the end of a body, back to `label` until the
     body has run `count` times, 1..32, `count - 1` in bits 12:8 (the delay
@@ -177,17 +174,12 @@ class A(Candidate):
     from the label to the REPEAT; the body's last word is not a SKIP (it
     would step over the REPEAT); nothing outside jumps or skips into a body
     past its label. Outside the rules the hardware still does the one thing
-    above with whatever rc holds."""
+    above with whatever rc holds.
 
-    NEW = {
-        "REPEAT": {
-            "opcode": FREE,
-            "description": "pc <- pc - back while the body has not run count times; bits 12:8 hold count - 1, one cycle, no side effect.",
-            "operands": [{"name": "back", "lsb": 0, "bits": 8}],
-        }
-    }
-    COUNT_MAX = 32
-    BACK_MAX = 255
+    Adopted: this is isa.yaml's REPEAT, taken from there spec for spec; the
+    rules moved into cpu.check_bodies()."""
+
+    NEW = {"REPEAT": copy.deepcopy(load_isa()["instructions"]["REPEAT"])}
 
     def reset_state(self):
         self.rc = 0
@@ -391,68 +383,13 @@ class D(Candidate):
 
 CANDIDATES = {"A": A, "B": B, "C": C, "D": D}
 
-REPEAT_RE = re.compile(r"^(\s*(?:\w+:)?\s*)REPEAT\s+(\w+)\s*,\s*(\w+)\s*$")
-
 
 def assemble(source, candidate):
-    """cpu.assemble with the candidate's ISA. For A, `REPEAT count, label` is
-    written the natural way round and put into the word as `count - 1` in the
-    delay bits and the distance back to the label in the operand byte; the
-    rules in A's docstring are checked here and a program that breaks one is
-    refused with a SyntaxError, as any other bad program is."""
-    from cpu import LINE_RE, assemble as base
+    """cpu.assemble with the candidate's ISA. `REPEAT count, label` is the
+    assembler's own syntax since A was adopted, its rules included."""
+    from cpu import assemble as base
 
-    if candidate is not A:
-        return base(source, candidate.isa())
-    labels, addresses, address = {}, {}, 0  # label -> address; line number -> address of the word on it
-    lines = source.splitlines()
-    for lineno, line in enumerate(lines, start=1):
-        code = line.partition("#")[0].strip()
-        m = LINE_RE.match(code)
-        if not m:
-            raise SyntaxError(f"line {lineno}: can't parse {code!r}")
-        if m["label"]:
-            labels[m["label"]] = address
-        if m["op"]:
-            addresses[lineno] = address
-            address += 1
-    bodies = []  # (start, end) per REPEAT at `end`
-    out = []
-    for lineno, line in enumerate(lines, start=1):
-        code, hash_, comment = line.partition("#")
-        m = REPEAT_RE.match(code)
-        if m:
-            count, target = int(m[2], 0), m[3]
-            if not 1 <= count <= A.COUNT_MAX:
-                raise SyntaxError(f"line {lineno}: REPEAT count {count} outside 1..{A.COUNT_MAX}")
-            if target not in labels:
-                raise SyntaxError(f"line {lineno}: unknown label {target!r}")
-            back = addresses[lineno] - labels[target]
-            if not 1 <= back <= A.BACK_MAX:
-                raise SyntaxError(f"line {lineno}: REPEAT reaches {back} words back, not 1..{A.BACK_MAX}")
-            code = f"{m[1]}REPEAT {back} [{count - 1}]"
-            bodies.append((addresses[lineno] - back, addresses[lineno]))
-        out.append(code + hash_ + comment)
-    program = base("\n".join(out), A.isa())
-    isa = A.isa()
-    ops = [decode(w, isa) for w in program]
-    for start, end in bodies:
-        for other_start, other_end in bodies:
-            if (other_start, other_end) != (start, end) and start <= other_end <= end:
-                raise SyntaxError(f"REPEAT at {end}: a REPEAT at {other_end} inside its body, or bodies overlapping")
-        if ops[end - 1].op == "SKIP":
-            raise SyntaxError(f"REPEAT at {end}: the body's last word is a SKIP, which would step over the REPEAT")
-        for address, instr in enumerate(ops):
-            inside = start <= address < end
-            if instr.op == "JMP":
-                target = instr.args[0]
-                if inside and not start <= target <= end:
-                    raise SyntaxError(f"REPEAT at {end}: the JMP at {address} leaves the body")
-                if not inside and start < target <= end:
-                    raise SyntaxError(f"REPEAT at {end}: the JMP at {address} lands inside the body past its label")
-            if instr.op == "SKIP" and not inside and start < address + 2 <= end:
-                raise SyntaxError(f"REPEAT at {end}: the SKIP at {address} steps into the body past its label")
-    return program
+    return base(source, candidate.isa())
 
 
 def load_program(name, candidate):
