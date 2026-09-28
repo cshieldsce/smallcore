@@ -236,15 +236,19 @@ def test_restart_in_the_middle_of_a_loop_starts_clean(tag, kind):
 @pytest.mark.parametrize("tag", sorted(CANDIDATES), ids=lambda t: f"candidate {t}")
 def test_every_existing_program_means_the_same_under_the_candidate(tag):
     """A candidate adds words; it changes none. Every program in programs/
-    assembles to the same words under the candidate's ISA and every word
-    decodes to the same instruction. The candidate's model, run as the
-    model, passes the existing suite except the tests that pin the free
-    opcode or the spare bit free: experiments/repeat/suite.py."""
+    from before the decision assembles to the same words under the
+    candidate's ISA and every word decodes to the same instruction. A program
+    written since (can_tx.asm on) uses REPEAT, the opcode the candidates
+    were competing for, and is not their business. The candidate's model,
+    run as the model, passes the existing suite except the tests that pin
+    the free opcode or the spare bit free: experiments/repeat/suite.py."""
     cls = CANDIDATES[tag]
     isa, base = cls.isa(), load_isa()
     for path in sorted(PROGRAMS.glob("*.asm")):
         source = path.read_text()
         words = assemble(source, base)
+        if any(decode(word, base).op == "REPEAT" for word in words):
+            continue
         assert assemble_candidate(source, cls) == words, path.name
         for word in words:
             assert decode(word, isa) == decode(word, base), f"{path.name}: {word:#06x}"
