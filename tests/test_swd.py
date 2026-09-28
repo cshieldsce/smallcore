@@ -204,11 +204,12 @@ class Wire:
     working host ever has: it fails here. One entry per cycle: the wire, who
     owned it, what the target drove, pc, in_shift_reg, whether the core was
     stalled and what the RX FIFO held, so a test can stop the host, look, and
-    go on."""
+    go on. A `cpu` given ready-made, with its own program and FIFO, runs in
+    place of the model's: the repeat candidates' do."""
 
-    def __init__(self, program, tx_data, target=None, drain=True, host=None):
+    def __init__(self, program, tx_data, target=None, drain=True, host=None, cpu=None):
         tx_data = [tx_data] if isinstance(tx_data, int) else list(tx_data)
-        self.cpu = CPU(load_program(program), gpio_in=1, tx_data=tx_data)
+        self.cpu = cpu if cpu is not None else CPU(load_program(program), gpio_in=1, tx_data=tx_data)
         self.target = target or Target()
         self.drain, self.host = drain, host
         self.swdio, self.owned, self.driven, self.received = [], [], [], []
@@ -986,17 +987,19 @@ class SlowHost:
     while the 4-deep TX FIFO has room. The request first and nothing else,
     because a WAIT would make the retry PULL a data byte as the request; on a
     WAIT the request again, `delay` cycles later; on an OK the `data` and its
-    parity, if there is data to write. Only the first byte of a transaction
+    parity, if there is data to write; with `late`, the first data byte on
+    time and the rest that many cycles after the OK. Only the first byte of a transaction
     is an ACK: after an OK on a read the next five are data, and a data byte
     0x53 has WAIT's 010 in bits 7:5. Counts its pushes."""
 
-    def __init__(self, request, delay=0, data=None, parity=None, depth=4):
-        self.request, self.delay, self.depth = request, delay, depth
+    def __init__(self, request, delay=0, data=None, parity=None, depth=4, late=0):
+        self.request, self.delay, self.depth, self.late = request, delay, depth, late
         self.bytes = [] if data is None else write_bytes(data, parity)
         self.seen = 0
         self.ack_next = True  # the next byte from the core is an ACK
         self.queue = []
         self.due = None  # the cycle to queue the request again
+        self.data_due = None  # the cycle to queue the data, `late` cycles after the OK
         self.pushes = 0
 
     def __call__(self, cpu, received):
@@ -1009,10 +1012,15 @@ class SlowHost:
                 else:
                     self.ack_next = False
                     if ack == OK:
-                        self.queue.extend(self.bytes)
+                        self.data_due = cpu.cycle + self.late
+                        if self.late and self.bytes:
+                            self.queue.append(self.bytes[0])  # the first data byte on time, the rest late
         if self.due is not None and cpu.cycle >= self.due:
             self.queue.append(self.request)
             self.due = None
+        if self.data_due is not None and cpu.cycle >= self.data_due:
+            self.queue.extend(self.bytes[1:] if self.late else self.bytes)
+            self.data_due = None
         if self.queue and len(cpu.tx_fifo) < self.depth:
             cpu.tx_fifo.append(self.queue.pop(0))
             self.pushes += 1
