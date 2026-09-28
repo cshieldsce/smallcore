@@ -218,8 +218,9 @@ async def control_restarts_the_core_and_keeps_the_fifos(dut):
     """CONTROL mid-frame is an abort and restart: the core goes to pc 0 with
     its pads at reset levels, the TX FIFO keeps the byte queued behind the one
     the frame took, and the program runs again from the top on that byte.
-    CONTROL while stalled on PULL restarts just the same. An unused slot halts
-    the core like slot 0."""
+    CONTROL while stalled on PULL restarts just the same. Slot 0 halts the
+    core, as an unused slot did while there were any: 12..15 were taken
+    2026-09-28."""
     await begin(dut)
     await host_write(dut, TX_DATA, 0x96)
     await host_write(dut, TX_DATA, 0x53)
@@ -252,8 +253,8 @@ async def control_restarts_the_core_and_keeps_the_fifos(dut):
     assert (await host_read(dut, STATUS)) & HALTED == 0
     assert int(dut.top_i.core_i.pc.value) == 2  # config, clock low, stalled on the PULL
 
-    await host_write(dut, CONTROL, 13)
-    assert await host_read(dut, CONTROL) == 13
+    await host_write(dut, CONTROL, NONE)
+    assert await host_read(dut, CONTROL) == NONE
     assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
     assert int(dut.top_i.program_words.value) == 0
 
