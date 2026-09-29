@@ -1,0 +1,165 @@
+# 6A at 25 clocks a bit: 1 Mbit/s at 25 MHz.
+# 162 words, 68 distinct.
+
+CONFIG open_drain01, 1
+CONFIG shift_dir, 1
+PULL
+ACC_LOAD
+PULL
+ACC_LOAD
+frame: SHIFT_IN 0
+PULL
+lead: SHIFT_OUT [1]
+ACC_CRC 0
+SHIFT_IN 0 [20]
+REPEAT 2, lead
+b0: SHIFT_OUT
+PULL
+ACC_CRC 0
+NOP [14]
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b0d [4]
+SKIP_NORUN 5, 0
+JMP b0r [3]
+JMP b1 [3]
+b0d: SET 0, 0 [17]
+SHIFT_IN 0 [5]
+JMP b1
+b0r: SET 0, 1 [17]
+SHIFT_IN 0 [6]
+b1: SHIFT_OUT [1]
+ACC_CRC 0
+NOP [14]
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b1d [4]
+SKIP_NORUN 5, 0
+JMP b1r [3]
+JMP b2 [3]
+b1d: SET 0, 0 [17]
+SHIFT_IN 0 [5]
+JMP b2
+b1r: SET 0, 1 [17]
+SHIFT_IN 0 [6]
+b2: SHIFT_OUT [1]
+ACC_CRC 0
+NOP [14]
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b2d [4]
+SKIP_NORUN 5, 0
+JMP b2r [3]
+JMP b3 [3]
+b2d: SET 0, 0 [17]
+SHIFT_IN 0 [5]
+JMP b3
+b2r: SET 0, 1 [17]
+SHIFT_IN 0 [6]
+b3: SHIFT_OUT [1]
+ACC_CRC 0
+NOP [14]
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b3d [4]
+SKIP_NORUN 5, 0
+JMP b3r [3]
+JMP b4 [3]
+b3d: SET 0, 0 [17]
+SHIFT_IN 0 [5]
+JMP b4
+b3r: SET 0, 1 [17]
+SHIFT_IN 0 [6]
+b4: SHIFT_OUT [1]
+ACC_CRC 0
+NOP [14]
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b4d [4]
+SKIP_NORUN 5, 0
+JMP b4r [3]
+JMP b5 [3]
+b4d: SET 0, 0 [17]
+SHIFT_IN 0 [5]
+JMP b5
+b4r: SET 0, 1 [17]
+SHIFT_IN 0 [6]
+b5: SHIFT_OUT [1]
+ACC_CRC 0
+NOP [14]
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b5d [4]
+SKIP_NORUN 5, 0
+JMP b5r [3]
+JMP b6 [3]
+b5d: SET 0, 0 [17]
+SHIFT_IN 0 [5]
+JMP b6
+b5r: SET 0, 1 [17]
+SHIFT_IN 0 [6]
+b6: SHIFT_OUT [1]
+ACC_CRC 0
+NOP [14]
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b6d [4]
+SKIP_NORUN 5, 0
+JMP b6r [3]
+JMP b7 [3]
+b6d: SET 0, 0 [17]
+SHIFT_IN 0 [5]
+JMP b7
+b6r: SET 0, 1 [17]
+SHIFT_IN 0 [6]
+b7: SHIFT_OUT [1]
+ACC_CRC 0
+NOP [14]
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b7d [4]
+SKIP_NORUN 5, 0
+JMP b7r [3]
+JMP end [2]
+b7d: SET 0, 0 [17]
+SHIFT_IN 0 [4]
+JMP end
+b7r: SET 0, 1 [17]
+SHIFT_IN 0 [5]
+end: REPEAT 3, b0
+tail: SHIFT_OUT [1]
+ACC_CRC 0
+NOP [14]
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP taild [4]
+SKIP_NORUN 5, 0
+JMP tailr [3]
+JMP crc [3]
+taild: SET 0, 0 [17]
+SHIFT_IN 0 [5]
+JMP crc
+tailr: SET 0, 1 [17]
+SHIFT_IN 0 [6]
+crc: ACC_OUT 0 [2]
+NOP [14]
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP crcd [4]
+SKIP_NORUN 5, 0
+JMP crcr [3]
+JMP crc_end [2]
+crcd: SET 0, 0 [17]
+SHIFT_IN 0 [4]
+JMP crc_end
+crcr: SET 0, 1 [17]
+SHIFT_IN 0 [5]
+crc_end: REPEAT 15, crc
+SET 0, 1 [24]
+NOP [17]
+SHIFT_IN 0 [6]
+PUSH [24]
+gap: NOP [23]
+REPEAT 10, gap
+SKIP 0, 0
+JMP frame

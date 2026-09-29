@@ -1,0 +1,38 @@
+# 6C at 25 clocks a bit: 1 Mbit/s at 25 MHz.
+# 35 words, 25 distinct.
+
+CONFIG open_drain01, 1
+CONFIG shift_dir, 1
+PULL
+ACC_LOAD
+PULL
+ACC_LOAD
+listen: SHIFT_IN 0
+WAIT 0, 0 [17]
+c0: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP c0s [20]
+SKIP_NORUN 5, 0
+JMP c0s [19]
+JMP c0e [18]
+c0s: SHIFT_IN 0 [23]
+c0e: REPEAT 32, c0
+c1: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP c1s [20]
+SKIP_NORUN 5, 0
+JMP c1s [19]
+JMP c1e [18]
+c1s: SHIFT_IN 0 [23]
+c1e: REPEAT 10, c1
+SHIFT_IN 0 [1]
+SET 0, 0 [24]
+SET 0, 1 [24]
+gap: NOP [23]
+REPEAT 10, gap
+ACC_PUSH
+ACC_PUSH

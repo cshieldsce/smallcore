@@ -1,0 +1,276 @@
+# can_rx_dlc with remote frames (a tree cell on RTR, a 21-bit path to
+# the fixed form): 272 lines, past 256 words. The failed attempt, kept.
+# REFUSED by the assembler (line 165: JMP target=265 outside 0..255): kept as the measurement.
+
+CONFIG open_drain01, 1
+CONFIG shift_dir, 1
+PULL
+ACC_LOAD
+PULL
+ACC_LOAD
+listen: SHIFT_IN 0
+WAIT 0, 0 [4]
+h: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP hs [3]
+SKIP_NORUN 5, 0
+JMP hs [2]
+JMP he [1]
+hs: SHIFT_IN 0 [6]
+he: REPEAT 12, h
+rtr: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP rtrr [3]
+SKIP_NORUN 5, 0
+JMP rtrd [2]
+SKIP 0, 1
+JMP ir [1]
+JMP rem [1]
+rtrr: SHIFT_IN 0 [6]
+JMP rem
+rtrd: SHIFT_IN 0 [6]
+JMP ir
+ir: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP irs [3]
+SKIP_NORUN 5, 0
+JMP irs [2]
+JMP ire [1]
+irs: SHIFT_IN 0 [6]
+ire: REPEAT 2, ir
+t3: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP t3r [3]
+SKIP_NORUN 5, 0
+JMP t3d [2]
+SKIP 0, 1
+JMP t2 [1]
+JMP big [1]
+t3r: SHIFT_IN 0 [6]
+JMP big
+t3d: SHIFT_IN 0 [6]
+JMP t2
+t2: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP t2r [3]
+SKIP_NORUN 5, 0
+JMP t2d [2]
+SKIP 0, 1
+JMP t1a [1]
+JMP t1b [1]
+t2r: SHIFT_IN 0 [6]
+JMP t1b
+t2d: SHIFT_IN 0 [6]
+JMP t1a
+t1a: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP t1ar [3]
+SKIP_NORUN 5, 0
+JMP t1ad [2]
+SKIP 0, 1
+JMP t0a [1]
+JMP t0b [1]
+t1ar: SHIFT_IN 0 [6]
+JMP t0b
+t1ad: SHIFT_IN 0 [6]
+JMP t0a
+t1b: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP t1br [3]
+SKIP_NORUN 5, 0
+JMP t1bd [2]
+SKIP 0, 1
+JMP t0c [1]
+JMP t0d [1]
+t1br: SHIFT_IN 0 [6]
+JMP t0d
+t1bd: SHIFT_IN 0 [6]
+JMP t0c
+t0a: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP t0ar [3]
+SKIP_NORUN 5, 0
+JMP t0ad [2]
+SKIP 0, 1
+JMP L0 [1]
+JMP L1 [1]
+t0ar: SHIFT_IN 0 [6]
+JMP L1
+t0ad: SHIFT_IN 0 [6]
+JMP L0
+t0b: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP t0br [3]
+SKIP_NORUN 5, 0
+JMP t0bd [2]
+SKIP 0, 1
+JMP L2 [1]
+JMP L3 [1]
+t0br: SHIFT_IN 0 [6]
+JMP L3
+t0bd: SHIFT_IN 0 [6]
+JMP L2
+t0c: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP t0cr [3]
+SKIP_NORUN 5, 0
+JMP t0cd [2]
+SKIP 0, 1
+JMP L4 [1]
+JMP L5 [1]
+t0cr: SHIFT_IN 0 [6]
+JMP L5
+t0cd: SHIFT_IN 0 [6]
+JMP L4
+t0d: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP t0dr [3]
+SKIP_NORUN 5, 0
+JMP t0dd [2]
+SKIP 0, 1
+JMP L6 [1]
+JMP L7 [1]
+t0dr: SHIFT_IN 0 [6]
+JMP L7
+t0dd: SHIFT_IN 0 [6]
+JMP L6
+rem: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP rems [3]
+SKIP_NORUN 5, 0
+JMP rems [2]
+JMP reme [1]
+rems: SHIFT_IN 0 [6]
+reme: REPEAT 21, rem
+JMP fix
+big: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP bigs [3]
+SKIP_NORUN 5, 0
+JMP bigs [2]
+JMP bige [1]
+bigs: SHIFT_IN 0 [6]
+bige: REPEAT 3, big
+L8: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP L8s [3]
+SKIP_NORUN 5, 0
+JMP L8s [2]
+JMP L8e [1]
+L8s: SHIFT_IN 0 [6]
+L8e: REPEAT 8, L8
+L7: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP L7s [3]
+SKIP_NORUN 5, 0
+JMP L7s [2]
+JMP L7e [1]
+L7s: SHIFT_IN 0 [6]
+L7e: REPEAT 8, L7
+L6: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP L6s [3]
+SKIP_NORUN 5, 0
+JMP L6s [2]
+JMP L6e [1]
+L6s: SHIFT_IN 0 [6]
+L6e: REPEAT 8, L6
+L5: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP L5s [3]
+SKIP_NORUN 5, 0
+JMP L5s [2]
+JMP L5e [1]
+L5s: SHIFT_IN 0 [6]
+L5e: REPEAT 8, L5
+L4: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP L4s [3]
+SKIP_NORUN 5, 0
+JMP L4s [2]
+JMP L4e [1]
+L4s: SHIFT_IN 0 [6]
+L4e: REPEAT 8, L4
+L3: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP L3s [3]
+SKIP_NORUN 5, 0
+JMP L3s [2]
+JMP L3e [1]
+L3s: SHIFT_IN 0 [6]
+L3e: REPEAT 8, L3
+L2: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP L2s [3]
+SKIP_NORUN 5, 0
+JMP L2s [2]
+JMP L2e [1]
+L2s: SHIFT_IN 0 [6]
+L2e: REPEAT 8, L2
+L1: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP L1s [3]
+SKIP_NORUN 5, 0
+JMP L1s [2]
+JMP L1e [1]
+L1s: SHIFT_IN 0 [6]
+L1e: REPEAT 8, L1
+L0: SHIFT_IN 0
+ACC_CRC 0
+PUSH
+SKIP_NORUN 5, 1
+JMP L0s [3]
+SKIP_NORUN 5, 0
+JMP L0s [2]
+JMP L0e [1]
+L0s: SHIFT_IN 0 [6]
+L0e: REPEAT 15, L0
+fix: SHIFT_IN 0 [1]
+SET 0, 0 [7]
+SET 0, 1 [7]
+gap: NOP [6]
+REPEAT 10, gap
+ACC_PUSH
+ACC_PUSH

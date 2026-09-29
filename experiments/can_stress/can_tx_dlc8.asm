@@ -1,0 +1,155 @@
+# 6A for DLC 8: the one word that differs from DLC 1 is the body's REPEAT count.
+# 152 words, 64 distinct.
+
+CONFIG open_drain01, 1
+CONFIG shift_dir, 1
+PULL
+ACC_LOAD
+PULL
+ACC_LOAD
+frame: SHIFT_IN 0
+PULL
+lead: SHIFT_OUT [1]
+ACC_CRC 0
+SHIFT_IN 0 [3]
+REPEAT 2, lead
+b0: SHIFT_OUT
+PULL
+ACC_CRC 0
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b0d [2]
+SKIP_NORUN 5, 0
+JMP b0r [1]
+JMP b1 [1]
+b0d: SET 0, 0 [2]
+SHIFT_IN 0 [3]
+JMP b1
+b0r: SET 0, 1 [2]
+SHIFT_IN 0 [4]
+b1: SHIFT_OUT [1]
+ACC_CRC 0
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b1d [2]
+SKIP_NORUN 5, 0
+JMP b1r [1]
+JMP b2 [1]
+b1d: SET 0, 0 [2]
+SHIFT_IN 0 [3]
+JMP b2
+b1r: SET 0, 1 [2]
+SHIFT_IN 0 [4]
+b2: SHIFT_OUT [1]
+ACC_CRC 0
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b2d [2]
+SKIP_NORUN 5, 0
+JMP b2r [1]
+JMP b3 [1]
+b2d: SET 0, 0 [2]
+SHIFT_IN 0 [3]
+JMP b3
+b2r: SET 0, 1 [2]
+SHIFT_IN 0 [4]
+b3: SHIFT_OUT [1]
+ACC_CRC 0
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b3d [2]
+SKIP_NORUN 5, 0
+JMP b3r [1]
+JMP b4 [1]
+b3d: SET 0, 0 [2]
+SHIFT_IN 0 [3]
+JMP b4
+b3r: SET 0, 1 [2]
+SHIFT_IN 0 [4]
+b4: SHIFT_OUT [1]
+ACC_CRC 0
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b4d [2]
+SKIP_NORUN 5, 0
+JMP b4r [1]
+JMP b5 [1]
+b4d: SET 0, 0 [2]
+SHIFT_IN 0 [3]
+JMP b5
+b4r: SET 0, 1 [2]
+SHIFT_IN 0 [4]
+b5: SHIFT_OUT [1]
+ACC_CRC 0
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b5d [2]
+SKIP_NORUN 5, 0
+JMP b5r [1]
+JMP b6 [1]
+b5d: SET 0, 0 [2]
+SHIFT_IN 0 [3]
+JMP b6
+b5r: SET 0, 1 [2]
+SHIFT_IN 0 [4]
+b6: SHIFT_OUT [1]
+ACC_CRC 0
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b6d [2]
+SKIP_NORUN 5, 0
+JMP b6r [1]
+JMP b7 [1]
+b6d: SET 0, 0 [2]
+SHIFT_IN 0 [3]
+JMP b7
+b6r: SET 0, 1 [2]
+SHIFT_IN 0 [4]
+b7: SHIFT_OUT [1]
+ACC_CRC 0
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP b7d [2]
+SKIP_NORUN 5, 0
+JMP b7r [1]
+JMP end
+b7d: SET 0, 0 [2]
+SHIFT_IN 0 [2]
+JMP end
+b7r: SET 0, 1 [2]
+SHIFT_IN 0 [3]
+end: REPEAT 10, b0
+tail: SHIFT_OUT [1]
+ACC_CRC 0
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP taild [2]
+SKIP_NORUN 5, 0
+JMP tailr [1]
+JMP crc [1]
+taild: SET 0, 0 [2]
+SHIFT_IN 0 [3]
+JMP crc
+tailr: SET 0, 1 [2]
+SHIFT_IN 0 [4]
+crc: ACC_OUT 0 [2]
+SHIFT_IN 0
+SKIP_NORUN 5, 1
+JMP crcd [2]
+SKIP_NORUN 5, 0
+JMP crcr [1]
+JMP crc_end
+crcd: SET 0, 0 [2]
+SHIFT_IN 0 [2]
+JMP crc_end
+crcr: SET 0, 1 [2]
+SHIFT_IN 0 [3]
+crc_end: REPEAT 15, crc
+SET 0, 1 [7]
+NOP [2]
+SHIFT_IN 0 [4]
+PUSH [7]
+gap: NOP [6]
+REPEAT 10, gap
+SKIP 0, 0
+JMP frame
