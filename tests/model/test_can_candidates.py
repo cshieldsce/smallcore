@@ -45,7 +45,7 @@ from cpu import CPU, assemble, decode, encode, load_isa, load_program  # noqa: E
 from test_can import (  # noqa: E402
     ARB, ARB_SAMPLE, BIT, CAN_TX, HEADER, HIGHER, ID_BITS, IDENT, IDENTS, LOSSES, NAMES, PROGRAMS, RXD, STUFF, STUFF_BIT,
     STUFF_IDENTS, STUFF_SAMPLE, TX, Bus, Competitor, Glitch, Node, arb, bits_to_int, cells, frame_bits, header_bits, header_bytes,
-    pairs, run, stuffed,
+    before_the_accumulator, pairs, run, stuffed,
 )
 from test_swd import DATA, DP_READ, OK, READ, SlowHost, Target, Wire, read_bytes  # noqa: E402
 
@@ -380,9 +380,10 @@ def test_stuffing_by_the_numbers(form):
 def test_every_existing_program_means_the_same_under_the_candidate(name):
     """A candidate adds words; it changes none. Every program in programs/,
     REPEAT's included, assembles to the same words under the candidate's
-    ISA and every word decodes to the same instruction."""
+    ISA and every word decodes to the same instruction. The round ran
+    before the accumulator: its programs are not the round's."""
     cls = CANDIDATES[name]
-    for path in sorted(PROGRAMS.rglob("*.asm")):
+    for path in before_the_accumulator():
         source = path.read_text()
         words = assemble(source, BASE)
         assert assemble_candidate(source, cls) == words, path.name

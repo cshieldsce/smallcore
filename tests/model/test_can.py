@@ -54,6 +54,13 @@ import pytest
 from cpu import CPU, Instruction, decode, encode, load_isa, load_program
 
 PROGRAMS = Path(__file__).resolve().parent.parent.parent / "programs"
+ACC_OPS = ("ACC_IN", "ACC_CRC", "ACC_OUT", "ACC_PUSH", "ACC_LOAD")
+
+
+def before_the_accumulator():
+    """programs/*.asm with no accumulator word, by the words themselves: the ones an ISA from before it can say."""
+    isa = load_isa()
+    return [path for path in sorted(PROGRAMS.rglob("*.asm")) if not any(decode(word, isa).op in ACC_OPS for word in load_program(path, isa))]
 TX = PROGRAMS / "can" / "can_tx.asm"
 ARB = PROGRAMS / "can" / "can_tx_arb.asm"
 RXD = 1  # gpio_in pin can_tx_arb.asm listens to the bus on, behind a transceiver; pin 0 is then TXD

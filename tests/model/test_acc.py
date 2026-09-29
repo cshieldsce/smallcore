@@ -35,14 +35,13 @@ from pathlib import Path
 import pytest
 
 from cpu import CPU, assemble, decode, load_isa, load_program
-from test_can import BIT, IDENT, PROGRAMS, bits_to_int, frame_bits  # noqa: E402
+from test_can import ACC_OPS, BIT, IDENT, PROGRAMS, before_the_accumulator, bits_to_int, frame_bits  # noqa: E402
 from test_can_rx import AT, frame_on_the_bus, run_rx  # noqa: E402
 from test_crc import CRC4, VECTORS, bits_of, crc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 EXPERIMENTS = ROOT / "experiments"
 ISA = load_isa()
-ACC_OPS = ("ACC_IN", "ACC_CRC", "ACC_OUT", "ACC_PUSH", "ACC_LOAD")
 POLY15 = 0x4599
 
 
@@ -100,7 +99,7 @@ def test_the_accumulator_takes_448_rejected_words_and_changes_no_other():
 
 def test_every_program_assembles_to_the_same_words():
     old = old_isa()
-    for path in sorted(PROGRAMS.rglob("*.asm")) + [CRC4]:
+    for path in before_the_accumulator() + [CRC4]:
         assert load_program(path, ISA) == load_program(path, old), path.name
 
 

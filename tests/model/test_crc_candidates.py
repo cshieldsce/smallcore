@@ -43,7 +43,7 @@ CANDIDATES, Variant = candidates.CANDIDATES, candidates.Variant
 assemble_candidate, load_candidate, listing = candidates.assemble, candidates.load_program, candidates.listing
 
 from cpu import CPU, LINE_RE, Instruction, decode, encode, load_isa, load_program  # noqa: E402
-from test_can import BIT, GAP, IDENT, PROGRAMS, Glitch, bits_to_int, frame_bits  # noqa: E402
+from test_can import BIT, GAP, IDENT, PROGRAMS, Glitch, before_the_accumulator, bits_to_int, frame_bits  # noqa: E402
 from test_can_rx import AT, RX_SAMPLE, frame_on_the_bus, run_rx, stuff_positions  # noqa: E402
 from test_crc import CRC4, VECTORS, bits_of, crc  # noqa: E402
 
@@ -125,9 +125,9 @@ def test_each_candidate_takes_rejected_words_only(tag):
 
 
 def test_every_program_assembles_to_the_same_words(tag):
-    """programs/*.asm and the CRC-4 program, word for word, on the candidate's assembler."""
+    """programs/*.asm and the CRC-4 program, word for word, on the candidate's assembler; the accumulator's came after the round."""
     cls = CANDIDATES[tag]
-    for path in sorted(PROGRAMS.rglob("*.asm")) + [CRC4]:
+    for path in before_the_accumulator() + [CRC4]:
         assert assemble_candidate(path.read_text(), cls) == load_program(path, ISA), path.name
 
 

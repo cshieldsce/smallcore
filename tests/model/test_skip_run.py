@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from cpu import CPU, Instruction, assemble, decode, encode, load_isa, load_program
-from test_can import BIT, IDENT, STUFF_IDENTS, Bus, Node, bits_to_int, cells, header_bits, header_bytes, stuffed  # noqa: E402
+from test_can import BIT, IDENT, STUFF_IDENTS, Bus, Node, before_the_accumulator, bits_to_int, cells, header_bits, header_bytes, stuffed  # noqa: E402
 from test_can_rx import AT, BITS_BIT, RX_SAMPLE, frame_bits, frame_on_the_bus, run_rx, stream_from_pins, stuff_positions  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -102,9 +102,9 @@ def test_the_run_tests_take_1024_rejected_words_and_change_no_other():
 
 
 def test_every_program_assembles_to_the_words_it_did():
-    """The programs in programs/ under the ISA as it was and as it is: the same words."""
+    """The programs in programs/ under the ISA as it was and as it is: the same words; the accumulator's came after."""
     before = old_isa()
-    for path in sorted((ROOT / "programs").rglob("*.asm")):
+    for path in before_the_accumulator():
         assert load_program(path, ISA) == load_program(path, before), path.name
 
 
