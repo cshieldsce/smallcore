@@ -3024,3 +3024,57 @@ async def can_receiver_with_the_crc_in_the_core_at_the_pins(dut):
         assert received == model_received and len(received) == 44
         assert [b & 1 for b in received[:42]] == stream, "the destuffed stream, a bit a byte"
         assert (received[42:] == [0, 0]) == crc_ok and tx.acked, "the residue says; the ACK does not"
+
+
+ETHERNET = EXPERIMENTS / "ethernet"
+
+
+def eth_bits(data):
+    return [(byte >> i) & 1 for byte in data for i in range(8)]
+
+
+def eth_host_bytes(data):
+    """The host's half-bit bytes for eth_tx_40.asm: the preamble, the SFD and
+    `data` Manchester-encoded (a 0 high then low, a 1 low then high), eight
+    half-bits a byte LSB first, then the end marker 0xFF."""
+    halves = [h for b in eth_bits([0x55] * 7 + [0xD5] + data) for h in (1 - b, b)]
+    return [sum(h << i for i, h in enumerate(halves[k:k + 8])) for k in range(0, len(halves), 8)] + [0xFF]
+
+
+@cocotb.test()
+async def ethernet_tx_40_frame_at_the_pins(dut):
+    """experiments/ethernet/eth_tx_40.asm on top.v: a 20-byte frame with the
+    FCS the host computed, the host pushing its half-bit bytes one a clock
+    while tx_full is low. At the pins, from TX_EN's rise: TD is every half-bit
+    of the preamble, SFD and frame for exactly 2 clocks, then TP_IDL, TD
+    high 12 clocks, then TX_EN falls; the status byte says sent (bit 7
+    clear). The pads read back (TD on gpio_in 0), RD (pad 1, let go) quiet."""
+    import zlib
+
+    body = [0xFF] * 6 + [0x02, 0x00, 0x5E, 0x10, 0x00, 0x01, 0x88, 0xB5, 0x12, 0x34]
+    data = body + list(zlib.crc32(bytes(body)).to_bytes(4, "little"))
+    program = load_program(ETHERNET / "eth_tx_40.asm")
+    dut.imem_word.value = 0
+    drive_host(dut, program_words=len(program))
+    start_clock(dut)
+    await reset(dut)
+    Imem(dut, program)
+    received, full = [], []
+    host = cocotb.start_soon(can_frame_host(dut, eth_host_bytes(data), received, full))
+    td, en = [], []
+    for _ in range(1200):
+        await FallingEdge(dut.clk)
+        dut.gpio_in.value = int(dut.gpio_out.value) & int(dut.gpio_oe.value)
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        out = int(dut.gpio_out.value)
+        td.append(out & 1)
+        en.append((out >> 2) & 1)
+    host.cancel()
+    start = next(k for k in range(1, len(en)) if en[k] and not en[k - 1])
+    halves = [h for b in eth_bits([0x55] * 7 + [0xD5] + data) for h in (1 - b, b)]
+    n = 2 * len(halves)
+    assert td[start:start + n] == [h for h in halves for _ in range(2)], "every half-bit, 2 clocks"
+    assert td[start + n:start + n + 12] == [1] * 12, "TP_IDL"
+    assert en[start:start + n + 12] == [1] * (n + 12) and en[start + n + 12] == 0, "TX_EN low after TP_IDL"
+    assert len(received) == 1 and received[0] >> 7 == 0, "status: sent"
