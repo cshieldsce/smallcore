@@ -224,6 +224,7 @@ NAMES = (
     + [f"eth_txr_{m}" for m in gen.TXR_CLOCKS]
     + [f"eth_rx_fixed_{m}" for m in gen.RX_CLOCKS]
     + [f"eth_rx_track_{m}" for m in gen.TRACK_CLOCKS]
+    + ["eth_rx_track_80_a5"]
 )
 
 
@@ -234,6 +235,8 @@ def generated(name):
         return gen.tx_preamble(write=False)
     if name == "eth_nlp":
         return gen.nlp(write=False)
+    if name == "eth_rx_track_80_a5":
+        return gen.rx_track(80, a=5, write=False)
     kind, mhz = name.rsplit("_", 1)
     return {"eth_tx": gen.tx_host, "eth_txr": gen.tx_raw, "eth_rx_fixed": gen.rx_fixed, "eth_rx_track": gen.rx_track}[kind](
         int(mhz), write=False)

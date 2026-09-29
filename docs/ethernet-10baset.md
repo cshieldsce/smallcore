@@ -5,7 +5,7 @@ host does the Manchester encoding. A receiver that tracks the edges works
 from 90 MHz up. Every fixed-timing receiver loses a long frame.** This is an
 experiment on the frozen v2 core. The ISA, the model, the RTL and the ROM
 are unchanged. The programs are written by `experiments/ethernet/gen.py`
-and pinned on the model by `tests/model/test_ethernet.py`, 112 tests. One
+and pinned on the model by `tests/model/test_ethernet.py`, 114 tests. One
 pin-level RTL test, `ethernet_tx_40_frame_at_the_pins` in
 `tests/rtl/top_tb.py`, sends a frame out of `top.v` from eth_tx_40.
 
