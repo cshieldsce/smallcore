@@ -11,7 +11,7 @@
 //   BTN3  hard reset (there is also a power-on reset)
 //   LD0..3 host_rdata[3:0], LD4 r/g/b host_rdata[4..6], LD5 r host_rdata[7]
 //
-// Simulation twin: rtl_tests/test_pynq.py, DEBOUNCE_BITS 3, the jumper in the bench.
+// Simulation twin: tests/rtl/test_pynq.py, DEBOUNCE_BITS 3, the jumper in the bench.
 //
 // Registers take their initial value from configuration, the FPGA idiom, so
 // there is no reset input; Verilator's PROCASSINIT style warning is off for that.

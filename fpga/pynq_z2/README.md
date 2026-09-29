@@ -7,7 +7,7 @@ smallcore_pynq.v   the wrapper: 125 MHz / 4 core clock, debounced buttons -> bus
 pynq_z2.xdc        pins: sysclk H16, SW, BTN, LD0..3, LD4/LD5 RGB, PMOD A pins 1..4
 ```
 
-The wrapper is verified in simulation before Vivado sees it: `python -m pytest rtl_tests/test_pynq.py -v` runs the button sequence below under Verilator with the jumper modelled in the bench and checks the LEDs.
+The wrapper is verified in simulation before Vivado sees it: `python -m pytest tests/rtl/test_pynq.py -v` runs the button sequence below under Verilator with the jumper modelled in the bench and checks the LEDs.
 
 ## Controls
 
@@ -45,6 +45,6 @@ In Vivado, any recent version:
 5. SW1 down: LEDs read `0x96`, LD1, LD2, LD4 red and LD5 red on.
 6. Press BTN2 to pop. SW1 up reads `101` again.
 
-To run again press BTN0 again: the byte you push after that goes out. Bytes pushed before a restart stay queued; only BTN3 clears the FIFOs. With SW0 up, BTN0 selects the LSB-first program; through a loopback both bit orders return the byte unchanged, which is why the RTL test with a slave model, `rtl_tests/test_smallcore.py`, is the one that proves the bit order.
+To run again press BTN0 again: the byte you push after that goes out. Bytes pushed before a restart stay queued; only BTN3 clears the FIFOs. With SW0 up, BTN0 selects the LSB-first program; through a loopback both bit orders return the byte unchanged, which is why the RTL test with a slave model, `tests/rtl/test_smallcore.py`, is the one that proves the bit order.
 
 What it proves: the program came from the on-chip ROM, the byte went through the host register block into the real TX FIFO, out of the pads as an SPI frame, back in through the pad readback, the input shift register, PUSH and the RX FIFO, and out through the register block, on hardware, with nothing but buttons for a host.

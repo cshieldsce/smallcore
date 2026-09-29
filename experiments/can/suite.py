@@ -7,8 +7,8 @@ function with how many of their cases failed. The failures a candidate is
 allowed are the tests that pin the rejected words it takes and the
 adversarial sweep's model of a word; any other failure is a program it
 disturbed. The counts differ by candidate because the sweep enumerates the
-ISA's words: more words, more cases. tests/test_can_candidates.py and
-tests/test_repeat_candidates.py are left out: they build the candidates
+ISA's words: more words, more cases. tests/model/test_can_candidates.py and
+tests/model/test_repeat_candidates.py are left out: they build the candidates
 themselves."""
 
 import os
@@ -23,11 +23,11 @@ HERE = Path(__file__).resolve().parent
 for name in sys.argv[1:] or ["base", "A", "B", "Bc", "C", "D", "AB", "ABc", "AC", "AD"]:
     env = dict(os.environ)
     env["CANDIDATE"] = name
-    env["PYTHONPATH"] = f"{ROOT / 'sim'}:{ROOT / 'tools'}:{HERE}"
+    env["PYTHONPATH"] = f"{ROOT / 'model'}:{ROOT / 'tools'}:{HERE}"
     out = subprocess.run(
-        [sys.executable, "-m", "pytest", str(ROOT / "tests"), "-q", "-p", "plugin", "-p", "no:cacheprovider", "--no-header",
-         "--tb=no", "-rf", "--ignore", str(ROOT / "tests" / "test_can_candidates.py"),
-         "--ignore", str(ROOT / "tests" / "test_repeat_candidates.py")],
+        [sys.executable, "-m", "pytest", str(ROOT / "tests" / "model"), "-q", "-p", "plugin", "-p", "no:cacheprovider", "--no-header",
+         "--tb=no", "-rf", "--ignore", str(ROOT / "tests" / "model" / "test_can_candidates.py"),
+         "--ignore", str(ROOT / "tests" / "model" / "test_repeat_candidates.py")],
         capture_output=True, text=True, env=env, cwd=ROOT,
     ).stdout
     tail = out.strip().splitlines()[-1] if out.strip() else "(no output)"

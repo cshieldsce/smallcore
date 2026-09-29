@@ -1,20 +1,20 @@
-# ROM slots for tools/gen_rom.py -> rtl/rom.v: `slot file`, files in this directory.
+# ROM slots for tools/gen_rom.py -> rtl/rom.v: `slot file`, paths relative to this directory.
 # Slot numbers are permanent: a new program takes an unused slot, an old slot never
 # shifts, so a host that knows a number keeps working. Slot 0 is NONE, the core halts.
 # 4-bit select: slots 1..15 are valid; an unused slot reads as slot 0. 12..15 taken
 # 2026-09-28 so the chip carries programs that use REPEAT, the run test and the accumulator.
-1   uart_tx_0x55.asm
-2   uart_tx_pull.asm
-3   uart_tx_loop.asm
-4   uart_rx.asm
-5   spi_tx_lsb.asm
-6   spi_tx_msb.asm
-7   spi_duplex_lsb.asm
-8   spi_duplex_msb.asm
-9   i2c_write.asm
-10  i2c_write_stretch.asm
-11  i2c_write_addr_data.asm
-12  swd_read_loop.asm
-13  can_tx_crc.asm
-14  can_rx_crc.asm
-15  can_rx_bytes.asm
+1   uart/uart_tx_0x55.asm
+2   uart/uart_tx_pull.asm
+3   uart/uart_tx_loop.asm
+4   uart/uart_rx.asm
+5   spi/spi_tx_lsb.asm
+6   spi/spi_tx_msb.asm
+7   spi/spi_duplex_lsb.asm
+8   spi/spi_duplex_msb.asm
+9   i2c/i2c_write.asm
+10  i2c/i2c_write_stretch.asm
+11  i2c/i2c_write_addr_data.asm
+12  swd/swd_read_loop.asm
+13  can/can_tx_crc.asm
+14  can/can_rx_crc.asm
+15  can/can_rx_bytes.asm

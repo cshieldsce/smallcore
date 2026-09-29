@@ -23,8 +23,8 @@ eight clocks a bit on the RX bench's six frames. Every candidate is checked
 to take only words the ISA rejects today, with every program in `programs/`
 assembling to the same words. Its semantics are pinned on every corner, and
 a mutation of each model and of one program is caught
-(`tests/test_crc_candidates.py`, 278 tests). Nothing in `isa.yaml`,
-`sim/cpu.py` or the RTL changes.
+(`tests/model/test_crc_candidates.py`, 278 tests). Nothing in `isa.yaml`,
+`model/cpu.py` or the RTL changes.
 
 ## The candidates
 
@@ -228,7 +228,7 @@ clear acc and poly. 448 words that were rejected are instructions, and no
 other word changed meaning. CAN's CRC-15 is poly = 0x8B32, 0x4599
 left-aligned; the parity is poly = 0x8000.
 
-In the model (`sim/cpu.py`) and pinned on it (`tests/test_acc.py`): the
+In the model (`model/cpu.py`) and pinned on it (`tests/model/test_acc.py`): the
 words and the 448, every program the same words, the plain shift over forty
 samples, the CRC against the oracle for five polynomials, the parity among
 them, ACC_OUT, ACC_PUSH and its stall, ACC_LOAD, the sample as the word
@@ -241,7 +241,7 @@ from NOP's hole; the feedback is sixteen XORs gated by acc[15] ^ the pad;
 ACC_PUSH shares PUSH's stall and the RX FIFO's port through a mux; ACC_OUT
 writes its pin beside SHIFT_OUT's. RTL against the model on every word from
 random state, the accumulator words in the random REPEAT bodies and the
-adversarial sweeps, and both programs at the pins (`rtl_tests/core_tb.py`,
+adversarial sweeps, and both programs at the pins (`tests/rtl/core_tb.py`,
 `top_tb.py`).
 
 ## Files
@@ -251,4 +251,4 @@ adversarial sweeps, and both programs at the pins (`rtl_tests/core_tb.py`,
 - `experiments/crc/crc15_{w32,pin16,acc}.asm`, `crc15_acc_bytes.asm`: CRC-15 on the three candidates that hold it
 - `experiments/crc/crc8_{w16,pin8,lanes}.asm`: the widest CRC on the three that do not
 - `experiments/crc/can_rx_bytes_{lanes,acc}.asm`: the destuffing receiver handing the host bytes
-- `tests/test_crc_candidates.py`: the words, the semantics, the programs against the oracle, the receivers, the numbers
+- `tests/model/test_crc_candidates.py`: the words, the semantics, the programs against the oracle, the receivers, the numbers

@@ -4,7 +4,7 @@ SWD left one architectural complaint: the same two-word bit cell 32 times, 64 of
 each program's words (README, "SWD by the numbers"). Each candidate here is
 isa.yaml plus its own words and a CPU that runs them, spliced into the exact
 swd_read.asm and swd_write.asm and measured against them. Nothing here touches
-sim/cpu.py, isa.yaml or the RTL: the 103- and 106-word programs stay as the
+model/cpu.py, isa.yaml or the RTL: the 103- and 106-word programs stay as the
 baseline.
 
   A  REPEAT count, label   a counted backward branch at the end of the body,

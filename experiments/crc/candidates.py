@@ -7,7 +7,7 @@ RX found the same wall from the other side: the raw history the run test
 reads and the destuffed data the host wants cannot share the one register.
 So the candidates here are state architectures, not CRC opcodes, each
 isa.yaml plus its words and a CPU that runs them, measured on CRC-15 against
-the oracle and on the destuffing receiver. Nothing here touches sim/cpu.py,
+the oracle and on the destuffing receiver. Nothing here touches model/cpu.py,
 isa.yaml or the RTL.
 
   W16, W32  the register carried on: the bit that leaves in_shift_reg's wire

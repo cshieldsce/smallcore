@@ -8,7 +8,7 @@ seven cycles deep. Shared: after a sample, a decision that must land on the
 next bit edge, and SKIP + JMP is a cycle longer on the taken side. Each
 candidate here is isa.yaml plus its word or two and a CPU that runs them,
 spliced into can_tx_arb.asm (95 words) and can_tx_stuff.asm (224 words) and
-measured against them. Nothing here touches sim/cpu.py, isa.yaml or the RTL:
+measured against them. Nothing here touches model/cpu.py, isa.yaml or the RTL:
 the four CAN programs stay as the baselines.
 
   A   BRANCH bit, level, label     one word, one cycle, taken or not: pc <-

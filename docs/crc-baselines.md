@@ -3,12 +3,12 @@
 **Outcome (2026-09-28): nothing merged, no candidate named.** The question,
 kept apart from the frame: given a known bit stream, the SOF, the
 identifier, the control field, the DLC and the data, can the core as it is
-produce CAN's CRC-15 over it? Python is the oracle (`tests/test_crc.py`).
+produce CAN's CRC-15 over it? Python is the oracle (`tests/model/test_crc.py`).
 The answer is no, and the part that fails is the width of the state: the
 core has eight bits a program can both write and read, and the computation
 wants fifteen, thirty in the form the core can execute. The XOR is not the
 wall, and neither is writing the state back, once the register is looked at
-from its input end. Nothing in `isa.yaml`, `sim/cpu.py` or the RTL changes;
+from its input end. Nothing in `isa.yaml`, `model/cpu.py` or the RTL changes;
 the frame keeps its host-computed CRC.
 
 Arbitration was information the control flow could not see; stuffing was
@@ -163,5 +163,5 @@ into.
 ## Files
 
 - `experiments/crc/crc4_lfsr.asm`: the widest CRC on the current ISA, 101 words
-- `tests/test_crc.py`: the oracle and its identity with the Fibonacci form; the census of what each word writes and reads; the CRC-4 program against the oracle on 236 streams, the window in the register, the numbers; the CRC as data in the frame
-- `rtl_tests/top_tb.py`, `crc4_lfsr_at_the_pins`: the program on `top.v`, the pads read back, clock for clock the model's
+- `tests/model/test_crc.py`: the oracle and its identity with the Fibonacci form; the census of what each word writes and reads; the CRC-4 program against the oracle on 236 streams, the window in the register, the numbers; the CRC as data in the frame
+- `tests/rtl/top_tb.py`, `crc4_lfsr_at_the_pins`: the program on `top.v`, the pads read back, clock for clock the model's

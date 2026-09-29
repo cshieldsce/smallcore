@@ -8,7 +8,7 @@ baseline's. Stuffing: can_tx_stuff.asm, 224 words, with the candidate's
 decision after every checked bit, at the shortest bit in which the decision
 fits with the sample point at 50% or later (the baseline's), and a second
 form with each run of checked bits a REPEAT body. Every cell's cycles are
-counted in the comments; tests/test_can_candidates.py holds each program to
+counted in the comments; tests/model/test_can_candidates.py holds each program to
 the baseline's bits on the bus.
 """
 
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path[:0] = [str(HERE), str(HERE.parent.parent / "sim")]
+sys.path[:0] = [str(HERE), str(HERE.parent.parent / "model")]
 
 from candidates import CANDIDATES, Candidate, assemble  # noqa: E402
 

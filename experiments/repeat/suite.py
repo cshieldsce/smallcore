@@ -25,10 +25,10 @@ HERE = Path(__file__).resolve().parent
 for name in sys.argv[1:] or ["base", "A", "B", "C", "D"]:
     env = dict(os.environ) if (os := __import__("os")) else {}
     env["CANDIDATE"] = name
-    env["PYTHONPATH"] = f"{ROOT / 'sim'}:{ROOT / 'tools'}:{HERE}"
+    env["PYTHONPATH"] = f"{ROOT / 'model'}:{ROOT / 'tools'}:{HERE}"
     out = subprocess.run(
-        [sys.executable, "-m", "pytest", str(ROOT / "tests"), "-q", "-p", "plugin", "-p", "no:cacheprovider", "--no-header",
-         "--tb=no", "-rf", "--ignore", str(ROOT / "tests" / "test_repeat_candidates.py"),
+        [sys.executable, "-m", "pytest", str(ROOT / "tests" / "model"), "-q", "-p", "plugin", "-p", "no:cacheprovider", "--no-header",
+         "--tb=no", "-rf", "--ignore", str(ROOT / "tests" / "model" / "test_repeat_candidates.py"),
          # This one waits for the halt with no cycle cap, and stops on a JMP, because in the ISA as it is nothing
          # else goes backward. Under B a repeated PULL empties the FIFO and stalls forever; under C a DJNZ loop does.
          "--deselect", "tests/test_adversarial.py::test_shift_out_and_shift_in_never_see_each_others_register"],

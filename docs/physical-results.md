@@ -1,6 +1,6 @@
 # Physical results
 
-Measured numbers from the Tiny Tapeout IHP CMOS5L flow in `tapeout/janestreet/`, one row per RTL milestone. Architectural tradeoffs get decided against this table, not by estimate.
+Measured numbers from the Tiny Tapeout IHP CMOS5L flow in `asic/janestreet/`, one row per RTL milestone. Architectural tradeoffs get decided against this table, not by estimate.
 
 ## Milestones
 
@@ -45,7 +45,7 @@ Where the cells go, one row per milestone, appended as they land. Yosys + abc ag
 - Flops: `sg13cmos5l_dfrbpq_1` count in the mapped netlist.
 - The program memory/interface row's Top is still `top` alone; `smallcore` (host + ROM + top) under the quick script is 843 cells, 14,141 µm², 138 flops, so the host block and the whole ROM together are 295 cells, 3,113 µm² and 17 flops. `make synth-breakdown` prints `smallcore` as a fourth line.
 
-To add a row: from `tapeout/janestreet/`, run `make synth-breakdown`. It prints cells, area and flops for `core`, `top` and the wrapper; subtract core from top for the FIFO columns. Take the flow columns from the harden, and put anything surprising in that milestone's notes section.
+To add a row: from `asic/janestreet/`, run `make synth-breakdown`. It prints cells, area and flops for `core`, `top` and the wrapper; subtract core from top for the FIFO columns. Take the flow columns from the harden, and put anything surprising in that milestone's notes section.
 
 ## RTL-0 notes
 
@@ -54,13 +54,13 @@ To add a row: from `tapeout/janestreet/`, run `make synth-breakdown`. It prints 
 - Timing: the worst path is under 8 ns, so the flow's 50 MHz constraint is not close to binding. The clock target is not decided.
 - Budget: Jane Street's guidance is about 1K logic cells per tile, roughly 24K for 6x4, with room left for clock tree and routing.
 - Verilator lint in the flow: 11 `UNUSEDSIGNAL` warnings in `core.v`, all decode wires for instructions not yet built. No errors.
-- The wrapper's pin mapping is provisional and shares pins between core inputs; see `tapeout/janestreet/src/tt_um_cshieldsce_smallcore.v`. Rows are comparable to each other as long as the wrapper stays the same; when the real pin mapping lands, note it in that row.
+- The wrapper's pin mapping is provisional and shares pins between core inputs; see `asic/janestreet/src/tt_um_cshieldsce_smallcore.v`. Rows are comparable to each other as long as the wrapper stays the same; when the real pin mapping lands, note it in that row.
 
 ## FIFO storage notes
 
-Commit `f795664`: `rtl/top.v` with the complete ISA core, a TX FIFO and an RX FIFO, both DEPTH 4, end-to-end UART TX and RX passing in `rtl_tests/top_tb.py`. The rows from SET/GPIO to FIFO interface were not hardened on their own; this row is the first measurement after RTL-0 and covers all of them.
+Commit `f795664`: `rtl/top.v` with the complete ISA core, a TX FIFO and an RX FIFO, both DEPTH 4, end-to-end UART TX and RX passing in `tests/rtl/top_tb.py`. The rows from SET/GPIO to FIFO interface were not hardened on their own; this row is the first measurement after RTL-0 and covers all of them.
 
-- This RTL is Baseline v1. Tag `v1` (2026-09-27) has `rtl/` byte for byte as at `f795664`; what landed between is tests and docs: SPI and I2C end to end in `rtl_tests/top_tb.py` and the `top_adversarial_tb.py` suite. So this row is the v1 numbers, and the README's Status section quotes it.
+- This RTL is Baseline v1. Tag `v1` (2026-09-27) has `rtl/` byte for byte as at `f795664`; what landed between is tests and docs: SPI and I2C end to end in `tests/rtl/top_tb.py` and the `top_adversarial_tb.py` suite. So this row is the v1 numbers, and the README's Status section quotes it.
 
 - Wrapper change: `src/tt_um_cshieldsce_smallcore.v` now instantiates `top` instead of `core`, and `make sync` stages `top.v`, `core.v` and `fifo.v`. The old wrapper predated the FIFO ports: it left the core's `tx_data` undriven and `gpio_oe`, `rx_data`, `pull_en`, `push_en` unconnected, so synthesis would have pruned logic and under-reported the core. The new wrapper folds `tx_full`, `rx_empty` and the parity of each `rx_data` nibble into `uio_out[7:4]` with `gpio_oe`, so every output reaches a port. Still provisional pins; not comparable one-for-one with RTL-0's wrapper.
 - Synth cells 695 (11,948 µm² synth area) from LibreLane's `06-yosys-synthesis/reports/stat.rpt`. 125 of them are tie-high: every flop maps to `dfrbpq_1` with its async `RESET_B` tied off, since reset is synchronous, so each of the 121 flops gets a tie, plus 4 for the constant `uio_oe` bits.
@@ -91,7 +91,7 @@ Commit `132fe20`: `rtl/smallcore.v`, the chip: `host.v` (a four-register bus, st
 
 ## Protocol Engine v2 notes
 
-Commit `85d9380`: the core with REPEAT (`cd91c7c`), the run test, SKIP_RUN and SKIP_NORUN (`f4c205f`), and the accumulator, a second stream register with optional LFSR feedback (`543f55d`); and the ROM's last four slots taken so the chip carries programs that use them: 12 the SWD read in REPEAT form, 13 CAN stage 6A (the whole data frame, stuffing by the run test, the CRC in the accumulator, 8 clocks a bit), 14 the CAN receiver with the CRC in the core, 15 the destuffing receiver on the accumulator. Every instruction the ISA has is in the ROM but SKIP_RUN, which no program uses (`tests/test_rom_slots.py`).
+Commit `85d9380`: the core with REPEAT (`cd91c7c`), the run test, SKIP_RUN and SKIP_NORUN (`f4c205f`), and the accumulator, a second stream register with optional LFSR feedback (`543f55d`); and the ROM's last four slots taken so the chip carries programs that use them: 12 the SWD read in REPEAT form, 13 CAN stage 6A (the whole data frame, stuffing by the run test, the CRC in the accumulator, 8 clocks a bit), 14 the CAN receiver with the CRC in the core, 15 the destuffing receiver on the accumulator. Every instruction the ISA has is in the ROM but SKIP_RUN, which no program uses (`tests/model/test_rom_slots.py`).
 
 - **A fixed ROM is everything the chip can fetch, and synthesis keeps only what those words reach.** Measured: CI run 36466255523 (`35ea2da`, REPEAT and the run test in `core.v`, the ROM still slots 1..11, none of whose words is a REPEAT or a run test) synthesized to 1,009 cells, 15,509 µm², and routed to 1,340 cells, 20,454 µm², against Peripheral v1's 1,010 and 1,334. The 145 cells the two features cost the core alone were pruned out of the chip. That run is a valid chip, but it does not measure the architecture; this row does, as far as the ROM's programs reach.
 - Core alone, `make synth` on `core.v` at each architectural commit, the instruction word an input so nothing is pruned:
@@ -123,7 +123,7 @@ Per-cell areas from the mapped netlist, for reading deltas: a reset flop `dfrbpq
 Same versions as `tt-gds-action@ihp-cmos5l` on 2026-09-25: ttihp-verilog-template `cmos5l`, tt-support-tools `ihp-sg13cmos5l`, LibreLane 3.1.0.dev3 in Docker, IHP-Open-PDK `2bbec755`, `sg13cmos5l_stdcell_typ_1p20V_25C.lib`. The 6x4 run takes about 50 minutes on this machine, most of it Magic DRC over the fill. `make synth` takes seconds and tracks the synth-cells column; use it while iterating and run `make harden` at each milestone.
 
 ```
-cd tapeout/janestreet
+cd asic/janestreet
 make synth      # yosys, core alone
 make harden     # full flow, runs/wokwi/
 make stats      # utilization, cell categories, warnings

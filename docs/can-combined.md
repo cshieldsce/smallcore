@@ -6,7 +6,7 @@ wall, as expected.** This is the payoff test for the run test and the
 accumulator: a whole Classical CAN frame on the ISA as it is, in 256 words,
 at 8 clocks a bit. Nothing in the ISA or the RTL changes here. The programs
 are written by `experiments/combined/gen.py`, pinned on the model by
-`tests/test_can_combined.py`, and run at the pins by `rtl_tests/top_tb.py`.
+`tests/model/test_can_combined.py`, and run at the pins by `tests/rtl/top_tb.py`.
 
 ## The cell
 
@@ -164,5 +164,5 @@ decision on acc.
 - `experiments/combined/can_tx_combined.asm`: 6A, 152 words
 - `experiments/combined/can_tx_arb_{5a3,7ff,000}.asm`: 6B for three identifiers; the tests generate the rest
 - `experiments/combined/can_rx_crc.asm`: 6C, 35 words
-- `tests/test_can_combined.py`: the frames, the rivals, the probe, every identifier's size, the receiver's residue and its ACK
-- `rtl_tests/top_tb.py`: `can_frame_with_the_crc_in_the_core_at_the_pins`, `can_arbitrating_frame_at_the_pins`, `can_receiver_with_the_crc_in_the_core_at_the_pins`
+- `tests/model/test_can_combined.py`: the frames, the rivals, the probe, every identifier's size, the receiver's residue and its ACK
+- `tests/rtl/top_tb.py`: `can_frame_with_the_crc_in_the_core_at_the_pins`, `can_arbitrating_frame_at_the_pins`, `can_receiver_with_the_crc_in_the_core_at_the_pins`

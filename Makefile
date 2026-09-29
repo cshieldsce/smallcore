@@ -7,11 +7,11 @@ SHELL := /bin/bash
 
 test: rom-check test-model test-rtl
 
-test-model:  # the golden Python model and assembler, tests/
-	$(PYTHON) -m pytest tests
+test-model:  # the golden Python model and assembler, tests/model/
+	$(PYTHON) -m pytest tests/model
 
-test-rtl:  # rtl/core.v under Verilator + cocotb, rtl_tests/; WAVES=1 also writes build/rtl/dump.vcd
-	$(PYTHON) -m pytest rtl_tests -v
+test-rtl:  # rtl/core.v under Verilator + cocotb, tests/rtl/; WAVES=1 also writes build/rtl/dump.vcd
+	$(PYTHON) -m pytest tests/rtl -v
 
 lint:  # Verilator static checks, no simulation; -Wno-fatal prints warnings without failing while the core is incomplete
 	verilator --lint-only -Wall -Wno-fatal rtl/core.v
@@ -30,8 +30,8 @@ rom-check:  # fail if rtl/rom.v is not what `make rom` would write
 clean:
 	rm -rf build
 
-tapeout-sync:  # stage rtl/{top,core,fifo}.v into tapeout/janestreet/src/ for the Tiny Tapeout CMOS5L build, see tapeout/janestreet/README.md
-	$(MAKE) -C tapeout/janestreet sync
+tapeout-sync:  # stage rtl/{top,core,fifo}.v into asic/janestreet/src/ for the Tiny Tapeout CMOS5L build, see asic/janestreet/README.md
+	$(MAKE) -C asic/janestreet sync
 
 tapeout-check:  # fail if the staged copy has drifted from rtl/
-	$(MAKE) -C tapeout/janestreet check
+	$(MAKE) -C asic/janestreet check

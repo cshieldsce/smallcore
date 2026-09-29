@@ -1,9 +1,9 @@
 # Repeat candidates against the SWD programs
 
 **Outcome (2026-09-27): A adopted.** `REPEAT count, label` is opcode 111 in
-`isa.yaml`, the counter `rc` is in `sim/cpu.py`, the rules are the
+`isa.yaml`, the counter `rc` is in `model/cpu.py`, the rules are the
 assembler's (`cpu.check_bodies`), and the corners below are pinned on the
-model itself in `tests/test_repeat.py`. One correction to the spec as first
+model itself in `tests/model/test_repeat.py`. One correction to the spec as first
 written: `rc` holds the runs still to go after a REPEAT commits, at most 31,
 so it is five bits, not six. The comparison below is left as it was made.
 
@@ -22,9 +22,9 @@ from the delay of a word next to it, so a candidate can be held to the
 baseline's wire cycle for cycle, with a target that says OK, WAIT then OK or
 FAULT, a host late with the request again, a PUSH or PULL stalling inside the
 repeated body, and a restart in the middle of a loop
-(`tests/test_repeat_candidates.py`). The existing suite is then run on each
+(`tests/model/test_repeat_candidates.py`). The existing suite is then run on each
 candidate's model in place of the model (`experiments/repeat/suite.py`) to see
-what it disturbs. `programs/swd_read.asm` and `programs/swd_write.asm` stay as
+what it disturbs. `programs/swd/swd_read.asm` and `programs/swd/swd_write.asm` stay as
 they are: they are the baseline and the evidence.
 
 ## The candidates
@@ -241,8 +241,8 @@ The scheduling rule, for the program author: REPEAT costs a real cycle, so
 when a waveform is to be kept the cycle comes out of a delay next to it, and
 never from the word before a word that can stall (finding 2).
 
-Corners pinned in `tests/test_repeat_candidates.py` on the candidate and in
-`tests/test_repeat.py` on the model, each against the unrolled program under
+Corners pinned in `tests/model/test_repeat_candidates.py` on the candidate and in
+`tests/model/test_repeat.py` on the model, each against the unrolled program under
 random outside worlds: count 1, 2 and 32; a one-word
 body; a 255-word body, the program then 256 words, and a 256-word body
 refused; a PULL as the body's first word and a PUSH as its last, both
@@ -292,11 +292,11 @@ REPEAT is its body count times over with a cycle between); cpu.py got the
 counter and the assembler the rules; core.v got the counter and the
 subtract, `rc[4:0]`, `rc_next`, one term in `last`, one in `gpio_en`, the
 pc mux's fourth way, and the RTL differential tests the same corners
-(`rtl_tests/core_tb.py`: counts 1, 2, 32; one- and 255-word bodies; a PULL
+(`tests/rtl/core_tb.py`: counts 1, 2, 32; one- and 255-word bodies; a PULL
 withheld 73 clocks and a PUSH held 20 inside a body with `rc` watched; forty
 random bodies under random stalls; reset at every clock of a loop; the wrap;
 bit 7 of `back`), and the 40-word SWD programs clock for clock the 103- and
-106-word ones at the pins under four hosts (`rtl_tests/top_tb.py`); the
+106-word ones at the pins under four hosts (`tests/rtl/top_tb.py`); the
 103- and 106-word programs stay in `programs/` as the record of why. Opcode
 111's accidental self-trap went with it, which is convenient, not a reason.
 
@@ -316,5 +316,5 @@ protocol-driven method, doing what it was meant to do.
 - `experiments/repeat/<program>_A.asm`: REPEAT in the ROM's eleven programs
 - `experiments/repeat/uart_tx_{B,D}.asm`: where B applies
 - `experiments/repeat/plugin.py`, `suite.py`: the existing suite on a candidate's model
-- `tests/test_repeat_candidates.py`: the comparison, pinned, on the candidates' models
-- `tests/test_repeat.py`: REPEAT's corners on the model itself, and every variant against its canonical program
+- `tests/model/test_repeat_candidates.py`: the comparison, pinned, on the candidates' models
+- `tests/model/test_repeat.py`: REPEAT's corners on the model itself, and every variant against its canonical program

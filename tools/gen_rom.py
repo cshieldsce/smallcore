@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "sim"))
+sys.path.insert(0, str(ROOT / "model"))
 
 from cpu import decode, load_isa, load_program  # noqa: E402
 
@@ -70,7 +70,7 @@ def render(slots, programs, isa=None):
         "// slot  words  program",
     ]
     for slot in sorted(slots):
-        out.append(f"//   {slot:2d}    {len(programs[slot]):3d}  {slots[slot]}")
+        out.append(f"//   {slot:2d}    {len(programs[slot]):3d}  {Path(slots[slot]).name}")
     out += [
         "",
         "module rom (",
@@ -84,7 +84,7 @@ def render(slots, programs, isa=None):
         "        case ({sel, addr})",
     ]
     for slot in sorted(slots):
-        out.append(f"            // slot {slot}: {slots[slot]}")
+        out.append(f"            // slot {slot}: {Path(slots[slot]).name}")
         for addr, word in enumerate(programs[slot]):
             out.append(
                 f"            {SEL_BITS + ADDR_BITS}'h{(slot << ADDR_BITS) | addr:03x}: word = 16'h{word:04x};"

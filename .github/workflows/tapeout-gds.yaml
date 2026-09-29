@@ -1,4 +1,4 @@
-# Tiny Tapeout IHP CMOS5L build of tapeout/janestreet/. Runs on every push to main that touches the RTL or the
+# Tiny Tapeout IHP CMOS5L build of asic/janestreet/. Runs on every push to main that touches the RTL or the
 # tapeout staging, and by hand: Actions tab -> "tapeout gds" -> Run workflow. The run's summary and artifacts
 # (metrics, GDS) are the record; the numbers that matter go in docs/physical-results.md.
 # Same jobs as the official ttihp-verilog-template (cmos5l branch). The Tiny Tapeout action expects info.yaml,
@@ -11,7 +11,7 @@ on:
     branches: [main]
     paths:
       - "rtl/**"
-      - "tapeout/janestreet/**"
+      - "asic/janestreet/**"
       - ".github/workflows/tapeout-gds.yaml"
   workflow_dispatch:
 
@@ -29,11 +29,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: stage tapeout/janestreet at the repository root
+      - name: stage asic/janestreet at the repository root
         run: |
-          make -C tapeout/janestreet check   # fail if src/ drifted from rtl/: run make tapeout-sync
-          cp -r tapeout/janestreet/info.yaml tapeout/janestreet/src tapeout/janestreet/test tapeout/janestreet/LICENSE .
-          cp tapeout/janestreet/docs/info.md docs/
+          make -C asic/janestreet check   # fail if src/ drifted from rtl/: run make tapeout-sync
+          cp -r asic/janestreet/info.yaml asic/janestreet/src asic/janestreet/test asic/janestreet/LICENSE .
+          cp asic/janestreet/docs/info.md docs/
 
       - name: Build GDS
         uses: TinyTapeout/tt-gds-action@ihp-cmos5l
@@ -57,7 +57,7 @@ jobs:
           submodules: recursive
 
       - name: stage the testbench at the repository root
-        run: cp -r tapeout/janestreet/src tapeout/janestreet/test .
+        run: cp -r asic/janestreet/src asic/janestreet/test .
 
       - name: GL test
         uses: TinyTapeout/tt-gds-action/gl_test@ihp-cmos5l
