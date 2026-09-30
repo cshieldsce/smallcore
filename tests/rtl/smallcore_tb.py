@@ -11,12 +11,13 @@ from pathlib import Path
 import cocotb
 from cocotb.triggers import ClockCycles, FallingEdge, ReadOnly, RisingEdge
 
-from cpu import load_program  # model/cpu.py
+from cpu import assemble, load_program  # model/cpu.py
 from tb import Pads, drive_smallcore, reset, start_clock
 
 PROGRAMS = Path(__file__).resolve().parent.parent.parent / "programs"
 
 TX_DATA, RX_DATA, STATUS, CONTROL = 0, 1, 2, 3  # host_addr
+RUN_RAM, LOAD = 0x10, 0x20  # CONTROL commands past the slots
 HALTED, TX_FULL, RX_EMPTY = 0b100, 0b010, 0b001  # STATUS bits
 NONE, UART_TX_PULL, SPI_TX_MSB, SPI_DUPLEX_LSB, SPI_DUPLEX_MSB = 0, 2, 6, 7, 8  # manifest slots
 MOSI, SCLK, CS, MISO = 0, 1, 2, 3  # pads the SPI programs use
@@ -424,4 +425,74 @@ async def control_switches_slots_mid_frame_and_the_new_program_takes_the_queued_
     await until_cs(dut, 1)
     assert slave.mosi == bits_msb(0x53), f"the slave saw {slave.mosi}"
     await until_halted(dut)
+    assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
+
+
+# Uploaded programs: CONTROL LOAD, the words over TX_DATA low byte first,
+# CONTROL RUN_RAM. host.v pairs the bytes into ram.v, the core fetches from it.
+
+TOGGLE = assemble("SET 0, 0 [7]\nSET 0, 1 [7]\nSET 0, 0 [7]\nSET 0, 1 [7]\n")
+
+
+@cocotb.test()
+async def an_uploaded_program_runs_from_ram(dut):
+    """Four SETs of 8 clocks each, uploaded over the bus and run: host bus,
+    loader, RAM write, RAM read, the ROM/RAM mux, core fetch, pad. The core
+    stays halted with its pads at reset levels and the TX FIFO empty through
+    the load. Once run, pad 0 goes 0, 1, 0, 1, one move every 8 clocks, the
+    first on the clock after the restart, and the core halts as the last
+    SET's eighth clock ends, 32 clocks in, at pc 4 of 4 words."""
+    assert TOGGLE == [0x0780, 0x0790, 0x0780, 0x0790]
+    await begin(dut)
+
+    loading = True
+    seen = []  # (halted, gpio_out, tx count) every clock of the load
+
+    async def watch_load():
+        while loading:
+            await RisingEdge(dut.clk)
+            await ReadOnly()
+            seen.append((int(dut.halted.value), int(dut.gpio_out.value), tx_count(dut)))
+
+    watcher = cocotb.start_soon(watch_load())
+    await host_write(dut, CONTROL, LOAD)
+    for word in TOGGLE:
+        await host_write(dut, TX_DATA, word & 0xFF)
+        await host_write(dut, TX_DATA, word >> 8)
+    loading = False
+    await watcher
+    assert seen and all(s == (1, 0b1111, 0) for s in seen), "the core ran, a pad moved or a byte queued during the load"
+    assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
+    assert int(dut.host_i.prog_words.value) == len(TOGGLE)
+    assert int(dut.top_i.program_words.value) == 0  # load mode shows the core no program
+
+    # CONTROL RUN_RAM, then every clock: pad 0 and halted, counted from the
+    # edge the restart pulse resets the core on.
+    await FallingEdge(dut.clk)
+    dut.host_addr.value = CONTROL
+    dut.host_wdata.value = RUN_RAM
+    dut.host_we.value = 1
+    trace = []
+    restart_at = None
+    for clock in range(60):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if restart_at is None and int(dut.restart.value):
+            restart_at = clock + 1  # restart is high after this edge, so the next one acts on it
+        trace.append((int(dut.gpio_out.value) & 1, int(dut.halted.value)))
+        await FallingEdge(dut.clk)
+        if clock == 3:
+            dut.host_we.value = 0
+    assert restart_at is not None, "RUN_RAM never restarted the core"
+
+    run = trace[restart_at + 1:]
+    pads = [1] + [pad for pad, _ in run]  # 1: pad 0's reset level, on the restart edge
+    moves = [(i, pads[i + 1]) for i in range(len(run)) if pads[i + 1] != pads[i]]
+    assert moves == [(0, 0), (8, 1), (16, 0), (24, 1)], f"pad 0 moved at {moves}"
+    halted_at = next(i for i, (_, h) in enumerate(run) if h)
+    assert halted_at == 31, f"halted {halted_at} clocks after the restart"  # 4 x 8 clocks: edges 0..31
+    assert all(h == 0 for _, h in run[:31])
+
+    assert int(dut.top_i.program_words.value) == len(TOGGLE)
+    assert int(dut.top_i.core_i.pc.value) == len(TOGGLE)
     assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
