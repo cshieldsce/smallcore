@@ -128,10 +128,10 @@ module core(
 
     assign last = issue ? (delay == 5'd0 || is_repeat) : (delay_counter == 5'd1);
 
-    wire pc_en;
+    wire   pc_en;
     assign pc_en = last && !stall;
 
-    wire gpio_en;
+    wire   gpio_en;
     assign gpio_en = issue && !stall && side && !is_jmp && !is_repeat;
 
     reg       shift_dir;

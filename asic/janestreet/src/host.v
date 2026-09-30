@@ -9,21 +9,27 @@
 // an edge and lasted 3 clocks would fall on that very clock: 4 leaves one.
 // rdata is combinational on addr.
 //
-//   addr  write (we rises)                      read (rdata)
+//   addr  write (we rises)                        read (rdata)
 //   0     TX_DATA: push wdata, dropped if full    0
 //   1     RX_DATA: -                              RX head, 0 while empty; re rising pops it
 //   2     STATUS:  -                              {5'b0, halted, tx_full, rx_empty}
-//   3     CONTROL: sel <= wdata[3:0], restart     {4'b0, sel}
+//   3     CONTROL: ROM/RAM/load command           current mode/slot
 module host (
-    input            clk, reset,
-    input      [7:0] wdata,
-    input      [1:0] addr,
-    input            we, re,
-    input            tx_full, rx_empty, halted,
-    input      [7:0] rx_data,
-    output reg [7:0] rdata,
-    output           tx_push, rx_pop, restart,
-    output reg [3:0] sel
+    input             clk, reset,
+    input      [7:0]  wdata,
+    input      [1:0]  addr,
+    input             we, re,
+    input             tx_full, rx_empty, halted,
+    input      [7:0]  rx_data,
+    output reg [7:0]  rdata,
+    output            tx_push, rx_pop, restart,
+    output reg [3:0]  sel,
+    output reg        load_mode,
+    output reg        ram_select, 
+    output            prog_we,
+    output reg [7:0]  prog_addr,
+    output     [15:0] prog_wdata,
+    output reg [8:0]  prog_words
 );
     localparam [1:0] TX_DATA = 2'd0;
     localparam [1:0] RX_DATA = 2'd1;
@@ -39,37 +45,97 @@ module host (
     wire we_rise;
     wire re_rise;
 
-    assign we_rise = we_sync[1] & ~we_sync[2];
-    assign re_rise = re_sync[1] & ~re_sync[2];
+    assign we_rise = we_sync[1] & ~we_sync[2]; // did a host write occur?
+    assign re_rise = re_sync[1] & ~re_sync[2]; // did a host read occur?
 
-    // CONTROL takes wdata[3:0], the slot; the upper bits are for later
-    wire _unused_wdata;
-    assign _unused_wdata = &{wdata[7:4], 1'b0};
+    wire rom_cmd;
+    wire run_ram_cmd;
+    wire load_cmd;
 
-    assign tx_push = we_rise && (addr == TX_DATA);
-    assign restart = we_rise && (addr == CONTROL);
-    assign rx_pop  = re_rise && (addr == RX_DATA);
+    assign rom_cmd     = (wdata[7:4] == 4'd0);
+    assign run_ram_cmd = (wdata == 8'h10);
+    assign load_cmd    = (wdata == 8'h20);
 
-    always @* begin
+    reg [7:0] prog_low;
+    reg       byte_phase;
+    wire      control_write;
+    wire      prog_byte;
+
+    assign control_write = we_rise && (addr == CONTROL);
+    assign prog_byte     = we_rise && (addr == TX_DATA) && load_mode; 
+    assign tx_push       = we_rise && (addr == TX_DATA) && !load_mode;
+    assign rx_pop        = re_rise && (addr == RX_DATA);
+    assign restart       = control_write && (rom_cmd || run_ram_cmd || load_cmd);
+    
+    assign prog_wdata = { wdata, prog_low };
+    assign prog_we    = prog_byte && byte_phase && (prog_words < 9'd256);
+
+    always @(*) begin
         case (addr)
             TX_DATA: rdata = 8'h00;
             RX_DATA: rdata = rx_empty ? 8'h00 : rx_data;  // never the FIFO's memory: 0 while empty
             STATUS:  rdata = {5'b0, halted, tx_full, rx_empty};
-            CONTROL: rdata = {4'b0, sel};
+            CONTROL: rdata = load_mode ? 8'h20 : ram_select ? 8'h10 : {4'b0, sel};
         endcase
     end
 
     always @(posedge clk) begin
         if (reset) begin
-            we_sync <= 3'b111;
-            re_sync <= 3'b111;
-            sel     <= 4'd0;
+            we_sync    <= 3'b111;
+            re_sync    <= 3'b111;
+            sel        <= 4'd0;
+            load_mode  <= 1'd0;
+            ram_select <= 1'd0;
+            prog_addr  <= 8'd0;
+            prog_words <= 9'd0;
+            prog_low   <= 8'd0;
+            byte_phase <= 1'd0;
         end
         else begin
+            // Edge detector for read and writes
             we_sync <= {we_sync[1:0], we};
             re_sync <= {re_sync[1:0], re};
-            if (restart) begin
-                sel <= wdata[3:0];
+            
+            if (control_write) begin
+                //ROM
+                if (rom_cmd) begin
+                    ram_select <= 1'd0;
+                    load_mode  <= 1'd0;
+                    byte_phase <= 1'd0;
+                    // select program in ROM
+                    sel <= wdata[3:0];
+                end
+                
+                // RAM
+                else if (run_ram_cmd) begin
+                    load_mode  <= 1'd0;
+                    ram_select <= 1'd1;
+                    byte_phase <= 1'd0;
+                end 
+
+                // Loading
+                else if (load_cmd) begin
+                    load_mode  <= 1'd1;
+                    ram_select <= 1'd1;
+
+                    prog_addr  <= 8'd0;
+                    prog_words <= 9'd0;
+                    byte_phase <= 1'd0;
+                    prog_low   <= 8'd0;
+                end
+            end
+            else if (prog_byte && prog_words < 9'd256) begin
+                if (byte_phase == 1'd0) begin
+                    // wdata is on LOW byte
+                    prog_low   <= wdata;
+                    byte_phase <= ~byte_phase;
+                end
+                else begin
+                    // wdata is on HIGH byte
+                    byte_phase <= ~byte_phase;
+                    prog_words <= prog_words + 9'd1;
+                    prog_addr  <=  prog_addr + 8'd1;
+                end
             end
         end
     end

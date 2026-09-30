@@ -3,7 +3,7 @@ project:
   title:        "SmallCore"
   author:       "Charlie Shields"
   discord:      ""
-  description:  "PIO-style programmable protocol peripheral: 11 UART/SPI/I2C programs in ROM, a 4-register host bus, four bidirectional pads"
+  description:  "PIO-style programmable protocol peripheral: 15 UART/SPI/I2C/SWD/CAN programs in ROM, a host-loadable 256-word program RAM, a 4-register host bus, four bidirectional pads"
   language:     "Verilog"
   clock_hz:     0       # not decided yet; the template's CLOCK_PERIOD of 20 ns (50 MHz) is the flow's constraint
 
@@ -19,6 +19,7 @@ project:
     - "smallcore.v"
     - "host.v"
     - "rom.v"
+    - "ram.v"
     - "top.v"
     - "core.v"
     - "fifo.v"

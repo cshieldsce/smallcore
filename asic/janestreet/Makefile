@@ -1,5 +1,5 @@
 # Tiny Tapeout IHP CMOS5L packaging for the Jane Street protocol emulator competition.
-# The RTL lives in ../../rtl; `make sync` stages it into src/. Nothing in src/smallcore.v, host.v, rom.v, top.v, core.v, fifo.v is edited by hand.
+# The RTL lives in ../../rtl; `make sync` stages it into src/. Nothing in src/smallcore.v, host.v, rom.v, ram.v, top.v, core.v, fifo.v is edited by hand.
 #
 # One-time setup (WSL/Linux): make setup            clones tt-support-tools into tt/ and installs the PDK into $(PDK_ROOT)
 #                              python venv with     pip install -r tt/requirements.txt librelane==$(LIBRELANE_VERSION)
@@ -12,7 +12,7 @@ LIBRELANE_VERSION ?= 3.1.0.dev3
 TT_TOOLS_REF      ?= ihp-sg13cmos5l
 TT                 = $(PYTHON) tt/tt_tool.py --ihp
 RTL                = ../../rtl
-RTL_FILES          = smallcore.v host.v rom.v top.v core.v fifo.v
+RTL_FILES          = smallcore.v host.v rom.v ram.v top.v core.v fifo.v
 
 export PDK_ROOT
 # tt_tool.py shells out to yowasp-yosys by name, so the venv's bin/ has to be on PATH, not just its python
