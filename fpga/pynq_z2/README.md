@@ -31,7 +31,7 @@ PMOD A, top row: pin 1 `gpio[0]` MOSI, pin 2 `gpio[1]` SCLK, pin 3 `gpio[2]` CS,
 In Vivado, any recent version:
 
 1. Create an RTL project for part `xc7z020clg400-1` (the PYNQ-Z2's Zynq-7020).
-2. Add design sources: `fpga/pynq_z2/smallcore_pynq.v` and the six files in `rtl/`: `smallcore.v`, `host.v`, `rom.v`, `top.v`, `core.v`, `fifo.v`. Set `smallcore_pynq` as top.
+2. Add design sources: `fpga/pynq_z2/smallcore_pynq.v` and the seven files in `rtl/`: `smallcore.v`, `host.v`, `rom.v`, `ram.v`, `top.v`, `core.v`, `fifo.v`. Set `smallcore_pynq` as top.
 3. Add `fpga/pynq_z2/pynq_z2.xdc` as a constraint. Check its pins against your board's master XDC; the switch, button, LED and PMOD pins are those of the PYNQ base overlay, the 125 MHz clock on H16 is from the TUL master file.
 4. Generate Bitstream. The XDC declares the divided clock as a generated clock, so the core's paths are timed at 32 ns; check the timing summary reports no unconstrained paths and no failing endpoints.
 5. Program the device from Hardware Manager over USB-JTAG, or copy the `.bit` to the board and load it from Python with `pynq.Overlay` (it also wants a `.hwh`; the export step in Vivado writes one).
