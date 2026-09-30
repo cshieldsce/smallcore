@@ -15,7 +15,7 @@ Measured numbers from the Tiny Tapeout IHP CMOS5L flow in `asic/janestreet/`, on
 | + FIFO storage (top: core + TX/RX FIFOs, DEPTH 4), Baseline v1 | 695 | 991 | 16,571 µm² | 1.84% | +10.86 ns | +0.14 ns | 2026-09-26 |
 | + program memory/interface (`smallcore`: host + ROM + top, real pinout), Peripheral v1 | 1,010 | 1,334 | 20,249 µm² | 2.24% | +10.15 ns | +0.11 ns | 2026-09-27 |
 | + REPEAT, run test, accumulator; ROM slots 12..15, Protocol Engine v2 | 1,894 | 2,403 | 31,759 µm² | 3.52% | +7.20 ns | +0.11 ns | 2026-09-28 |
-| final | | | | | | | |
+| + writable program RAM (256 × 16 in flops) and loader, final | 23,330 | 31,816 | 499,646 µm² | 55.37% | +1.10 ns | +0.14 ns | 2026-09-29 |
 
 Columns, all from `runs/wokwi/final/metrics.csv` unless noted:
 
@@ -37,6 +37,7 @@ Where the cells go, one row per milestone, appended as they land. Yosys + abc ag
 | + FIFO storage (2 × DEPTH 4) | 310 | 4,380 µm² | 39 | 257 | 6,630 µm² | 82 | 567 | 11,010 µm² | 695 | 11,948 µm² | `f795664` | 2026-09-26 |
 | + program memory/interface (`smallcore`: host + ROM + top) | 312 | 4,420 µm² | 39 | 236 | 6,608 µm² | 82 | 548 | 11,028 µm² | 1,010 | 15,372 µm² | `132fe20` | 2026-09-27 |
 | + REPEAT, run test, accumulator; ROM slots 12..15 (Protocol Engine v2) | 719 | 9,772 µm² | 76 | 246 | 6,530 µm² | 82 | 965 | 16,302 µm² | 1,894 | 25,268 µm² | `85d9380` | 2026-09-28 |
+| + writable program RAM (256 × 16 in flops) and loader | 688 | 9,494 µm² | 76 | 289 | 6,541 µm² | 82 | 977 | 16,035 µm² | 23,330 | 391,653 µm² | `8842436` | 2026-09-29 |
 
 - Core: `make synth`, `core` alone.
 - FIFO: `top` minus `core`, both FIFOs together. Derived, since the two are flattened into one netlist.
@@ -113,6 +114,23 @@ Commit `85d9380`: the core with REPEAT (`cd91c7c`), the run test, SKIP_RUN and S
 - Timing per corner: setup +7.20 ns slow, +10.74 typ, +11.09 fast; hold +0.11 fast, +0.33 typ, +0.69 slow. At slow the worst path is 12.9 ns, 3 ns longer than v1.1, and it is the fetch into the accumulator: `imem_addr[2]` through a hold gate, the ROM decode, the instruction decode, the acc input mux, into `acc[4]`. Typ and fast match v1.1 to 10 ps because there the worst path is not flop to flop; flop to flop at typ is +11.91. 50 MHz still has over a third of the period spare at slow.
 - Budget: 1,894 synth cells is about 8% of the ~24K guidance for 6x4, 3.5% of the area. Of that, the ROM and host are 744 quick-synth cells and the core 719; the library is now as much of the chip as the engine.
 - The CI run on `35ea2da` (36466255523), where the ROM reached neither feature, routed at +10.01 ns slow setup with no slew violations: so both the 3 ns and the slew come from what the new programs make the fetch reach, not from REPEAT's or the accumulator's logic sitting idle.
+
+## Writable program memory notes
+
+Commit `8842436` stages `ef7fdd4` into the package: `rtl/ram.v`, 256 words × 16 bits, synchronous write and combinational read, no reset; `host.v` gains a loader (CONTROL 0x20 enters load mode, TX_DATA bytes pair low then high into one RAM write per word, CONTROL 0x10 runs the RAM), and `smallcore.v` muxes the fetch word and program length between ROM and RAM. The core, FIFOs and ROM are unchanged since v2.
+
+- **The RAM is the chip now.** Quick synth, `make synth-breakdown`: `smallcore` 14,204 cells, 362,415 µm², 4,308 flops; the wrapper 14,011 cells, 362,387 µm². v2's `smallcore` was 1,709 cells, 24,185 µm², 176 flops: +12,495 cells, +338,230 µm², 15 times the area. Before place and route that is already 40% of the 6x4 core area, against 2.7% at v2.
+- Flops, by name in the mapped netlist: 4,096 `ram_i.mem`, exactly one per bit, and 28 for the loader (`prog_words` 9, `prog_addr` 8, `prog_low` 8, `load_mode`, `ram_select`, `byte_phase`). Every other flop is v2's.
+- Where the area goes: the 4,096 bit flops are about 200,700 µm² at 49.0 µm² each. Each also gets a `mux2_1` to hold its value when not written, since `dfrbpq_1` has no enable: 4,366 `mux2_1` in the netlist, 79,200 µm². The read side, 256 words to one, is much of the 791 `mux4_1`, 30,100 µm², with AOI/OAI gates for the rest of the tree. The write-address decode is the remainder. A flop RAM costs about 83 µm² a bit here, all in (338,230 µm² over 4,096 bits), against the ROM's case statement, which Yosys folds into a few gates per word.
+- `core` 688 cells against v2's 719 with `core.v` changed only in whitespace: abc variance. `top` 977 against 965, the same.
+- Harden: CI run 36654875653 on `83674f0` (`8842436` plus a datasheet edit, the RTL identical), tapeout-gds workflow; gds, gate-level test, precheck and viewer all green. This is the submitted chip.
+- Flow synth 23,330 cells, 391,653 µm², from `06-yosys-synthesis/reports/stat.rpt`: 19,014 logic cells, 4,308 tie-high (one per flop, as before) and 8 tie-low. The flow's abc maps the RAM differently from the quick script: 1,397 `mux2_1` and 280 `mux4_1` against 4,366 and 791, the rest in `a21oi`, `o21ai` and `nand2`, for about the same area. Flops are 53.9% of it. v2 was 1,894: +21,436 cells.
+- Routed: 31,816 cells, 499,646 µm², 55.37% of the 6x4 core, against v2's 2,403 cells and 3.52%. Zero routing DRC, Magic DRC, antenna and LVS errors, no setup or hold violations at any corner.
+- Routed minus synth is 8,486: 4,396 `dlygate4sd3_1` hold fixes (v2 had 224), 3,389 `buf_1` (v2 215) and 419 `buf_8`, the clock tree over 4,308 flops. The flops, their clock tree and their hold gates are most of the chip.
+- **Setup at slow is +1.10 ns, down from +7.20.** Typ +8.17, fast +11.01; hold +0.14 fast, +0.34 typ, +0.69 slow. The worst path is 18.4 ns at slow, 5.5 ns longer than v2's: `imem_addr[2]` (the pc) through a hold gate and its fanout buffers, the RAM's read-address decode and 256-to-1 read, the instruction decode, into `poly[1]` (ACC_LOAD's enable). The same fetch-into-decode path as v2, with the RAM's read tree in front of it. 50 MHz is met at every corner, with 5.5% of the period spare at slow.
+- Slew: 47 violations at slow, none at typ or fast (v2 had 26). The worst are 3.67 ns against the 2.51 ns limit, on NOR4s of the read address fanout, the RAM's address minterms, as v2's were the ROM's. Signoff does not fail on slew and timing is met with the degraded edges.
+- Fanout: 290 violations at every corner, limit 8. 282 are clock-tree leaf buffers driving 14 to 18 flops each; v2 had one, the root buffer. The other 8 are `buf_1` fanout buffers on the read address at 9 to 15.
+- Budget: 55% utilization of 6x4 from a 4 Kbit flop RAM. It fits and routes clean; twice the words in flops would be past the 6x4 core area.
 
 ## Unit costs, typ lib
 
