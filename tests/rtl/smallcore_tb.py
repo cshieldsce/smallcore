@@ -19,7 +19,7 @@ PROGRAMS = Path(__file__).resolve().parent.parent.parent / "programs"
 TX_DATA, RX_DATA, STATUS, CONTROL = 0, 1, 2, 3  # host_addr
 RUN_RAM, LOAD = 0x10, 0x20  # CONTROL commands past the slots
 HALTED, TX_FULL, RX_EMPTY = 0b100, 0b010, 0b001  # STATUS bits
-NONE, UART_TX_PULL, SPI_TX_MSB, SPI_DUPLEX_LSB, SPI_DUPLEX_MSB = 0, 2, 6, 7, 8  # manifest slots
+NONE, UART_TX_0X55, UART_TX_PULL, SPI_TX_MSB, SPI_DUPLEX_LSB, SPI_DUPLEX_MSB = 0, 1, 2, 6, 7, 8  # manifest slots
 MOSI, SCLK, CS, MISO = 0, 1, 2, 3  # pads the SPI programs use
 
 
@@ -434,6 +434,56 @@ async def control_switches_slots_mid_frame_and_the_new_program_takes_the_queued_
 TOGGLE = assemble("SET 0, 0 [7]\nSET 0, 1 [7]\nSET 0, 0 [7]\nSET 0, 1 [7]\n")
 
 
+async def upload(dut, words):
+    """CONTROL LOAD, then each word as its low byte and its high byte."""
+    await host_write(dut, CONTROL, LOAD)
+    for word in words:
+        await host_write(dut, TX_DATA, word & 0xFF)
+        await host_write(dut, TX_DATA, word >> 8)
+
+
+def ram(dut, addr):
+    return int(dut.ram_i.mem[addr].value)
+
+
+async def run(dut, command, limit=100):
+    """A CONTROL write that restarts the core, then (gpio_out, halted) at
+    every rising edge from the one after the edge the restart pulse resets the
+    core on, through the first that shows it halted. The write is the bus
+    minimums, 4 edges high then 3 low, driven here so no edge goes unseen."""
+    await FallingEdge(dut.clk)
+    dut.host_addr.value = CONTROL
+    dut.host_wdata.value = command
+    dut.host_we.value = 1
+    trace = []
+    restart_at = None
+    for clock in range(limit):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if restart_at is None and int(dut.restart.value):
+            restart_at = clock + 1  # restart is high after this edge, so the next one acts on it
+        elif restart_at is not None and clock > restart_at:
+            trace.append((int(dut.gpio_out.value), int(dut.halted.value)))
+            if trace[-1][1]:
+                break
+        await FallingEdge(dut.clk)
+        if clock == 3:
+            dut.host_we.value = 0
+    else:
+        raise AssertionError(f"not halted {limit} clocks after CONTROL {command:#04x}")
+    assert restart_at is not None, f"CONTROL {command:#04x} never restarted the core"
+    await FallingEdge(dut.clk)
+    dut.host_we.value = 0  # already low unless the core halted before the strobe fell
+    await ClockCycles(dut.clk, 3)  # the strobe low 3 clocks before the next write
+    return trace
+
+
+def pad0_moves(trace):
+    """(clock, level) each time pad 0 changes, from its reset level 1."""
+    pads = [1] + [out & 1 for out, _ in trace]
+    return [(i, pads[i + 1]) for i in range(len(trace)) if pads[i + 1] != pads[i]]
+
+
 @cocotb.test()
 async def an_uploaded_program_runs_from_ram(dut):
     """Four SETs of 8 clocks each, uploaded over the bus and run: host bus,
@@ -455,10 +505,7 @@ async def an_uploaded_program_runs_from_ram(dut):
             seen.append((int(dut.halted.value), int(dut.gpio_out.value), tx_count(dut)))
 
     watcher = cocotb.start_soon(watch_load())
-    await host_write(dut, CONTROL, LOAD)
-    for word in TOGGLE:
-        await host_write(dut, TX_DATA, word & 0xFF)
-        await host_write(dut, TX_DATA, word >> 8)
+    await upload(dut, TOGGLE)
     loading = False
     await watcher
     assert seen and all(s == (1, 0b1111, 0) for s in seen), "the core ran, a pad moved or a byte queued during the load"
@@ -466,33 +513,120 @@ async def an_uploaded_program_runs_from_ram(dut):
     assert int(dut.host_i.prog_words.value) == len(TOGGLE)
     assert int(dut.top_i.program_words.value) == 0  # load mode shows the core no program
 
-    # CONTROL RUN_RAM, then every clock: pad 0 and halted, counted from the
-    # edge the restart pulse resets the core on.
-    await FallingEdge(dut.clk)
-    dut.host_addr.value = CONTROL
-    dut.host_wdata.value = RUN_RAM
-    dut.host_we.value = 1
-    trace = []
-    restart_at = None
-    for clock in range(60):
-        await RisingEdge(dut.clk)
-        await ReadOnly()
-        if restart_at is None and int(dut.restart.value):
-            restart_at = clock + 1  # restart is high after this edge, so the next one acts on it
-        trace.append((int(dut.gpio_out.value) & 1, int(dut.halted.value)))
-        await FallingEdge(dut.clk)
-        if clock == 3:
-            dut.host_we.value = 0
-    assert restart_at is not None, "RUN_RAM never restarted the core"
-
-    run = trace[restart_at + 1:]
-    pads = [1] + [pad for pad, _ in run]  # 1: pad 0's reset level, on the restart edge
-    moves = [(i, pads[i + 1]) for i in range(len(run)) if pads[i + 1] != pads[i]]
-    assert moves == [(0, 0), (8, 1), (16, 0), (24, 1)], f"pad 0 moved at {moves}"
-    halted_at = next(i for i, (_, h) in enumerate(run) if h)
-    assert halted_at == 31, f"halted {halted_at} clocks after the restart"  # 4 x 8 clocks: edges 0..31
-    assert all(h == 0 for _, h in run[:31])
+    trace = await run(dut, RUN_RAM)
+    assert pad0_moves(trace) == [(0, 0), (8, 1), (16, 0), (24, 1)], f"pad 0 moved at {pad0_moves(trace)}"
+    assert len(trace) == 32, f"halted {len(trace) - 1} clocks after the restart"  # 4 x 8 clocks: edges 0..31
 
     assert int(dut.top_i.program_words.value) == len(TOGGLE)
     assert int(dut.top_i.core_i.pc.value) == len(TOGGLE)
     assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
+
+
+@cocotb.test()
+async def a_dangling_low_byte_is_dropped(dut):
+    """LOAD, one low byte, RUN_RAM: no word was written, so RAM holds a program
+    of 0 words and the core halts at once. The next LOAD starts clean: 90 07
+    is 0x0790 at address 0, the old 90 no part of it."""
+    await begin(dut)
+    await upload(dut, [])
+    await host_write(dut, TX_DATA, 0x90)
+    assert int(dut.host_i.prog_words.value) == 0
+
+    trace = await run(dut, RUN_RAM)
+    assert trace == [(0b1111, 1)], "the core ran a program of no words"
+    assert int(dut.host_i.prog_words.value) == 0
+    assert int(dut.top_i.program_words.value) == 0
+    assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
+
+    await upload(dut, [0x0790])
+    assert int(dut.host_i.prog_words.value) == 1
+    assert ram(dut, 0) == 0x0790
+    trace = await run(dut, RUN_RAM)
+    assert int(dut.top_i.program_words.value) == 1
+    assert len(trace) == 8 and pad0_moves(trace) == []  # SET 0, 1 [7]: pad 0 already 1
+
+
+@cocotb.test()
+async def a_new_load_replaces_the_old_length(dut):
+    """Four words, then two: the second run is two SETs long, 16 clocks, and
+    never reaches words 2 and 3, still in RAM from the first load."""
+    await begin(dut)
+    await upload(dut, TOGGLE)
+    assert len(await run(dut, RUN_RAM)) == 32
+
+    await upload(dut, TOGGLE[:2])
+    assert int(dut.host_i.prog_words.value) == 2
+    assert [ram(dut, a) for a in range(4)] == TOGGLE  # the old words stay, past the new end
+    trace = await run(dut, RUN_RAM)
+    assert int(dut.top_i.program_words.value) == 2
+    assert pad0_moves(trace) == [(0, 0), (8, 1)]
+    assert len(trace) == 16
+    assert int(dut.top_i.core_i.pc.value) == 2
+
+
+@cocotb.test()
+async def the_257th_word_is_dropped_not_wrapped(dut):
+    """256 different words fill the RAM; the 257th is ignored, address 0 keeps
+    the first word. The program runs to pc 256 and halts: every SET of every
+    pin, value and delay, sum over delays of (1 + delay) x 8 clocks."""
+    words = [(delay << 8) | 0x80 | (pin << 5) | (value << 4) for delay in range(32) for pin in range(4) for value in range(2)]
+    assert len(set(words)) == 256
+    await begin(dut)
+    await upload(dut, words + [0x0000])
+    assert int(dut.host_i.prog_words.value) == 256
+    assert [ram(dut, a) for a in range(256)] == words
+
+    trace = await run(dut, RUN_RAM, limit=5000)
+    assert len(trace) == 8 * sum(1 + delay for delay in range(32))
+    assert int(dut.top_i.program_words.value) == 256
+    assert int(dut.top_i.core_i.pc.value) == 256
+
+
+@cocotb.test()
+async def reserved_control_values_do_nothing(dut):
+    """CONTROL values past the slots, RUN_RAM and LOAD, written between the two
+    bytes of an upload word: no restart, load mode and the half word both
+    survive, CONTROL reads the same, and the high byte completes 0x0790."""
+    await begin(dut)
+    await upload(dut, [])
+    await host_write(dut, TX_DATA, 0x90)
+    before = await host_read(dut, CONTROL)
+
+    restarts = 0
+
+    async def count_restarts():
+        nonlocal restarts
+        while True:
+            await RisingEdge(dut.clk)
+            await ReadOnly()
+            restarts += int(dut.restart.value)
+
+    counter = cocotb.start_soon(count_restarts())
+    for value in (0x30, 0x11, 0x21, 0x40, 0xFF):
+        await host_write(dut, CONTROL, value)
+        assert int(dut.host_i.load_mode.value) == 1, f"{value:#04x} left load mode"
+        assert int(dut.host_i.ram_select.value) == 1, f"{value:#04x} left RAM"
+        assert await host_read(dut, CONTROL) == before, f"{value:#04x} changed CONTROL"
+    counter.cancel()
+    assert restarts == 0
+
+    await host_write(dut, TX_DATA, 0x07)
+    assert int(dut.host_i.prog_words.value) == 1
+    assert ram(dut, 0) == 0x0790
+
+
+@cocotb.test()
+async def rom_runs_the_same_after_a_ram_run(dut):
+    """uart_tx_0x55 from ROM, then an uploaded program from RAM, then
+    uart_tx_0x55 again: the same pads on the same clocks both times, and the
+    same word count."""
+    uart = load_program(PROGRAMS / "uart" / "uart_tx_0x55.asm")
+    await begin(dut)
+    first = await run(dut, UART_TX_0X55, limit=2000)
+    assert int(dut.top_i.program_words.value) == len(uart)
+
+    await upload(dut, TOGGLE)
+    await run(dut, RUN_RAM)
+    again = await run(dut, UART_TX_0X55, limit=2000)
+    assert again == first
+    assert int(dut.top_i.program_words.value) == len(uart)
