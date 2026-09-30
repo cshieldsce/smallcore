@@ -491,7 +491,9 @@ async def an_uploaded_program_runs_from_ram(dut):
     stays halted with its pads at reset levels and the TX FIFO empty through
     the load. Once run, pad 0 goes 0, 1, 0, 1, one move every 8 clocks, the
     first on the clock after the restart, and the core halts as the last
-    SET's eighth clock ends, 32 clocks in, at pc 4 of 4 words."""
+    SET's eighth clock ends, 32 clocks in, at pc 4 of 4 words. CONTROL reads
+    back the mode: LOAD while loading, RUN_RAM once run, the slot once a ROM
+    slot is selected again."""
     assert TOGGLE == [0x0780, 0x0790, 0x0780, 0x0790]
     await begin(dut)
 
@@ -510,6 +512,7 @@ async def an_uploaded_program_runs_from_ram(dut):
     await watcher
     assert seen and all(s == (1, 0b1111, 0) for s in seen), "the core ran, a pad moved or a byte queued during the load"
     assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
+    assert await host_read(dut, CONTROL) == LOAD
     assert int(dut.host_i.prog_words.value) == len(TOGGLE)
     assert int(dut.top_i.program_words.value) == 0  # load mode shows the core no program
 
@@ -520,6 +523,10 @@ async def an_uploaded_program_runs_from_ram(dut):
     assert int(dut.top_i.program_words.value) == len(TOGGLE)
     assert int(dut.top_i.core_i.pc.value) == len(TOGGLE)
     assert await host_read(dut, STATUS) == HALTED | RX_EMPTY
+    assert await host_read(dut, CONTROL) == RUN_RAM
+
+    await host_write(dut, CONTROL, 0x05)  # back to a ROM slot
+    assert await host_read(dut, CONTROL) == 0x05
 
 
 @cocotb.test()

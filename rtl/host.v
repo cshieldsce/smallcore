@@ -9,11 +9,11 @@
 // an edge and lasted 3 clocks would fall on that very clock: 4 leaves one.
 // rdata is combinational on addr.
 //
-//   addr  write (we rises)                      read (rdata)
+//   addr  write (we rises)                        read (rdata)
 //   0     TX_DATA: push wdata, dropped if full    0
 //   1     RX_DATA: -                              RX head, 0 while empty; re rising pops it
 //   2     STATUS:  -                              {5'b0, halted, tx_full, rx_empty}
-//   3     CONTROL: sel <= wdata[3:0], restart     {4'b0, sel}
+//   3     CONTROL: ROM/RAM/load command           current mode/slot
 module host (
     input             clk, reset,
     input      [7:0]  wdata,
@@ -75,7 +75,7 @@ module host (
             TX_DATA: rdata = 8'h00;
             RX_DATA: rdata = rx_empty ? 8'h00 : rx_data;  // never the FIFO's memory: 0 while empty
             STATUS:  rdata = {5'b0, halted, tx_full, rx_empty};
-            CONTROL: rdata = {4'b0, sel};
+            CONTROL: rdata = load_mode ? 8'h20 : ram_select ? 8'h10 : {4'b0, sel};
         endcase
     end
 
