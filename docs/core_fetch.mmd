@@ -1,0 +1,31 @@
+%%{init: {"flowchart": {"wrappingWidth": 360}}}%%
+%% Core, part 1 of 3: fetch and decode. Blue = register, yellow = combinational, grey = from or to
+%% another diagram. The enables come from the control block (control.svg).
+%% rc is REPEAT's counter: the runs of the body still to go, 0 when no loop is in progress.
+flowchart LR
+  classDef reg fill:#dbe8ff,stroke:#4a6fa5
+  classDef comb fill:#fff4d6,stroke:#c49a2a
+  classDef ext fill:#f0f0f0,stroke:#888
+
+  IMEM(["imem_word[15:0]<br/>from smallcore"]):::ext
+  CTRL(["control<br/>(control.svg)"]):::ext
+  REST(["own, side_pin, side_val<br/>to core_out and core_in"]):::ext
+  ADDR(["imem_addr = pc[7:0]<br/>to smallcore"]):::ext
+
+  subgraph core["core: fetch"]
+    direction LR
+    DEC["<b>decode</b><br/>opcode = word[15:13]<br/>delay = word[12:8]<br/>operand = word[7:0]<br/>side = operand[7]<br/>side_pin = operand[6:5]<br/>side_val = operand[4]<br/>own = operand[3:0]"]:::comb
+    RC["<b>rc</b> reg, 5 bits<br/>rst → 0<br/>pc_en & REPEAT → rc_next<br/>rc_next = rc == 0 ? delay : rc − 1"]:::reg
+    PC["<b>pc</b> reg, 9 bits<br/>rst → 0<br/>pc_en & pc_jmp → operand<br/>pc_en & pc_back → pc − operand<br/>pc_en otherwise → pc + 1 + pc_skip"]:::reg
+
+    DEC -->|"delay[4:0]"| RC
+    DEC -->|"operand[7:0]"| PC
+  end
+
+  IMEM --> DEC
+  RC -->|"rc_next"| CTRL
+  CTRL -->|"pc_en, pc_jmp,<br/>pc_back, pc_skip"| PC
+  DEC --> REST
+  PC --> ADDR
+
+  style core fill:#f6f8fb,stroke:#9aa7b8

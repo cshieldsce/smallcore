@@ -246,7 +246,10 @@ From the big picture down to what the Verilog will look like:
 | `docs/overview.svg` | program and bytes in, UART or SPI out, how a byte reaches the pins |
 | `docs/isa_encoding.svg` | the 16-bit word: opcode / delay / side effect / own operands per instruction |
 | `docs/isa_execute.svg` | what each instruction does, cycles, the PULL, PUSH and WAIT stalls |
-| `docs/core.svg` | datapath at register level, named as in the Verilog |
+| `docs/core_fetch.svg` | datapath at register level, named as in the Verilog: decode, pc, REPEAT's rc |
+| `docs/core_out.svg` | the output side: TX FIFO, shift_reg, shift_dir, open_drain, gpio |
+| `docs/core_in.svg` | the input side: in_shift_reg, the accumulator (acc, poly), the RX FIFO |
+| `docs/smallcore.svg` | around the core: host registers, program ROM and RAM, the loader, the fetch mux |
 | `docs/control.svg` | the control block: inputs, equations, counter, enables |
 | `docs/states.svg` | the same block as per-cycle states: Issue, Hold, Stall, Halt |
 | `docs/physical-results.md` | cells, area, utilization and timing per RTL milestone from the Tiny Tapeout CMOS5L flow in `asic/janestreet/` |

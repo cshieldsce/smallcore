@@ -5,7 +5,7 @@ flowchart-elk LR
   PULL -->|"TX FIFO empty: stall,<br/>everything holds"| PULL
   OP -->|"010, push"| PUSH["<b>PUSH [p, l] [d]</b><br/>RX FIFO ← in_shift_reg<br/>(register keeps its value)<br/>takes 1 + d cycles<br/>after any stall"]
   PUSH -->|"RX FIFO full: stall,<br/>everything holds"| PUSH
-  OP -->|"000, no side"| NOP["<b>NOP [d]</b><br/>nothing changes<br/>takes 1 + d cycles"]
+  OP -->|"000, bits 7:0 = 0"| NOP["<b>NOP [d]</b><br/>nothing changes<br/>takes 1 + d cycles"]
   OP -->|"000, side"| SET["<b>SET p, l [d]</b><br/>gpio[p] ← l<br/>other pins unchanged<br/>takes 1 + d cycles"]
   OP -->|"001, out"| SHIFT["<b>SHIFT_OUT [p, l] [d]</b><br/>gpio[0] ← next bit, then shift:<br/>shift_dir 0: shift_reg[0], >> 1<br/>shift_dir 1: shift_reg[7], << 1<br/>takes 1 + d cycles"]
   OP -->|"001, in"| SHIN["<b>SHIFT_IN i [p, l] [d]</b><br/>bit = gpio_in[i] at cycle start<br/>shift_dir 0: >> 1, then [7] ← bit<br/>shift_dir 1: << 1, then [0] ← bit<br/>(of in_shift_reg)<br/>takes 1 + d cycles"]
@@ -13,7 +13,10 @@ flowchart-elk LR
   OP -->|101| WAIT["<b>WAIT i, v [p, l] [d]</b><br/>stall while gpio_in[i] != v<br/>(read at cycle start, like SHIFT_IN)<br/>takes 1 + d cycles<br/>after any stall"]
   WAIT -->|"gpio_in[i] != v: stall,<br/>everything holds"| WAIT
   OP -->|000, bits 7:5 = 010| RUN["<b>SKIP_RUN n, v [d] / SKIP_NORUN n, v [d]</b><br/>reads the newest n bits of in_shift_reg<br/>pins, registers unchanged, no side effect<br/>takes 1 + d cycles"]
-  RUN --> RNEXT["the newest n all v ? (RUN) / not all v ? (NORUN)<br/>PC ← PC + 2 : PC + 1"]
+  RUN --> RUNNEXT["the newest n all v ? (RUN) / not all v ? (NORUN)<br/>PC ← PC + 2 : PC + 1"]
+  OP -->|"000, bits 7:5 = 001"| ACC["<b>ACC_IN p / ACC_CRC p / ACC_OUT p / ACC_LOAD [d]</b><br/>IN: acc ← acc << 1 | gpio_in[p]<br/>CRC: acc ← (acc << 1) ^ (acc[15] ^ gpio_in[p] ? poly : 0)<br/>OUT: gpio[p] ← acc[15], acc ← acc << 1<br/>LOAD: poly ← {shift_reg, poly[15:8]}<br/>no side effect, takes 1 + d cycles"]
+  OP -->|"000, 0010 1100"| ACCP["<b>ACC_PUSH [d]</b><br/>RX FIFO ← acc[7:0], acc ← acc >> 8<br/>takes 1 + d cycles<br/>after any stall"]
+  ACCP -->|"RX FIFO full: stall,<br/>everything holds"| ACCP
   OP -->|110| SKIP["<b>SKIP b, v [p, l] [d]</b><br/>reads in_shift_reg[b]<br/>pins, registers unchanged<br/>takes 1 + d cycles"]
   OP -->|011| JMP["<b>JMP target [d]</b><br/>pins, registers unchanged<br/>no side effect<br/>takes 1 + d cycles"]
   OP -->|111| REP["<b>REPEAT count, label</b><br/>rc == 0 ? rc ← count − 1 : rc ← rc − 1<br/>(rc moves on no other cycle)<br/>pins, registers unchanged<br/>no side effect, no delay<br/>takes 1 cycle"]
@@ -25,14 +28,17 @@ flowchart-elk LR
   SHIN --> NEXT
   CFG --> NEXT
   WAIT --> NEXT
+  ACC --> NEXT
+  ACCP --> NEXT
   JMP --> JNEXT["PC ← target"]
   SKIP --> SNEXT["in_shift_reg[b] == v ?<br/>PC ← PC + 2 : PC + 1"]
   REP --> RNEXT["rc != 0 ?<br/>PC ← PC − back : PC + 1"]
-  HALT ~~~ SIDE["<b>side effect</b> [p, l]<br/>on every instruction but JMP and REPEAT:<br/>gpio[p] ← l on the first cycle,<br/>the same edge as the operation<br/>(after any stall)"]
+  HALT ~~~ SIDE["<b>side effect</b> [p, l]<br/>on every instruction but JMP, REPEAT,<br/>SKIP_RUN / SKIP_NORUN and the ACC words:<br/>gpio[p] ← l on the first cycle,<br/>the same edge as the operation<br/>(after any stall)"]
   NEXT --> END{"PC past last<br/>instruction?"}
   JNEXT --> END
   SNEXT --> END
   RNEXT --> END
+  RUNNEXT --> END
   END -->|no| W
   END -->|yes| HALT(["halt<br/>pins keep their levels"])
   style SIDE fill:#fff4d6,stroke:#c49a2a

@@ -1,32 +1,41 @@
+%%{init: {"flowchart": {"wrappingWidth": 320}}}%%
 %% High-level view: what goes in, what comes out, and how a byte reaches the pins.
 flowchart LR
   classDef ext fill:#f0f0f0,stroke:#888
   classDef core fill:#dbe8ff,stroke:#4a6fa5
   classDef out fill:#dff5e1,stroke:#3a8f4a
 
-  HOST["Host / test bench"]:::ext
-  HOST -->|"program (16-bit words)"| IMEM
-  HOST -->|"bytes to send"| FIFO
+  HOST["Host<br/>four registers: TX_DATA, RX_DATA,<br/>STATUS, CONTROL<br/>(a CONTROL command restarts the core)"]:::ext
+  ROM["Program ROM<br/>15 built-in programs, slots 1–15"]:::core
+  RAM["Program RAM<br/>256 × 16-bit words"]:::core
+  HOST -->|"CONTROL 0x01–0x0F:<br/>run that slot"| ROM
+  HOST -->|"CONTROL 0x20: load, then TX_DATA<br/>byte pairs, low byte first;<br/>CONTROL 0x10: run it"| RAM
+  HOST -->|"TX_DATA: bytes to send"| FIFO
   LINEIN(["input lines<br/>UART: RX on gpio_in 0<br/>SPI: MISO on gpio_in 3<br/>I2C: SDA, SCL on gpio_in 0,&nbsp;1"]):::ext --> GIN
 
   subgraph core["core"]
     direction LR
-    IMEM["Program memory"]:::core
+    IMEM["Fetch<br/>the word at pc from the<br/>ROM slot or the RAM"]:::core
     EXEC["Execute<br/>one instruction at a time,<br/>each holds for 1 + delay cycles<br/>(JMP loops the program, SKIP bit, level<br/>steps over the next word on a bit<br/>of the input shift register)"]:::core
     FIFO["TX FIFO<br/>(PULL waits here<br/>while it is empty)"]:::core
     SR["Output shift register (8-bit)<br/>shift_dir: LSB or MSB first,<br/>set once by CONFIG shift_dir"]:::core
     PIN["gpio[3:0]<br/>four output pins, each push-pull<br/>or open-drain (CONFIG open_drain01 / 23:<br/>a 1 then lets go of the line)"]:::core
     GIN["gpio_in[3:0]<br/>four input pins<br/>(WAIT pin, level waits here<br/>until the pin is at the level)"]:::core
     ISR["Input shift register (8-bit)<br/>fills from the end opposite the wire,<br/>same shift_dir"]:::core
-    RXF["RX FIFO<br/>(PUSH waits here<br/>while it is full)"]:::core
+    RXF["RX FIFO<br/>(PUSH, ACC_PUSH wait here<br/>while it is full)"]:::core
+    ACC["Accumulator (16-bit)<br/>ACC_IN: shift in a pin<br/>ACC_CRC: the same, with CRC feedback<br/>from poly (ACC_LOAD fills poly<br/>from the output shift register)"]:::core
     IMEM --> EXEC
-    EXEC -->|"SET pin, level, or any other<br/>instruction's side effect (not JMP):<br/>one pin per instruction"| PIN
+    EXEC -->|"SET pin, level, or any other<br/>instruction's side effect (not JMP),<br/>or ACC_OUT (acc[15]):<br/>one pin per instruction"| PIN
     FIFO -->|"PULL: next byte"| SR
     SR -->|"SHIFT_OUT: next bit to gpio 0,<br/>then shift"| PIN
     GIN -->|"SHIFT_IN pin: sample the pin,<br/>shift it in"| ISR
     ISR -->|"PUSH: the byte"| RXF
+    GIN -->|"ACC_IN / ACC_CRC:<br/>sample a pin"| ACC
+    ACC -->|"ACC_PUSH: acc[7:0]"| RXF
   end
 
+  ROM --> IMEM
+  RAM --> IMEM
   PIN --> LINE(["output lines<br/>UART: TX on gpio 0<br/>SPI: MOSI, SCLK, CS on gpio 0, 1, 2<br/>I2C: SDA, SCL on gpio 0,&nbsp;1"]):::out
-  RXF -->|"bytes received"| HOSTRX["Host / test bench"]:::ext
+  RXF -->|"RX_DATA: bytes received"| HOSTRX["Host"]:::ext
   style core fill:#f6f8fb,stroke:#9aa7b8

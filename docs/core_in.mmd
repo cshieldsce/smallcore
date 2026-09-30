@@ -1,0 +1,37 @@
+%%{init: {"flowchart": {"wrappingWidth": 360}}}%%
+%% Core, part 3 of 3: from the input pins to the RX FIFO. Blue = register, yellow = combinational, grey =
+%% from or to another diagram. in_shift_reg fills from the end away from the wire (shift_dir picks it);
+%% acc shifts toward bit 15 whatever shift_dir says. The ACC words are 000 words with bits 7:5 = 001.
+flowchart LR
+  classDef reg fill:#dbe8ff,stroke:#4a6fa5
+  classDef comb fill:#fff4d6,stroke:#c49a2a
+  classDef ext fill:#f0f0f0,stroke:#888
+
+  GIN(["gpio_in[own[3:2]]"]):::ext
+  GINA(["gpio_in[operand[1:0]]"]):::ext
+  FROUT(["shift_dir, shift_reg<br/>(core_out)"]):::ext
+  RXOUT(["rx_data[7:0], rx_pop"]):::ext
+  TOPIN(["acc[15] to gpio<br/>(core_out)"]):::ext
+
+  subgraph core["core: input"]
+    direction LR
+    ISR["<b>in_shift_reg</b> reg, 8 bits<br/>rst → 0<br/>shift_in_en → shift in in_bit<br/>read by SKIP, SKIP_RUN, SKIP_NORUN<br/>in the control block (control.svg)"]:::reg
+    POLY["<b>poly</b> reg, 16 bits<br/>rst → 0<br/>acc_en & ACC_LOAD → {shift_reg, poly[15:8]}"]:::reg
+    ACC["<b>acc</b> reg, 16 bits<br/>rst → 0<br/>ACC_IN → {acc[14:0], acc_bit}<br/>ACC_CRC → the same ^ (f ? poly : 0),<br/>f = acc[15] ^ acc_bit<br/>ACC_OUT → acc << 1<br/>ACC_PUSH → acc >> 8<br/>(each on acc_en)"]:::reg
+    MUX["<b>rx_data</b><br/>ACC_PUSH ? acc[7:0] : in_shift_reg"]:::comb
+    RXF["<b>rx_fifo</b><br/>8 bits × depth<br/>push_en → append rx_data<br/>rx_pop → drop head"]:::reg
+
+    ISR -->|"in_shift_reg[7:0]"| MUX
+    POLY -->|"poly[15:0]"| ACC
+    ACC -->|"acc[7:0]"| MUX
+    MUX --> RXF
+  end
+
+  GIN -->|"in_bit"| ISR
+  GINA -->|"acc_bit"| ACC
+  FROUT -->|"shift_dir"| ISR
+  FROUT -->|"shift_reg"| POLY
+  RXF --> RXOUT
+  ACC --> TOPIN
+
+  style core fill:#f6f8fb,stroke:#9aa7b8

@@ -1,0 +1,42 @@
+%%{init: {"flowchart": {"wrappingWidth": 440}}}%%
+%% smallcore at Verilog level: the host register block, the program ROM and RAM, the fetch mux,
+%% and top (the core with its FIFOs, see core_*.svg). Blue = register, yellow = combinational.
+%% Host transactions are rising edges of host_we / host_re, synchronised through 3-bit shift registers.
+%% A CONTROL command restarts the core only (reset | restart); the FIFOs keep their bytes.
+%% While load_mode is set program_words is 0, so the core sits halted as the RAM fills.
+flowchart LR
+  classDef reg fill:#dbe8ff,stroke:#4a6fa5
+  classDef comb fill:#fff4d6,stroke:#c49a2a
+  classDef ext fill:#f0f0f0,stroke:#888
+
+  PINS(["host_wdata[7:0], host_addr[1:0],<br/>host_we, host_re"]):::ext
+
+  subgraph smallcore["smallcore"]
+    direction LR
+    SYNC["<b>we_sync, re_sync</b> reg, 3 bits each<br/>rst → 3'b111<br/>every edge ← {sync[1:0], pin}<br/>we_rise = we_sync[1] & !we_sync[2]<br/>re_rise = re_sync[1] & !re_sync[2]"]:::reg
+    DEC["<b>host decode</b><br/>control_write = we_rise & addr == 3<br/>rom_cmd = wdata[7:4] == 0<br/>run_ram_cmd = wdata == 0x10<br/>load_cmd = wdata == 0x20<br/>restart = control_write & (rom_cmd | run_ram_cmd | load_cmd)<br/>tx_push = we_rise & addr == 0 & !load_mode<br/>prog_byte = we_rise & addr == 0 & load_mode<br/>rx_pop = re_rise & addr == 1<br/>rdata: 0 → 0; 1 → rx_empty ? 0 : rx_data;<br/>2 → {5'b0, halted, tx_full, rx_empty};<br/>3 → load_mode ? 0x20 : ram_select ? 0x10 : {4'b0, sel}"]:::comb
+    MODE["<b>sel</b> reg, 4 bits; <b>ram_select</b>, <b>load_mode</b> reg, 1 bit each<br/>rst → 0<br/>control_write & rom_cmd → sel ← wdata[3:0], ram_select ← 0, load_mode ← 0<br/>control_write & run_ram_cmd → ram_select ← 1, load_mode ← 0<br/>control_write & load_cmd → ram_select ← 1, load_mode ← 1"]:::reg
+    LOAD["<b>byte_phase</b> reg, 1 bit; <b>prog_low</b> reg, 8 bits;<br/><b>prog_addr</b> reg, 8 bits; <b>prog_words</b> reg, 9 bits<br/>rst, load_cmd → all 0<br/>rom_cmd, run_ram_cmd → byte_phase ← 0<br/>prog_byte & prog_words < 256:<br/>byte_phase 0 → prog_low ← wdata, byte_phase ← 1<br/>byte_phase 1 → byte_phase ← 0, prog_addr + 1, prog_words + 1<br/>prog_we = prog_byte & byte_phase & prog_words < 256<br/>prog_wdata = {wdata, prog_low}"]:::reg
+    ROM["<b>rom</b><br/>16 slots, 16 bits wide<br/>rom_word = slot[sel][imem_addr]<br/>rom_words = slot[sel]'s length<br/>(slot 0: 0 words)"]:::comb
+    RAM["<b>ram</b> 256 × 16 bits<br/>prog_we → mem[prog_addr] ← prog_wdata<br/>ram_word = mem[imem_addr] (combinational)"]:::reg
+    MUX["<b>fetch mux</b><br/>imem_word = ram_select ? ram_word : rom_word<br/>program_words = load_mode ? 0 :<br/>ram_select ? prog_words : rom_words"]:::comb
+    TOP["<b>top</b><br/>core + TX / RX FIFOs, see core_*.svg<br/>tx_data = host_wdata<br/>imem_addr = pc[7:0] back to rom and ram<br/>tx_full, rx_empty, halted, rx_data back to host decode"]:::ext
+
+    SYNC -->|"we_rise, re_rise"| DEC
+    DEC -->|"control_write, commands"| MODE
+    DEC -->|"prog_byte, load_cmd"| LOAD
+    MODE -->|"sel"| ROM
+    LOAD -->|"prog_we, prog_addr,<br/>prog_wdata"| RAM
+    ROM -->|"rom_word, rom_words"| MUX
+    RAM -->|"ram_word"| MUX
+    LOAD -->|"prog_words"| MUX
+    MODE -->|"ram_select, load_mode"| MUX
+    MUX -->|"imem_word,<br/>program_words"| TOP
+    DEC -->|"tx_push, rx_pop, restart"| TOP
+  end
+
+  PINS --> SYNC
+  TOP -->|"gpio_out[3:0], gpio_oe[3:0]"| GOUT(["gpio pins"]):::ext
+  DEC -->|"host_rdata[7:0]"| RD(["host_rdata"]):::ext
+
+  style smallcore fill:#f6f8fb,stroke:#9aa7b8

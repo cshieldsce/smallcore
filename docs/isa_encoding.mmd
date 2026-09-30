@@ -3,7 +3,12 @@ block-beta
   b15["15"] b14["14"] b13["13"] b12["12"] b11["11"] b10["10"] b9["9"] b8["8"]
   b7["7"] b6["6"] b5["5"] b4["4"] b3["3"] b2["2"] b1["1"] b0["0"]
   opcode["opcode (3)"]:3 delay["delay (5)<br/>0–31 extra cycles<br/>(REPEAT: count − 1)"]:5 side["side effect (4): s p p l<br/>s = 1: also gpio[p] ← l"]:4 own["own operands (4)"]:4
-  nop["000 = NOP"]:3 nopd["d"]:5 nopop["0000 0000<br/>001x xxxx and 011x xxxx are rejected words"]:8
+  nop["000 = NOP"]:3 nopd["d"]:5 nopop["0000 0000<br/>011x xxxx and the unused 001x xxxx are rejected words"]:8
+  accin["000 = ACC_IN"]:3 accind["d"]:5 accinop["0010 00pp<br/>acc ← acc << 1 | gpio_in[p]"]:8
+  acccrc["000 = ACC_CRC"]:3 acccrcd["d"]:5 acccrcop["0010 01pp<br/>the same shift, ^ poly when acc[15] ^ gpio_in[p]"]:8
+  accout["000 = ACC_OUT"]:3 accoutd["d"]:5 accoutop["0010 10pp<br/>gpio[p] ← acc[15], acc ← acc << 1"]:8
+  accpush["000 = ACC_PUSH"]:3 accpushd["d"]:5 accpushop["0010 1100<br/>RX FIFO ← acc[7:0], acc ← acc >> 8"]:8
+  accload["000 = ACC_LOAD"]:3 accloadd["d"]:5 accloadop["0011 0000<br/>poly ← {shift_reg, poly[15:8]}"]:8
   run["000 = SKIP_RUN"]:3 rund["d"]:5 runop["0100 nnnv<br/>NOP's hole: n = the newest n − 1 samples all v? skip the next word"]:8
   norun["000 = SKIP_NORUN"]:3 norund["d"]:5 norunop["0101 nnnv<br/>bit 4 = the sense: skip unless they are"]:8
   set["000 = SET"]:3 setd["d"]:5 setop["1ppl 0000<br/>p = pin 0–3, l = level: the side effect alone"]:8
