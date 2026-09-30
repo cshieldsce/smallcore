@@ -31,13 +31,15 @@ isa/          isa.yaml: instruction set, encoding, opcodes, operand ranges
 model/        cpu.py: the golden Python model and assembler
 rtl/          Verilog-2001: core.v, fifo.v, top.v (the core with its TX and RX FIFOs), host.v (the register bus),
               rom.v (GENERATED from programs/ by make rom), smallcore.v (host + rom + top: the chip)
-programs/     assembly programs (.asm) in uart/, spi/, i2c/, swd/ and can/; manifest.txt gives each ROM program its permanent slot
+programs/     assembly programs (.asm) in uart/, spi/, i2c/, swd/, can/ and led/ (board bring-up, RAM only); manifest.txt gives each ROM program its permanent slot
 tests/        model/: pytest benches for the model and assembler
               rtl/: cocotb benches for rtl/ under Verilator, checked against model/cpu.py; top_tb.py runs the protocols end to end,
-              smallcore_tb.py runs them from the ROM through the host bus, pynq_tb.py the board wrapper
+              smallcore_tb.py runs them from the ROM through the host bus, pynq_tb.py the board wrapper,
+              pynq_axi_tb.py the AXI bridge driven by the board's own Python driver
 experiments/  candidate ISA words for CAN, CRC and REPEAT (acc/, can/, combined/, crc/, repeat/), each with the programs and models measured; tests/model/ pins them
 asic/         janestreet/: Tiny Tapeout IHP CMOS5L packaging, 6x4 tiles; src/*.v are staged from rtl/ by make tapeout-sync
 fpga/         pynq_z2/: the FPGA smoke test, buttons for a host, LEDs for read data, a PMOD jumper for the wire
+              pynq_z2/ also: the ARM as the host, an AXI4-Lite bridge onto the host bus, smallcore.py the Linux driver and command, an ILA on the pads
 docs/         Mermaid diagrams (.mmd) and rendered .svg, design write-ups and physical results, see Docs below
 tools/        gen_rom.py (programs/manifest.txt -> rtl/rom.v), wavetrace.py (waveform helper), render_docs.py (docs/*.mmd -> .svg)
 build/        generated: test waveforms, caches (safe to delete)
@@ -134,6 +136,8 @@ make test-rtl                                       # python -m pytest tests/rtl
 python -m pytest tests/rtl/test_smallcore.py -v     # the chip: host bus semantics, spi_duplex_msb from the ROM through the bus with a slave on the pads, the loopback
 python -m pytest tests/rtl/test_rom.py -v           # rom.v word for word against the assembler
 python -m pytest tests/rtl/test_pynq.py -v          # fpga/pynq_z2/ wrapper: buttons, debounce, LEDs, the PMOD jumper modelled in the bench
+python -m pytest tests/rtl/test_pynq_axi.py -v      # fpga/pynq_z2/smallcore_axi.v: the AXI bridge, driven by fpga/pynq_z2/smallcore.py; SPI, I2C and the LED programs from RAM
+python -m pytest tests/model/test_led.py -v         # programs/led/: the chaser and the host byte on the LEDs, on the model
 make rom                                            # programs/manifest.txt + the assembler -> rtl/rom.v; rom-check fails if it is stale (make test runs it)
 python -m pytest tests/rtl/test_top_adversarial.py -v  # top.v under a hostile host: stalls held, delays one-shot, metamorphic pairs, seeded traffic in lockstep with the model
 WAVES=1 make test-rtl                               # same, plus build/rtl/dump.vcd (gtkwave build/rtl/dump.vcd)

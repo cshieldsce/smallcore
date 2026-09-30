@@ -143,10 +143,12 @@ class Pads:
     attach(pin, fn): fn(out, oe) is called with the 4-bit gpio_out and gpio_oe
     each falling edge and returns the outside level for that pin, or None.
     wires: [(from_pin, to_pin)], to_pin reads from_pin's resolved level when
-    it is not driving, the board's loopback jumper."""
+    it is not driving, the board's loopback jumper. clk: the clock to resolve
+    on, dut.clk unless given."""
 
-    def __init__(self, dut, wires=()):
+    def __init__(self, dut, wires=(), clk=None):
         self.dut = dut
+        self.clk = dut.clk if clk is None else clk
         self.level = [None] * 4
         self.fn = [None] * 4
         self.wires = {to: frm for frm, to in wires}
@@ -175,7 +177,7 @@ class Pads:
 
     async def _run(self):
         while True:
-            await FallingEdge(self.dut.clk)
+            await FallingEdge(self.clk)
             out, oe = int(self.dut.gpio_out.value), int(self.dut.gpio_oe.value)
             resolved = [None] * 4
             for k in range(4):
