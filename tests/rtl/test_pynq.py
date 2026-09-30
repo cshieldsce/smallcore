@@ -19,7 +19,7 @@ def test_pynq():
     runner = get_runner("verilator")
     runner.build(
         sources=[ROOT / "fpga" / "pynq_z2" / "smallcore_pynq.v"]
-        + [RTL / f for f in ("smallcore.v", "host.v", "rom.v", "top.v", "core.v", "fifo.v")],
+        + [RTL / f for f in ("smallcore.v", "host.v", "rom.v", "ram.v", "top.v", "core.v", "fifo.v")],
         hdl_toplevel="smallcore_pynq",
         build_dir=BUILD_DIR,
         parameters={"DEBOUNCE_BITS": 3},

@@ -17,7 +17,7 @@ BUILD_DIR = ROOT / "build" / "rtl" / "smallcore"
 def test_smallcore():
     runner = get_runner("verilator")
     runner.build(
-        sources=[RTL / f for f in ("smallcore.v", "host.v", "rom.v", "top.v", "core.v", "fifo.v")],
+        sources=[RTL / f for f in ("smallcore.v", "host.v", "rom.v", "ram.v", "top.v", "core.v", "fifo.v")],
         hdl_toplevel="smallcore",
         build_dir=BUILD_DIR,
         timescale=("1ns", "1ps"),
