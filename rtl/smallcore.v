@@ -27,6 +27,18 @@ module smallcore (
     wire [7:0]  imem_addr;
     wire [15:0] imem_word;
     wire [8:0]  program_words;
+    wire [15:0] rom_word;
+    wire [8:0]  rom_words;
+
+    wire        load_mode;
+    wire        ram_select;
+
+    wire        prog_we;
+    wire [7:0]  prog_addr;
+    wire [15:0] prog_wdata;
+    wire [8:0]  prog_words;
+
+    wire [15:0] ram_word;
 
     host host_i (
         .clk      (clk),
@@ -46,15 +58,35 @@ module smallcore (
         .tx_push  (tx_push),
         .rx_pop   (rx_pop),
         .restart  (restart),
-        .sel      (sel)
+        .sel      (sel),
+
+        .load_mode  (load_mode),
+        .ram_select (ram_select), 
+        .prog_we    (prog_we),
+        .prog_addr  (prog_addr),
+        .prog_wdata (prog_wdata),
+        .prog_words (prog_words)
+
     );
 
     rom rom_i (
         .sel   (sel),
         .addr  (imem_addr),
-        .word  (imem_word),
-        .words (program_words)
+        .word  (rom_word),
+        .words (rom_words)
     );
+
+    ram ram_i (
+        .clk   (clk),
+        .we    (prog_we),
+        .waddr (prog_addr),
+        .wdata (prog_wdata),
+        .raddr (imem_addr),
+        .rdata (ram_word)
+    );
+
+    assign imem_word = ram_select ? ram_word : rom_word;
+    assign program_words = load_mode ? 9'd0 : ram_select ? prog_words : rom_words;
 
     top top_i (
         .clk           (clk),
