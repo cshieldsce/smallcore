@@ -4,3 +4,13 @@ __pycache__/
 .pytest_cache/
 backup/
 .venv/
+
+# waveforms, sim outputs, editor and OS junk
+*.vcd
+*.fst
+*.vvp
+*.swp
+*~
+.DS_Store
+.vscode/
+.idea/

@@ -1,263 +1,97 @@
-# core
+# smallcore
 
-A mini PIO-style CPU simulator. 16-bit instructions with a per-instruction delay, four output pins `gpio[3:0]`, each push-pull or open-drain, four input pins `gpio_in[3:0]`, an 8-bit output shift register fed by a TX FIFO, an 8-bit input shift register drained into an RX FIFO, a wait on an input level, a skip on a bit of the input shift register or on a run of its newest samples, a counted repeat of a run of words, a sixteen-bit accumulator, a second stream register with optional LFSR feedback, and two pieces of configuration, `shift_dir` and `open_drain`. Eighteen mnemonics in eight opcodes. The encoding is in `isa.yaml`.
+A small programmable protocol engine in Verilog, in the spirit of the RP2040's PIO block. A 16-bit core with four output pins, four input pins and two FIFOs runs short assembly programs that bit-bang serial protocols, so one block can act as a UART, SPI, I2C or SWD master or a Classical CAN transmitter/receiver depending on the program loaded. It exists to explore how little hardware it takes to run those protocols, and to test every protocol against a Python golden model before any silicon or board is involved.
 
-| instruction | does |
-|---|---|
-| `NOP [d]` | nothing |
-| `SET pin, value [d]` | gpio[pin] <- value |
-| `SHIFT_OUT [d]` | gpio[0] <- next bit of the output shift register, then shift |
-| `SHIFT_IN pin [d]` | sample gpio_in[pin] into the input shift register, then shift |
-| `PULL [d]` | output shift register <- next TX FIFO byte; stalls while the FIFO is empty |
-| `PUSH [d]` | RX FIFO <- input shift register; stalls while the FIFO is full |
-| `WAIT pin, level [d]` | stalls while gpio_in[pin] != level, a level not an edge |
-| `SKIP bit, level [d]` | steps over the next word if in_shift_reg[bit] == level: pc <- pc + 2 |
-| `SKIP_RUN n, level [d]`, `SKIP_NORUN n, level [d]` | steps over the next word if the newest n samples in the input shift register are all `level`, or not all: n 1..8 |
-| `ACC_IN pin [d]` | acc <- (acc << 1) \| gpio_in[pin]: the accumulator as a plain sixteen-bit stream register |
-| `ACC_CRC pin [d]` | the same shift with LFSR feedback: f = acc[15] ^ gpio_in[pin], acc <- (acc << 1) ^ (f ? poly : 0), a CRC of any width to 16 |
-| `ACC_OUT pin [d]` | gpio[pin] <- acc[15], then shift left: a CRC out MSB first |
-| `ACC_PUSH [d]` | RX FIFO <- acc[7:0], then acc >> 8; stalls while the FIFO is full |
-| `ACC_LOAD [d]` | poly <- {output shift register, poly[15:8]}: a polynomial byte from the host, low first |
-| `JMP label [d]` | continue at label |
-| `REPEAT count, label` | back to label until the words from label to here have run count times, 1..32; one cycle, no `[d]`: bits 12:8 hold the count |
-| `CONFIG field, value [d]` | config[field] <- value: `shift_dir` 0 (reset) or 1, LSB or MSB first for both shift registers; `open_drain01` and `open_drain23`, a 2-bit mask for pins 1:0 or 3:2, 1 = open-drain |
+**Status: verified in simulation and run through an open ASIC flow. Not yet tested on hardware.** See [Status](#status).
 
-`[d]` holds for d extra cycles. Every instruction but `JMP` and `REPEAT` can take a GPIO side effect, `pin, value` after its own operands, that drives one more pin on the same edge as the operation: `SHIFT_OUT 1, 0` puts the next bit on MOSI and drops the clock, `SHIFT_IN 3, 1, 1` raises the clock and samples MISO, `PULL 2, 0` drops CS the moment a byte arrives, `PUSH 2, 1` raises it as the received byte leaves, and a WAIT's side effect lands on the cycle the level arrives. `SET` is the side effect on its own. The FIFOs are fed and drained from outside the core: by the test bench, the CLI, or the host register bus of `rtl/smallcore.v`, the chip, which also holds every program in a ROM (see Host interface).
+## Motivation
 
-**Repository layout**
+This started from Jane Street's [protocol emulator ASIC competition](https://blog.janestreet.com/protocol-emulator-asic-competition/): design a small, reprogrammable chip that can emulate hardware protocols like UART, SPI and I2C instead of dedicating a block to each. Their suggestion is to start with a UART transmitter on a pin and then make it programmable.
 
-```
-isa/          isa.yaml: instruction set, encoding, opcodes, operand ranges
-model/        cpu.py: the golden Python model and assembler
-rtl/          Verilog-2001: core.v, fifo.v, top.v (the core with its TX and RX FIFOs), host.v (the register bus),
-              rom.v (GENERATED from programs/ by make rom), smallcore.v (host + rom + top: the chip)
-programs/     assembly programs (.asm) in uart/, spi/, i2c/, swd/ and can/; manifest.txt gives each ROM program its permanent slot
-tests/        model/: pytest benches for the model and assembler
-              rtl/: cocotb benches for rtl/ under Verilator, checked against model/cpu.py; top_tb.py runs the protocols end to end,
-              smallcore_tb.py runs them from the ROM through the host bus, pynq_tb.py the board wrapper
-experiments/  candidate ISA words for CAN, CRC and REPEAT (acc/, can/, combined/, crc/, repeat/), each with the programs and models measured; tests/model/ pins them
-asic/         janestreet/: Tiny Tapeout IHP CMOS5L packaging, 6x4 tiles; src/*.v are staged from rtl/ by make tapeout-sync
-fpga/         pynq_z2/: the FPGA smoke test, buttons for a host, LEDs for read data, a PMOD jumper for the wire
-docs/         Mermaid diagrams (.mmd) and rendered .svg, design write-ups and physical results, see Docs below
-tools/        gen_rom.py (programs/manifest.txt -> rtl/rom.v), wavetrace.py (waveform helper), render_docs.py (docs/*.mmd -> .svg)
-build/        generated: test waveforms, caches (safe to delete)
+The obvious first question is how to build a general programmable protocol machine that works for any protocol. I didn't start there. I started small and asked what the minimum hardware is for just what communication needs. The process, in order:
+
+1. **Paper first.** I mapped each protocol, up to CAN, to the least hardware that could do it.
+2. **Golden model.** A Python model and assembler of that instruction set (`model/cpu.py`) before any RTL existed. I built this with AI assistance.
+3. **Programs against the model.** I wrote the protocol programs in assembly and tested them against the model.
+4. **RTL last.** I wrote the Verilog from the model. The same programs and the model then drive the RTL benches in `tests/rtl/`, cycle by cycle for the core and at the pins for the full chip, and they pass.
+
+Each instruction exists because a protocol needed it: REPEAT, the run test and the CRC accumulator were added when SWD and CAN would not fit without them, and `experiments/` holds the candidates that were tried and measured.
+
+## Block diagram
+
+```mermaid
+flowchart LR
+    host["Host bus<br/>8-bit data, 2-bit address,<br/>write / read strobes"] --> H["host.v<br/>4 registers"]
+    H -- "CONTROL: slot, run, load" --> M["Program memory<br/>rom.v: 15 slots<br/>ram.v: 256 x 16, host-loaded"]
+    H -- "TX bytes" --> TXF["TX FIFO"]
+    RXF["RX FIFO"] -- "RX bytes" --> H
+    M -- "16-bit instructions" --> C["core.v<br/>PC, shift registers,<br/>16-bit accumulator"]
+    TXF --> C
+    C --> RXF
+    C <--> P["gpio[3:0]<br/>pads, push-pull or open-drain"]
 ```
 
-## Host interface
+`smallcore.v` is the packaged chip (host, ROM, RAM, and `top.v`, which is the core plus its two FIFOs). `top.v` is also verified on its own.
 
-`rtl/smallcore.v` is SmallCore packaged as a peripheral: `host.v`, a four-register bus, `rom.v`, every program in `programs/manifest.txt` at its slot, and `top.v`. A host selects a program by number, queues bytes, runs it, watches for completion and reads the result, with nothing outside the chip supplying instructions. The Tiny Tapeout wrapper maps the ports onto the 24 pins one for one:
+## What runs on it
 
-| signal | dir | width | Tiny Tapeout pin |
-|---|---|---|---|
-| `host_wdata` | in | 8 | `ui[7:0]` |
-| `host_rdata` | out | 8 | `uo[7:0]` |
-| `host_addr`, `host_we`, `host_re` | in | 2, 1, 1 | `uio[5:4]`, `uio[6]`, `uio[7]` as inputs |
-| `gpio[3:0]` | bidir | 4 | `uio[3:0]`: `gpio_out` drives when `gpio_oe`, `gpio_in` is the pad readback |
-
-`host_rdata` continuously shows the register `host_addr` selects. A write happens on the rising edge of `host_we`, a pop on the rising edge of `host_re`, each decoded against `host_addr` at that moment:
-
-| addr | write (`host_we` rises) | read (`host_rdata`) |
+| Protocol | Programs (`programs/`) | In the ROM |
 |---|---|---|
-| 0 TX_DATA | push `host_wdata` into the TX FIFO; dropped if full, check STATUS first | 0 |
-| 1 RX_DATA | – | RX FIFO head, 0 while empty; `host_re` rising here pops it, nothing if empty |
-| 2 STATUS | – | `{5'b0, halted, tx_full, rx_empty}` |
-| 3 CONTROL | `sel <= host_wdata[3:0]`, the core restarts at pc 0 in that slot; both FIFOs keep their bytes | `{4'b0, sel}` |
+| UART | TX (fixed byte, from FIFO, looped), RX | slots 1-4 |
+| SPI | TX LSB/MSB first, full duplex LSB/MSB first | slots 5-8 |
+| I2C | master write, with clock stretching, address + data | slots 9-11 |
+| SWD | read loop (uses `REPEAT`) | slot 12 |
+| CAN (Classical, not CAN FD) | TX with CRC, RX with CRC, RX bytes | slots 13-15 |
 
-Rules: a strobe is held at least 4 clocks high and 3 low between strobes, and low for 3 clocks after reset before the first one; `host_wdata` and `host_addr` are set before it rises and held until it falls (the transaction decodes them from the pins two clocks after the strobe is first captured, so 4 high leaves a clock of margin whatever the strobe's phase). `RX_DATA` reads 0 while the RX FIFO is empty. Exactly one push, pop or select happens per rising edge, so a host on GPIO pins, an MCU or a button, works. Hard reset clears the core, both FIFOs and `sel`, and slot 0 is no program: a fresh chip sits halted with every pad driven high until the host selects. A CONTROL write while a program runs is an abort and restart, a defined thing: the core resets, its pads return to their reset levels, the FIFOs are untouched, even on the clock a PULL or PUSH was about to act, so a byte queued behind the one in flight goes out on the next run. `halted` says execution finished, not that the protocol succeeded; the RX FIFO says what happened (an I²C program halts after a NACK too, with the ACK bit pushed for the host to read).
+More CAN programs (arbitration, ACK, bit stuffing, destuffing receiver, DLC-following receiver) live in `programs/can/` and are exercised at the pins in the RTL benches but are not in the ROM. 10BASE-T Ethernet transmit is an experiment in `experiments/ethernet/`, not a supported program.
 
-| slot | program | slot | program | slot | program |
-|---|---|---|---|---|---|
-| 0 | none, halted | 4 | `uart_rx` | 8 | `spi_duplex_msb` |
-| 1 | `uart_tx_0x55` | 5 | `spi_tx_lsb` | 9 | `i2c_write` |
-| 2 | `uart_tx_pull` | 6 | `spi_tx_msb` | 10 | `i2c_write_stretch` |
-| 3 | `uart_tx_loop` | 7 | `spi_duplex_lsb` | 11 | `i2c_write_addr_data` |
+## How it is verified
 
-Slots are permanent: a program keeps its number. 12..15 were taken 2026-09-28 for the SWD read in REPEAT form, CAN stage 6A, the CAN receiver with the CRC in the core and the destuffing receiver on the accumulator, so the chip carries programs that use REPEAT, the run test and the accumulator; no slot is free, and an unnamed one would read as slot 0. `rom.v` is one lookup on `{sel, addr}`, so every program keeps its own addresses from 0 and `JMP` targets need no relocation; the 272-word library of v1.1 cost about as much as one FIFO. Because `gpio_in[k]` is the readback of pad `k` and every pad is push-pull high out of reset, a program that listens on a pin lets go of it first, the way the I²C programs always did: `uart_rx` opens with `CONFIG open_drain01, 1`, the SPI duplex programs with `CONFIG open_drain23, 2`.
+Three layers, all in this repo:
+
+1. **Golden model**: `model/cpu.py` is a Python model and assembler of the ISA defined in `isa/isa.yaml`. `tests/model/` (3,893 tests) checks the assembler, every instruction, and each protocol program against the model, including CAN frames, CRC, bit stuffing and error cases.
+2. **RTL against the model**: `tests/rtl/` runs `rtl/*.v` under Verilator with cocotb. 11 test modules cover the core, FIFO, host bus, ROM, RAM, the top level with every program driven at the pins, the packaged chip through its host bus, and the PYNQ-Z2 wrapper in simulation.
+3. **Generated ROM is checked**: `make rom-check` fails if `rtl/rom.v` differs from what `tools/gen_rom.py` produces from `programs/manifest.txt`.
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt     # also needs Verilator on PATH
+make test         # rom-check + model tests + RTL tests (about 8 minutes)
+make test-model   # pytest tests/model only (about 6 minutes)
+make test-rtl     # pytest tests/rtl only (about 2 minutes)
+make lint         # Verilator lint, warnings do not fail
+```
+
+On the last run (2026-10-14): 3,893 model tests and 11 RTL test modules passed.
 
 ## Status
 
-**Protocol Engine v2**, tag `v2`, 2026-09-28: the core gains three things, each chosen against a protocol that needed it and each proved in RTL in lockstep with the model: REPEAT (v1.2), a counted backward branch; the run test, SKIP_RUN and SKIP_NORUN, which branch on whether the last n samples all match a level; and the accumulator, a second 16-bit stream register with optional LFSR feedback, filled by ACC_IN and ACC_CRC, read by ACC_OUT and ACC_PUSH, its polynomial set by ACC_LOAD. With them a whole Classical CAN data frame fits in 256 words at 8 clocks a bit, stuffing by the run test and the CRC in the accumulator, and arbitration fits with the identifier in the program (`docs/can-combined.md`). The ROM's last four slots now hold programs that use them: 12 the SWD read in REPEAT form, 13 CAN TX with the CRC, 14 the CAN receiver with the CRC, 15 the destuffing receiver a byte at a time. `tests/model/test_rom_slots.py` checks each slot word for word against its experiment's program and that the ROM uses every instruction but SKIP_RUN; `tests/rtl/top_tb.py` runs those programs at the pins. They have not yet been run from the ROM through the host bus in `smallcore_tb.py`. Limits, on record: the receiver cannot hold the raw history, the data and the CRC at once, and its ACK cannot depend on the CRC, because nothing decides on the accumulator; no slot is free. Hardened through the same flow in CI, zero DRC, antenna and LVS violations, `docs/physical-results.md` row "+ REPEAT, run test, accumulator": 1,894 synth cells, 2,403 routed, 31,759 µm², 3.52% of the tile, setup slack +7.20 ns and hold +0.11 ns at 20 ns, worst corners. The slow corner has 26 max-slew violations on three nets of the ROM's address decode, not yet fixed; the worst path is now the fetch into the accumulator, 3 ns longer than v1.1. The PYNQ-Z2 board test is still not run.
+- **Simulation**: model and RTL tests pass, as above.
+- **ASIC flow**: hardened through the Tiny Tapeout IHP CMOS5L flow (LibreLane) at 6x4 tiles, with zero DRC, antenna and LVS violations on each recorded row. Cell counts, area and timing per milestone are in [docs/physical-results.md](docs/physical-results.md). The slow corner of one earlier row had 26 max-slew violations on three ROM address-decode nets; they were noted and not fixed.
+- **Not done**: no FPGA board run (the PYNQ-Z2 project in `fpga/pynq_z2/` has only been simulated), no silicon, no measurement against real UART/SPI/I2C/SWD/CAN devices or a real CAN bus. The chip-level bench drives the UART and SPI slots through the host bus; the I2C, SWD and CAN programs are verified at the `top.v` level, not yet from the ROM through the host bus.
+- **Known limits**: the CAN receiver cannot hold raw history, data and CRC at once, and its ACK cannot depend on the CRC. No ROM slot is free. `SKIP_RUN` is in the ISA but no ROM program uses it.
 
-**Peripheral v1**, tag `v1.1`, 2026-09-27: SmallCore is a usable programmable protocol peripheral, not only a core that can be made to run protocols under a bench. `tests/rtl/smallcore_tb.py` drives only the chip's ports: a host at the register bus selects slot 8, sees STATUS say running, writes 0x96, and reads 0x53 back, with a mode 0 slave on the pads the only thing outside the chip; the program came from `rom.v`, the byte went through `host.v` into the real TX FIFO, out of the pads as one 8-clock frame MSB first, and the slave's byte came back through the pad readback, SHIFT_IN, PUSH, the real RX FIFO and the bus. The same bench proves strobes are edges not levels, that a strobe held high through reset does nothing, that CONTROL restarts the core and keeps the FIFOs, and switches slots mid-frame so the queued byte goes out under the new program, and that a loopback jumper from pad 0 to pad 3 returns the byte written, the wiring of the board test. `tests/rtl/pynq_tb.py` presses the PYNQ-Z2 wrapper's buttons in simulation and reads 0x96 on its LEDs; `fpga/pynq_z2/README.md` has the Vivado steps for the board itself, not yet run. The Tiny Tapeout wrapper now has its real pinout, above. Hardened through the same flow at 6x4 tiles, zero DRC, antenna and LVS violations, `docs/physical-results.md` row "+ program memory/interface": 1,010 synth cells, 1,334 routed, 20,249 µm², 2.24% of the tile, setup slack +10.15 ns and hold +0.11 ns at 20 ns, worst corners. Against v1 the host block, the whole eleven-program ROM and the real pinout cost 343 routed cells; the ROM folds to a few hundred gates because its words repeat.
+## Repository layout
 
-**Baseline v1**, tag `v1`, 2026-09-27: UART, SPI and I²C are verified end to end in RTL. Each program runs on `rtl/top.v`, the core with its TX and RX FIFOs, under Verilator, and the bench is the far end of the wire: it touches only top's host ports and pins, pushing bytes into the real TX FIFO, popping them from the real RX FIFO, and reading or driving `gpio_out`, `gpio_oe` and `gpio_in`.
-
-| protocol | programs | the bench is | proves |
-|---|---|---|---|
-| UART | `uart_tx_pull.asm`, `uart_rx.asm` | a line sampled once per clock; an 8N1 frame driven in | a host byte leaves as a frame at 8 clocks per bit; a frame arrives as one host byte |
-| SPI mode 0 | `spi_tx_lsb.asm`, `spi_tx_msb.asm`, `spi_duplex_lsb.asm`, `spi_duplex_msb.asm` | a slave that samples MOSI on SCLK's rise and drives MISO while it is low | CS frames exactly eight clocks; 0x96 leaves in either bit order under `CONFIG shift_dir`; 0x53 comes back through SHIFT_IN, PUSH and the RX FIFO in both orders |
-| I²C master write | `i2c_write.asm`, `i2c_write_addr_data.asm`, `i2c_write_stretch.asm` | two open-drain lines with pull-ups, resolved every clock from `gpio_oe`, and a slave that ACKs or NACKs and can hold SCL | START, the byte, the ACK or NACK sampled and PUSHed to the host, STOP; the ACK steers SKIP, address then data on an ACK, STOP with the data byte still in the FIFO on a NACK; a slave stretching 8 clocks holds the master 5 clocks per clock, 50 in all, the model's numbers |
-
-Behind that: `model/cpu.py` is the golden model, with 2431 pytest tests in `tests/model/` including an adversarial sweep of every 16-bit word. `tests/rtl/core_tb.py` runs the core in lockstep with the model (18 tests), `fifo_tb.py` the FIFO (7), `top_tb.py` the protocols above (13), and `top_adversarial_tb.py` (21) is the adversarial sweep, every run in lockstep with the model and every byte in both FIFOs after every edge: each kind of stall held 37 clocks and released once, every delayed word acting once, LSB against MSB first for all 256 bytes, a stall against a delay, a SKIP right after the sample it reads, branches on their last edge, CONFIG next to a pin write, a pin driven, released, sampled and driven again on a pad model, an open-drain SDA with a slave on the pad, restarts and resets with bytes queued in both FIFOs, the FIFOs wrapping around and at their full and empty boundaries under a host that never reads STATUS, host traffic while the core is stalled, the last addresses of a 256-word program, the 45,312 words the ISA rejects, and 250 seeded programs of up to 64 words under random host pushes, pops, restarts, resets and pin levels. The SPI, I²C and adversarial tests were each shown to fail under a mutation of the program, the bench or the RTL before being kept.
-
-The v1 RTL hardened through the Tiny Tapeout IHP CMOS5L flow at 6x4 tiles with zero DRC, antenna and LVS violations; `docs/physical-results.md` has the row, "+ FIFO storage", and its notes.
-
-| synth cells | routed cells | cell area | utilization of 6x4 | setup slack | hold slack |
-|---|---|---|---|---|---|
-| 695 | 991 | 16,571 µm² | 1.84% | +10.86 ns | +0.14 ns |
-
-Slacks are at the flow's 20 ns clock, worst corner. The two DEPTH 4 FIFOs are 60% of `top` and the biggest area lever; the wrapper's pin mapping is still provisional. Known gap, accepted for v1: the random lockstep compares each FIFO by count and head, not every queued byte, so a byte corrupted deeper in a FIFO would show only on reaching the head; `fifo_tb.py` covers ordering, wrap and full on its own.
-
-## Commands
-
-```
-python -m pip install -r requirements.txt           # plus Verilator 5.036+ on the PATH for the RTL
-python -m pytest -v                                 # writes build/waves/<test bench>/<test>.svg
-python model/cpu.py                                   # runs programs/uart/uart_tx_0x55.asm: listing + one trace per pin
-python model/cpu.py programs/uart/uart_tx_pull.asm 0xA3    # one byte from the TX FIFO
-python model/cpu.py programs/uart/uart_tx_loop.asm 0x55 0xA3   # streams the FIFO, then stalls on PULL
-python model/cpu.py programs/spi/spi_tx_lsb.asm 0xA3      # SPI mode 0: MOSI, SCLK, CS on gpio 0, 1, 2
-python model/cpu.py programs/spi/spi_tx_msb.asm 0xA3      # same words except CONFIG shift_dir, 1
-python model/cpu.py programs/spi/spi_duplex_msb.asm 0xA3  # also samples MISO on gpio_in 3 and PUSHes the byte (the CLI holds inputs at 0)
-python -m pytest tests/model/test_uart_rx.py -v           # UART RX: uart_rx.asm fed by uart_tx_loop.asm over a wire, waves in build/waves/uart_rx/
-python -m pytest tests/model/test_i2c.py -v               # I2C master write on a bus model with a slave: one byte, clock stretching, address + data
-python model/cpu.py programs/swd/swd_write.asm 0xA9      # SWD write: request, turnaround, ACK, turnaround back, branch on the ACK, on OK four data bytes and a parity byte; SWDIO on gpio 0, SWCLK on gpio 1 (the CLI holds inputs at 0: no ACK, the program exits)
-python model/cpu.py programs/swd/swd_read.asm 0x8D       # SWD read: on OK 32 data bits and the parity follow, six bytes to the host (the CLI holds inputs at 0: no ACK, the program exits)
-python -m pytest tests/model/test_swd.py -v               # SWD: a target on the wire decodes every request the host can make, answers OK, WAIT or FAULT, sends a word
-python model/cpu.py programs/can/can_tx.asm 0x5A 0x30      # CAN stage 1: the SOF and identifier 0x5A3 as two host bytes, 8 cycles a bit on gpio 0, the bus (the CLI holds inputs at 0: the sampled byte reads 0)
-python model/cpu.py programs/can/can_tx_arb.asm 0x5A 0x30  # CAN stage 2: the same frame under arbitration, TXD on gpio 0 read back on gpio_in 0, the bus on gpio_in 1 (the CLI holds inputs at 0: TXD reads back dominant, nothing is ever lost, the frame goes out whole)
-python model/cpu.py programs/can/can_tx_ack.asm 0x5A 0x30  # CAN stage 3: the frame, then the ACK slot let go and sampled, the decision in the delimiter (the CLI holds inputs at 0: acked, one byte, the halt)
-python model/cpu.py programs/can/can_tx_stuff.asm 0x7F 0xF0 # CAN stage 4: 0x7FF stuffed, 16 cycles a bit, the decision tree needing seven after the sample (the CLI holds inputs at 0: every sample dominant, so a recessive stuff bit follows every bit from ID[7] on, 20 bits)
-python model/cpu.py programs/can/can_tx_frame.asm 0x40 0xD1 0x81 0x5A 0x7D 0xAE  # CAN stage 5A: a whole data frame, 0x5A3 with one byte 0x5A and the CRC the host computed, 16 cycles a bit, the six bytes cut where the program's PULLs fall (the CLI holds inputs at 0: every sample dominant, so a recessive stuff bit follows every five bits, and the ACK slot reads acked)
-python -m pytest tests/model/test_can.py -v               # CAN: a wired-AND bus with an ideal receiver and a competing transmitter; the SOF and the identifier held 8 cycles a bit, the sample point probed with a one-cycle glitch, a host late mid-frame, arbitration won and lost on every recessive bit, the ACK slot pulled dominant by the receiver or not, the frame again after no ACK, stuff bits after every run of five and a receiver that drops them; a whole data frame with the host's CRC through a 4-deep FIFO, every PULL and PUSH inside it stalled in turn
-python model/cpu.py experiments/crc/crc4_lfsr.asm 0x5A 0x3A 0x00 0x5A  # CRC-4 on the current ISA: the widest CRC the core can compute, four bytes out on pin 0 and back, the feedback bit on pin 1 (the CLI holds inputs at 0, so nothing comes back: the byte reads 0; tests/model/test_crc.py wires the pads back)
-python model/cpu.py programs/can/can_rx_destuff.asm       # CAN RX3 to RX5: the stuffing tree on the receive side at 8 cycles a bit, the stuff bit dropped, the destuffed stream on pins 2 and 3, the ACK slot pulled (the CLI holds inputs at 0: the SOF is seen at once and every sample is dominant, a stuff bit after every five)
-python -m pytest tests/model/test_can_rx.py -v            # CAN RX on the current ISA, no candidate: the SOF by WAIT and 48 raw bits; the stuff test in a body at 8 clocks a bit, the stream on the pins, the ACK found; the stream through the FIFO a bit a byte at 9 clocks; bytes in the core counted at 1629 words for the header and refused
-python -m pytest tests/model/test_crc.py -v               # CRC-15 on the current ISA, the three baselines: the oracle and the Fibonacci form, the census of what every word writes and reads, CRC-4 against the oracle, the CRC as data in the frame
-python -m pytest tests/model/test_can_candidates.py -v    # the CAN candidates (experiments/can/) spliced into the arbitration and stuffing programs against the baselines, the bus cycle for cycle and bit for bit
-python -m pytest tests/model/test_repeat.py -v            # REPEAT on the model: count 1..32, one- and 255-word bodies, stalls in the body, restart every cycle, the assembler's rules, every program with REPEAT against its canonical one
-python -m pytest tests/model/test_repeat_candidates.py -v # the repeat candidates (experiments/repeat/) spliced into the SWD programs against the baseline, cycle for cycle
-python experiments/repeat/suite.py                  # the existing model suite run on each candidate's model: what each one disturbs
-python tools/render_docs.py                         # docs/*.mmd -> .svg (needs mermaid-cli)
-make lint                                           # verilator --lint-only -Wall -Wno-fatal rtl/core.v
-make test-rtl                                       # python -m pytest tests/rtl: Verilator builds core.v and top.v into build/rtl/, cocotb runs tests/rtl/*_tb.py
-python -m pytest tests/rtl/test_smallcore.py -v     # the chip: host bus semantics, spi_duplex_msb from the ROM through the bus with a slave on the pads, the loopback
-python -m pytest tests/rtl/test_rom.py -v           # rom.v word for word against the assembler
-python -m pytest tests/rtl/test_pynq.py -v          # fpga/pynq_z2/ wrapper: buttons, debounce, LEDs, the PMOD jumper modelled in the bench
-make rom                                            # programs/manifest.txt + the assembler -> rtl/rom.v; rom-check fails if it is stale (make test runs it)
-python -m pytest tests/rtl/test_top_adversarial.py -v  # top.v under a hostile host: stalls held, delays one-shot, metamorphic pairs, seeded traffic in lockstep with the model
-WAVES=1 make test-rtl                               # same, plus build/rtl/dump.vcd (gtkwave build/rtl/dump.vcd)
-make test                                           # tests/ then tests/rtl/
-```
-
-## Design pressures
-
-What the protocols have asked of the core, in order. Open items stay open until a program needs them.
-
-| pressure | from | status |
-|---|---|---|
-| more than one output pin | SPI | `gpio[3:0]`, `SET pin, value` |
-| shift and drive a second pin on one edge | SPI | the side effect: 2 instructions, 8 cycles per bit |
-| MSB first | SPI | `shift_dir`, `CONFIG shift_dir, 1` |
-| sample a pin on the edge that raises the clock | SPI duplex | `gpio_in[3:0]`, `SHIFT_IN pin, out_pin, value`; RX costs no instructions or cycles |
-| get the received byte out | SPI duplex | `PUSH` into an RX FIFO; `PUSH 2, 1` also ends the frame |
-| six of eight opcodes used | the ISA | one `SHIFT` opcode with an in bit, one `FIFO` opcode with a push bit, generic `CONFIG`, the side effect on every opcode, `SET` = `NOP` + side effect |
-| wait for an input level: the start bit | UART RX | `WAIT pin, level`: the stall PULL and PUSH already had, with a pin level as its third condition; `uart_rx.asm` is 11 words, `WAIT 0, 0 [11]` then eight mid-bit `SHIFT_IN`s |
-| let go of a line: a third output state | I2C | `open_drain[3:0]`, one mode bit per pin: `gpio_oe[k] = !(open_drain[k] & gpio[k])`, an open-drain pin drives its 0 and lets go on a 1; the same words see the ACK and follow the stretch. `CONFIG open_drain01, 3` sets both I2C pins in one word: two 2-bit fields cover the four pins with CONFIG's shape unchanged, field 3 stays free |
-| wait for the clock to really rise | I2C clock stretching | `SET 1, 1` then `WAIT 1, 1 [2]`: the WAIT as built, one more word per clock |
-| act on the ACK: STOP after a NACK | I2C address + data | `SKIP bit, level`, pc + 2 when a bit of the input shift register holds the level: `SKIP 0, 0` then `JMP stop` after the ACK clock, from the register since SDA has let go by then. A conditional JMP on the last sample was one word shorter and could not pick the bit, the polarity or the word it guards; JMP keeps its 8-bit target |
-| compact repetition / bit count | SPI, 16 words per byte; I2C, 3 per bit; SWD, 89 of 103 and 90 of 106 words repeat an earlier word | `REPEAT count, label`, opcode 111, the last one: a counted backward branch, count - 1 in the delay bits, the distance back in the operand byte, a 5-bit counter that moves on the REPEAT's cycle only, so stalls and delays inside the body leave it alone. How it was chosen is the method on record: no loop word for four protocols, because their bit cells could be unrolled; SWD made the repetition measurable rather than assumed; four ways to say "again" compared on the model against the real programs, `docs/repeat-candidates.md` (A 40/40, C 43/43, D 33/36 words, B nothing); the smallest general one taken; then run backwards over every earlier protocol and found to serve each without moving a cycle, the ROM's 275 words to 111. In `isa.yaml`, the model and `core.v`: a 5-bit register, a decrement, a zero test and the subtract, nothing else in the core touched; the corners pinned on the model (`tests/model/test_repeat.py`) and RTL against model on the same corners, stalls inside random bodies included (`tests/rtl/core_tb.py`), the 40-word SWD programs clock for clock the 103- and 106-word ones at the pins (`tests/rtl/top_tb.py`). The 103- and 106-word programs stay as the record of why |
-| per-pin idle level | SPI, one `SET` for SCLK | open, not hurting yet |
-| configurable shift-output pin | SPI | open, fixed `gpio[0]` has not failed |
-| listen on a pad that is push-pull high at reset | the chip: `gpio_in` is the pad readback | one `CONFIG` word releases the pin, `uart_rx`, `spi_duplex_*`; the I²C programs already did |
-| clock a request out, the target sampling on the rise | SWD stage 1, the request alone | nothing new: the first 18 words of `swd_write.asm` and `swd_read.asm` are `spi_tx_lsb.asm`'s two words per bit without CS, LSB first as the core resets |
-| let go of the line for one clock: the turnaround | SWD stage 2 | nothing new: `CONFIG open_drain01, 1` with the park bit's 1 on the pin, the word's side effect dropping SWCLK, so the release is one word on the beat, as I²C's ACK clock was |
-| take a 3-bit field from the target and hand it to the host | SWD stage 3, the ACK | nothing new: three `SHIFT_IN 0, 1, 1` and a `PUSH`, I²C's ACK clock three times. Observed, not hurting: three LSB-first samples sit in bits 7:5 of the byte, the host reads OK as 0x20, WAIT 0x40, FAULT 0x80 |
-| branch three ways on a 3-bit field | SWD stage 4, OK / WAIT / FAULT | works, on record: SKIP sees one bit, so the decision is `SKIP 5, 0`, `JMP data`, `SKIP 6, 0`, `JMP request`, `JMP done`, five words. Two things the core cannot do, found here and left open: resend the request on WAIT (SHIFT_OUT empties `shift_reg`, only PULL reloads it, so the retry is a JMP to the PULL and the host pushes the request again) and tell a read from a write (the RnW bit went out on the wire; SKIP sees only sampled input), so read and write are two programs |
-| take 32 data bits and a parity bit from the target | SWD stage 5, the read, `swd_read.asm` | works, 103 words: two per bit and a `PUSH` in place of every eighth clock drop, the repetition pressure at its widest. On record: a read is six bytes (ACK, four data, parity as bit 7 of a fifth over data[31:25]) through a 4-deep RX FIFO, so the host pops mid-transaction or the fifth PUSH stalls with SWCLK stopped (SWD allows it); the core has no XOR, so parity is the host's to check; the branch must come before the turnaround back, because on OK the target keeps the line |
-| send 32 data bits and a parity bit the host computed | SWD stage 6, the write, `swd_write.asm` | works, 106 words: a PULL per data byte in the last high cycle of the clock before, so a prompt host costs no cycles; the parity is bit 0 of a fifth byte, the host's to compute. On record: the host must not queue the data behind the request, because on a WAIT the retry PULLs the next byte as the request and nothing but PULL can discard a queued byte, so a host writes the request, reads the ACK, then queues the data; request, data and parity are six bytes through a 4-deep TX FIFO |
-| stop the clock mid-transaction: a host that does not read | SWD, the sleeping host | nothing new, the stall as built, on a real protocol: the fifth `PUSH` finds the RX FIFO full after data bit 31 and the core stands still for as long as the host sleeps, SWCLK high without a glitch, the pad off SWDIO with the target holding bit 31, pc on the PUSH, `in_shift_reg` and the FIFO unchanged; one pop and it moves exactly once, one rise (the parity's) to the sixth PUSH's stall; the six bytes arrive whole. At the pins on `top.v` (`imem_addr` is the pc, the FIFO's full flag) and in the model |
-| the host pushes the request again on WAIT: must it hurry? | SWD, the slow host | no. The retry's `PULL` stalls with SWCLK low and SWDIO high and the host's; the target sees no edge to count; once the byte lands the run is the prompt host's cycle for cycle, whether the host is 1 or 1000 cycles late (13 clocks in hand on `top.v`). SWD moves on SWCLK alone and has no timeout on a stopped clock. On record as an API inconvenience, not a timing burden |
-| drive a bit for a fixed time and sample it at a fixed point, no clock line | CAN stage 1, the SOF + 11-bit identifier, `can_tx.asm` | nothing new: `SHIFT_OUT [5]`, `SHIFT_IN 0`, `REPEAT` is an 8-cycle bit driven on its first cycle and sampled on its seventh, the level the bus held through its sixth (75%), `uart_tx`'s cell with a sample in it; dominant is a driven 0 and recessive a let-go 1, `CONFIG open_drain01, 1` as for I²C's SDA, the bus is the pad readback; 13 words for 12 bits, 100 cycles, the receiver on the bus reads every identifier back. Observed, not hurting: the second byte's PULL needs the cycle the REPEAT has, so the first byte's last cell is unrolled (three words); the register zero-fills, and a 0 is dominant, so the host writes the SOF as bit 7 of the first byte and the program lets go after ID[0] rather than run the register out |
-| a host that is late in the middle of a frame | CAN stage 1, the second byte | on record, not fixed: the PULL for {ID[3:0], 0000} issues in ID[4]'s eighth cycle, and a host `n` cycles late stretches ID[4] by exactly `n`, every later bit late by as much. The transmitter's own samples move with its bits, so the byte it hands the host is right; a receiver counting from the SOF reads the frame right up to 5 cycles late and wrong from 6. CAN has no clock line to stop: the stall that let SWD's host sleep is a timing fault here, so the host queues both bytes before the frame, which a 4-deep FIFO has room for |
-| know what was sent while seeing what came back: arbitration | CAN stage 2, a second transmitter on the bus, `can_tx_arb.asm` | **the first thing the core cannot do**, on record. A node that sent recessive and sees dominant has lost and must send nothing more. With the pad on the bus, `gpio_in 0` the bus as I²C and SWD had it, no program can tell that bit from its own dominant one: the sent bit sits on the pin register, which nothing reads, `shift_reg` has zero-filled, SKIP and WAIT see inputs only. `can_tx.asm` against a competitor (`tests/model/test_can.py`): it wins when its identifier is lower, free, because the competitor withdraws; when it should lose it drives on, the bus is the AND of both frames until the competitor withdraws too, and the receiver reads an identifier nobody sent. The workaround that works is the transceiver's view: TXD on pin 0 push-pull, its own pad readback on `gpio_in 0` as the bit sent, RXD on `gpio_in 1`; then two `SHIFT_IN`s a bit and the pair decides, `SKIP 1, 1`, `JMP next [1]`, `SKIP 0, 0`, `JMP next`, `JMP lost`, three cycles on every path. Costs, measured: a JMP out of a body is what REPEAT forbids, so the eleven identifier cells unroll, 95 words and 34 distinct for 12 bits against 13 and 8; the decision's three cycles move the sample point from the sixth clock of the bit to the fourth at 8 cycles a bit, or the bit grows; a loss before ID[4]'s PULL strands the second byte in the TX FIFO, and only a PULL drops it (SWD's finding again), one more exit; the host reads one byte, the last four (sent, seen) pairs, a loss as (1, 0) last, and cannot tell from it which bit was lost. The sent bit, the compare and the exit from a loop are the candidates' problem, the reviewer's to weigh; nothing in the core is touched |
-| a FIFO stall inside a frame | CAN, the first protocol where a stall is not protocol-safe | on record, since stage 1: SWD's host could sleep because SWCLK stopped with it; a CAN bit has a length the network keeps, so a PULL or PUSH that waits inside a frame stretches the bit under it and every receiver's sample after it lands wrong (stage 1's late host: 5 cycles of margin at 8 a bit, then the frame is lost). Between frames a stall is safe: stage 3's retry PULL waits on an idle bus for as long as the host takes. Not an ISA question yet: it will press on the host's choreography or the FIFO depth once frames carry 8 data bytes and a receiver has to buffer, so the number to watch is the cycles in hand at every PULL and PUSH |
-| release the bus for one bit, sample it, decide | CAN stage 3, the ACK slot, `can_tx_ack.asm` | nothing new, as expected: `SET 0, 1 [5]` lets go for the slot and `SHIFT_IN 0 [1]` samples it as every bit is sampled, the receiver's dominant lands in the byte the host reads; the decision is one `SKIP 0, 1` in the delimiter, because the bit sent in the slot is the program's constant, not shift_reg's: what arbitration lacked, the ACK has for free. 21 words for stage 1's 13. Not acked: the byte says so, EOF and the intermission are `NOP [6]` and `REPEAT 10`, and the frame goes again from two more host bytes, since nothing but PULL loads shift_reg (SWD's WAIT retry again); the host has 87 cycles to queue them before the PULL stalls, safely, on the idle bus. Error signalling, the frame CAN really sends there, is a later stage |
-| remember the run: after five bits of one level, send one of the other | CAN stage 4, dynamic bit stuffing, `can_tx_stuff.asm` | works, ugly, on record, the second complaint. No counter is needed: the bus is sampled every bit and the last five samples sit in `in_shift_reg` bits 4:0, the run itself. The decision is the cost: a tree of single-bit SKIPs, the newest sample picks a side, four SKIPs ask whether the four before it match, a JMP out at the first that does not, the stuff bit at the end of the fall-through, `SET 0, level [7]` for a full bit that takes nothing from `shift_reg` and is sampled so the next window counts it. Seven cycles on the longest path after the sample, and a two-way branch whose two continuations must both land on the next bit edge costs a cycle more on the JMP side than on the fall-through, so every exit carries a delay. At 8 cycles a bit the tree is one cycle too long even sampling on the bit's first clock, so a bit is 16 here, sampled on its eighth (50%): the bit rate halves. ID[7] to ID[0] are written out, 27 words each: 224 words, 71 distinct, for 12 bits, against 13 for stage 1 (a mistake found in the candidate round: every exit can land on the REPEAT that ends the body, which the assembler allows, so the same cell is a body and the same frame is 91 words on today's ISA, `experiments/can/can_tx_stuff_loop.asm`; the 224 stay as written, the bit time and the seven-cycle tree do not change); 196 cycles for an identifier with no run, 228 with two stuff bits; the host's byte holds stuff bits among the samples. What arbitration and stuffing share: a decision on the last samples that has to leave a loop body and land on the very next bit edge; what stuffing adds: the decision is over five bits, not two. **Then `SKIP_RUN n, level` and `SKIP_NORUN n, level`, adopted 2026-09-28 after the receiver asked the same question**: the newest n samples all one level, in NOP's hole, no state, no side effect; the transmitter's cell 27 words to 12 and 16 cycles a bit to 8 (`experiments/can/can_tx_stuff_C.asm`, 104 words, the loop form 46), the receiver's 23 to 12 on the pins and 24 to 9 through the FIFO, which then fits 8 clocks (`can_rx_destuff_C.asm` 34 words, `can_rx_bits_C.asm` 27); the 224- and 56-word programs stay as the record of why. On the model and pinned (`tests/model/test_skip_run.py`); in `core.v`, a turn of the register, a mask and a compare into SKIP's pc mux, RTL against model on every corner and the two programs at the pins |
-| send a whole data frame: 42 stuffed bits with five host bytes inside them, then the fixed form, at one bit time throughout | CAN stage 5A, `can_tx_frame.asm`: the SOF, the identifier, RTR, IDE, r0, the DLC, a data byte, the CRC the host computed, the CRC delimiter, the ACK slot, its delimiter, EOF and the intermission, unopposed | works, on record: **the program's size shapes the host's bytes.** Stage 4's cell is 27 words a checked bit and a PULL breaks a body, so stage 4's shape, a one-cell body between PULLs, is 317 words for the frame and 262 with no data at all, in a 256-word program memory. What fits is one eight-cell body with the PULL in its first cell, run 4 + DLC times, 233 words, and then the host's bytes are cut where that body's PULLs fall, not at the frame's fields: `{SOF, ID[10], ID[9], 00000}`, `ID[8:1]`, `{ID[0], RTR, IDE, r0, DLC}`, the data byte, `CRC[14:7]`, `{CRC[6:0], 0}`. Two more things the frame found: the body checks every bit it sends from ID[9] on, so `in_shift_reg` must hold a recessive sample below the SOF, one `SHIFT_IN` of the idle bus before the PULL, or `ID[10] = ID[9] = 0` reads as five dominant with the register's zero fill; and the body's REPEAT count is the payload length, the one word that differs between a DLC 1 and a DLC 8 program, since nothing lets the host set a count, so a frame length is a program. Not built, measured: arbitration beside stuffing, 11 written-out identifier cells of 27 + 5 words, does not fit 256 either; 5A is stage 4's frame, unopposed, and stage 2's view of the bus is a separate program until something changes |
-| have the frame's data in hand before a timing-critical frame starts | CAN stage 5A, six bytes through a 4-deep TX FIFO, thirteen for DLC 8 | on record, a host contract, not an ISA question: the host cannot queue a frame and go. Four bytes fit before the SOF; the fifth goes in as the first PULL, before the SOF, makes room, and every byte after that has the window from the PULL four bytes before it to its own, 32 stream bits and the stuff bits among them less a cycle, 543 cycles here and 511 at the least; for DLC 8 the host queues nine of thirteen bytes inside the frame on that clock. Every point where a stall corrupts the frame is counted: the five PULLs, on the seventh clock of the first bit of every body run, a host late there stretches that bit by exactly its lateness and a receiver counting from the SOF reads the frame right up to 6 cycles late and reads a bad CRC from 7, and does not ack; the PUSH in the ACK delimiter is the one stall that corrupts nothing, the delimiter and EOF being recessive, it only holds the node's own intermission. A stall between frames stays safe: not acked, the frame goes again from the host's six bytes, the PULL waiting on the idle bus |
-| program reach: 256 words a program | CAN stage 5A, the whole frame; arbitration beside stuffing | **a first-class pressure, on record, not fixed.** The full-frame TX with stuffing is 233 words; arbitration beside stuffing, eleven written-out identifier cells of 27 + 5 words, does not fit the 256-word per-program address space, and CRC-4's 101 words beside the frame would not either. The chip has room; a program has 256 words, the 9-bit pc and JMP's 8-bit target. Not widened: whether 256 is an architecture limit or a symptom of today's expensive control structures is what RX, the held candidates and CRC decide, since a run test folds stuffing's 27 words a bit to 12 and a branch folds arbitration's cells |
-| compute the CRC: fifteen bits that shift and take XOR feedback from the sent bit | CRC-15 on its own, `experiments/crc/crc4_lfsr.asm`, `docs/crc-baselines.md` | **the second thing the core cannot do**, the third kind of failure: not a bit the control flow cannot see (arbitration), not a test that is expensive (stuffing), but state that is not there. Pinned by a census of every word: `in_shift_reg` is the only state a program both writes and reads, eight bits, one at a time at one end, one at a time into the pc; the pins are written as constants and read only by sampling them back, which costs a register slot; a bit reaches a pin only through the pc, so every XOR is control flow. Of the five questions: the width fails first, eight bits for fifteen; the XOR does not, two paths through SKIPs meeting on a pin, 8 words for two inputs, 13 for three, 4 to 9 cycles; the sent bit comes in as it does for stuffing; writing back fails in the spec's form, a bit in the middle of the register cannot be flipped and rebuilding it through a pin needs twice the width, but the register seen from its input end is a Fibonacci LFSR whose shift is the only write, so that wall goes; together, thirty bits wanted in the form the core can execute, since every input bit takes a slot beside its feedback bit, fifteen in any form, eight there. Three baselines, no candidate: the host's CRC and the CRC as data are the same baseline from two sides, the computation separable from the wire, no word of the frame the CRC's; CRC-4, the widest with eight bits, 101 words, 17 a byte's cell, 8 to 11 cycles an input bit, the CRC to the host in a nibble, at the pins too. An XOR word alone would solve nothing, XOR against what; the shapes that could are different architectures and none is named until RX has spoken. **Then the state candidates, 2026-09-28, measured, nothing merged** (`docs/crc-candidates.md`): the register widened to 32 computes CRC-15 in 180 words at 13 to 20 cycles an input bit, and an input read from the pad without a slot halves that to a 16-bit window, 171 words, as predicted; neither fits a CAN bit or the frame, and neither touches RX. Two 8-bit lanes solve RX and not CRC-15, since they do not cascade. A 16-bit accumulator with a loadable polynomial computes it in 23 words and 3 cycles a bit, and with the polynomial 1 is a second stream register that solves RX too, one at a time. **Adopted 2026-09-28: the accumulator**, with the plain shift and the feedback shift as two words, ACC_IN and ACC_CRC, so a plain stream never feeds bit 15 back; W32 and Pin16 rejected, correct but unusable; Lanes subsumed, the accumulator being Lanes widened to sixteen with a feedback path. On the model (`tests/model/test_acc.py`); CRC-15 in 23 words, 3 cycles a bit; in `core.v`, sixteen bits of acc and sixteen of poly, sixteen XORs, a push mux onto the RX FIFO's port, RTL against model on every word and both programs at the pins |
-| a two-way branch that lands on the next edge from either side | CAN arbitration, stuffing, RX; SWD's and I²C's ACK | **rejected for the current ISA, 2026-09-28**, after the last measurement: `can_rx_bits.asm` with BRANCH (`experiments/can/can_rx_bits_A.asm`) is an eight-clock receiver for a nine-clock one, 47 words for 57, the same bytes, the same ACK, the same sample point, the same bound on the host; the dominant tree's longest path was exactly the JMP. But the run test, adopted, does the same for that receiver in 27 words, so A's case there is met by C, and what is left to A, arbitration's symmetric decision (95 to 84 words, 3 cycles to 2, already at 8 clocks a bit without it) and the ACK asymmetry SWD and I²C share (one word, one cycle, which neither protocol feels), enables no workload and removes no measured limit. A nice generic branch is not enough under the method. The candidate and its evidence stay in `experiments/can/`; a later protocol can reopen it (`docs/can-candidates.md`, "Decided") |
-| receive: the SOF's edge, then raw bits at fixed timing | CAN RX1 and RX2, `can_rx.asm` | nothing new: `WAIT 0, 0 [4]` is the synchronizer, `uart_rx.asm`'s, and issues on the SOF's first clock; then a body of eight `SHIFT_IN 0 [7]` with the PUSH in the eighth, 13 words, 8 clocks a bit sampled on the sixth (75%), six raw bytes to the host, stuff bits and all. What it cannot do: know where the frame ends, since the DLC is in data the stuff bits move and it counts raw bits, so it takes 48 and halts; it cannot find the ACK slot |
-| detect a stuff condition on the receive side, drop the stuff bit, recover the stream | CAN RX3 to RX5, `can_rx_destuff.asm` | **works at 8 clocks a bit, which the transmitter could not.** The same five-bit question as stage 4's, the same tree of single-bit SKIPs on `in_shift_reg` bits 4:0, five cycles on the recessive side and six on the dominant (the JMP into the dominant tree, the asymmetry again) with every exit padded to the REPEAT; but a receiver's decision has until the next *sample*, not the next edge, so one SHIFT_IN, six of decision and the REPEAT is a cell of eight, and the stuff bit is sampled inside the same body run, since the raw history must hold it, and marked not data. So the REPEAT counts data bits, the ACK slot is found, 42 body runs for DLC 1, and pulled dominant. 56 words, 37 distinct, a 23-word cell as a body of 32 and again of 10. C's trial: the run test costs RX what it cost TX in words, 23 a cell against 12 with a run test, and nothing in cycles; A's: the exits are SKIP, JMP, a delay, the next sample, as in TX |
-| hold the raw history and gather the destuffed data at once | CAN RX5 and RX6, the state a receiver needs | **the second collision of state, the CRC's kind.** The run test reads the last five raw samples; the host wants destuffed bytes; `in_shift_reg` is the one register a program both writes and reads, and it holds one or the other. Measured, the three ways out: the stream leaves on pins, pin 2 the data bit by the trees' first words' side effects and pin 3 whether the slot was data, at no words and no cycles, for a second receiver to gather (`can_rx_destuff.asm`); or through the RX FIFO, a PUSH after every data sample and none after a stuff bit, bit 0 of each byte the next data bit, 42 pops a frame for the host to assemble, and the PUSH is a ninth cycle the dominant tree's longest path has no room for, so the bit is 9 clocks, an eighth of the rate (`can_rx_bits.asm`, 57 words), with the host bound to pop within four bit times all through the frame; or the stuff history in the pc, four shadow cells per level after every data bit whose run test knows the stuff bit the register lacks, and since a REPEAT body cannot carry that across its boundary every data bit is its own cell: the nineteen-bit header alone is 1629 words, refused by the assembler (`tests/model/test_can_rx.py`). Not fixed. What a candidate would have to offer is not the run test but a second stream, a way to sample a pin without a shift, or a register the input does not enter |
-| a count from the data just received | CAN RX, the DLC | on record: the receiver's frame length is in the DLC it sampled twelve bits ago, and nothing loads rc from the register, so the count is a constant and a receiver is for one DLC, as the transmitter is |
-| two mutable stream histories at once | CAN CRC-15 and CAN RX, the same class twice | **a recurring pressure, on record, not fixed.** CRC wanted its register beside the input it takes; RX wants the raw history the run test reads beside the destuffed data the host wants; each found the one register a program both writes and reads holds one thing. Not a bit the control flow cannot see, not a test that is expensive, not a word: state. Two independent workloads is the evidence a second shift or state register would be earned by, more than "CRC needs fifteen bits" alone; **then the accumulator, adopted 2026-09-28**, the second stream register with optional LFSR feedback, on the model (`tests/model/test_acc.py`) and in `core.v`. The CRC candidate round measured it: a second 8-bit register gives the receiver destuffed bytes at 8 clocks a bit and the host 33 bit times of slack for 4, and the accumulator with the polynomial 1 does the same; no candidate gives a receiver the raw history, the data and the CRC at once (`docs/crc-candidates.md`) |
-| the sent bit beside the bus bit, under stuffing | CAN stage 6B, arbitration in the combined transmitter | **the transmitter's third stream, on record, not fixed.** Arbitration wants the bit a node sent beside the bit on the bus, and stuffing the last five bus bits, from the one register SKIP and the run test read; two samples a bit leave four bits of history, and the CRC has the accumulator. With the identifier in the program the comparison is the assembler's: the header written out with its stuff bits, a recessive bit checking the bus, 206 to 228 words for every identifier at 8 clocks a bit, one program per identifier (`docs/can-combined.md`) |
-| a decision on the accumulator | CAN stage 6C, the receiver's ACK | **on record, not fixed.** A receiver acks only a frame whose CRC matched; the residue is in acc, and acc reaches the pc only through a pin and a sample a bit, thirty cycles for fifteen bits where the CRC delimiter leaves eight. `can_rx_crc.asm` checks the CRC in the core, 35 words, and acks whatever it says; the host reads the residue |
-
-SWD by the numbers: one transaction the target says OK to, a host at the FIFOs every cycle (`tests/model/test_swd.py::test_swd_by_the_numbers`, the cycle counts also on `top.v`). The repeats are the number to watch: the core cannot count, so 32 data bits are 64 words in each program.
-
-| | read, `swd_read.asm` | write, `swd_write.asm` |
-|---|---|---|
-| program words | 103 | 106 |
-| distinct words | 14 | 16 |
-| words that repeat an earlier word | 89 | 90 |
-| the 32 data bits | 64 words, two per bit | 64 words, two per bit |
-| host interactions | 1 push, 6 pops | 6 pushes, 1 pop |
-| RX FIFO fill, most | 1; 4 and a stall when the host does not read | 1 |
-| TX FIFO fill, most | 1 | 4, the host holding the parity byte for the first data PULL |
-| cycles, release to halt | 379 | 384 |
-
-CAN by the numbers: one frame on the bus, a host at the FIFOs every cycle (`tests/model/test_can.py`'s numbers tests, the cycle counts also on `top.v`). Stages 1 and 2 are the baselines and stay as written; 3 and 4 are stage 1's frame with one more piece each; 5A is stage 4's frame made whole, unopposed, with the host's CRC. The inventory for the architecture review, before CRC computation: two complaints, arbitration and stuffing, what they share, and what the whole frame adds.
-
-| | 1 the frame, `can_tx.asm` | 2 arbitration, `can_tx_arb.asm` | 3 the ACK slot, `can_tx_ack.asm` | 4 stuffing, `can_tx_stuff.asm` | 5A the data frame, `can_tx_frame.asm` |
-|---|---|---|---|---|---|
-| program words / distinct | 13 / 8 | 95 / 34 | 21 / 16 | 224 / 71 | 233 / 86, any payload length with one word changed |
-| cycles a bit / the sample on its | 8 / 6th (75%) | 8 / 4th (50%) | 8 / 6th | 16 / 8th (50%) | 16 / 7th (43.75%), the loop form's |
-| words per identifier bit | 3, a REPEAT body | 8, written out | 3, a REPEAT body | 27, written out | 27, an eight-cell body with the PULL in its first, ID[9] to the CRC's last bit; 3 for the SOF and ID[10] |
-| decision, cycles after the sample | none | 3, on every path | 1, one SKIP | 7 on the longest path, every exit padded | stage 4's, in every cell |
-| what the decision reads | – | the sent bit and the seen bit: two samples, the pad's own readback for the first | the seen bit alone: the sent bit is the program's constant | the last five samples: bits 4:0 of `in_shift_reg` | the same, and one sample of the idle bus below the SOF |
-| REPEAT | yes | no: the lost exit leaves the body | yes | yes, missed at the time: the exits can land on the REPEAT, 91 words that way (`experiments/can/can_tx_stuff_loop.asm`) | yes: the body is eight cells, a host byte, run 4 + DLC times; a one-cell body broken at every PULL would be 317 words |
-| cycles, release to halt | 100 | 100 won; 8 (k + 1) + 4 lost on bit k, 5 before ID[4] | 115 acked; 194 + the host's lateness to the second SOF | 196; 228 with two stuff bits | 917 acked, 57 bits on the bus for 0x5A3 and 0x5A; 965 for 0x7FF and 0xFF, five stuff bits |
-| host interactions | 2 pushes, 1 pop | 2 pushes, 1 pop | 2 pushes, 1 pop; 2 more pushes per retry | 2 pushes, 1 pop | 6 pushes through 4 slots, 1 pop; 6 more per retry; 13 pushes for DLC 8, 9 of them inside the frame |
-| cycles in hand at the mid-frame PULL | 0: a late host stretches ID[4] | 0 | 0; 87 at the retry's PULL, between frames | 0 | five PULLs: 42, 170, 314 from the release for bytes 1 to 3, 438 from the first PULL for byte 4, 543 from the PULL four bytes before for byte 5 and every byte after, 511 at the least; 0 for a host that waits for the PULL |
-| what the core lacks, if anything | nothing | the bit it sent, once SHIFT_OUT has put it on the pin | nothing | a run count, or a cheaper five-bit compare; a branch that lands on the next edge from either side | room: 256 words hold stuffing or arbitration, not both; a count the host could set, so that one program sends every length |
-
-CAN RX by the numbers: the bench's transmitter on the bus, the node listening (`tests/model/test_can_rx.py`, the receivers also on `top.v`). The receive side of the same questions, on the current ISA, before any candidate.
-
-| | RX2 the raw bits, `can_rx.asm` | RX3 to RX5 the stream on the pins, `can_rx_destuff.asm` | RX5 the stream through the FIFO, `can_rx_bits.asm` | RX6 bytes in the core |
-|---|---|---|---|---|
-| program words / distinct | 13 / 7 | 56 / 37 | 57 / 36 | 1629 for the nineteen-bit header, refused |
-| cycles a bit / the sample on its | 8 / 6th (75%) | 8 / 6th | 9 / 6th: the PUSH is the ninth | – |
-| words per data bit | 1, a body of eight | 23, a body of 32 and one of 10 | 24 | 23 and eight shadow cells, every bit written out |
-| decision, cycles after the sample | none | 5 recessive, 6 dominant, every exit padded to the REPEAT | the same, after the PUSH | the same, and shorter in the shadows |
-| what the decision reads | – | the last five samples, raw | the same | the register as destuffed data, and the pc as the stuff history |
-| the stuff bit | in the bytes: the host's | sampled into the history, flagged not data on pin 3 | sampled, not pushed | not in the register: the shadows know it |
-| the destuffed stream | no | pins 2 and 3, for a receiver to gather | bit 0 of 42 bytes, for the host to gather | would be bytes |
-| REPEAT | yes | yes: one data bit a run, its stuff bit inside | yes | no: the shadow cannot cross a body |
-| the ACK slot | not found: the frame's end unknown | found and pulled: 42 runs | found and pulled | – |
-| host interactions | 6 pops | 1 pop, the last eight raw samples | 42 pops, within four bit times each | – |
-| what the core lacks, if anything | where the frame ends | a second stream: a register for the data beside the history | a ninth cycle, or a PUSH that is not an instruction | state for the stuff history other than the pc |
-| with the run test, adopted | – | 34 words, a 12-word cell, the same stream | 27 words, a 9-word cell, 8 clocks a bit | – |
-| with BRANCH, rejected | – | – | 47 words, 8 clocks a bit: what C does in 27 | – |
-
-What the two complaints share: a decision on the last few samples that must land on the very next bit edge, where a two-way branch is a SKIP and a JMP, one cycle longer on the taken side than the fall-through, so every exit carries a delay. What they do not share: arbitration wants a bit the core once had and let go of, and its lost exit leaves any loop, so REPEAT is out there; stuffing wants a count over bits it still has, and its exits can land on the REPEAT, so it was never out (the 224-word baseline missed that: 91 words the other way). Neither is fixed here; the candidates are compared on these programs the way REPEAT's were, `docs/can-candidates.md`.
-
-Three kinds of state: instruction (`pc`, the delay counter), stream (the shift registers and FIFOs) and configuration (`shift_dir`, `open_drain`), each a `CONFIG` field. A shift pin or input pin would join the third kind as the last field.
-
-## Docs
-
-From the big picture down to what the Verilog will look like:
-
-| diagram | shows |
+| Path | Contents |
 |---|---|
-| `docs/overview.svg` | program and bytes in, UART or SPI out, how a byte reaches the pins |
-| `docs/isa_encoding.svg` | the 16-bit word: opcode / delay / side effect / own operands per instruction |
-| `docs/isa_execute.svg` | what each instruction does, cycles, the PULL, PUSH and WAIT stalls |
-| `docs/core_fetch.svg` | datapath at register level, named as in the Verilog: decode, pc, REPEAT's rc |
-| `docs/core_out.svg` | the output side: TX FIFO, shift_reg, shift_dir, open_drain, gpio |
-| `docs/core_in.svg` | the input side: in_shift_reg, the accumulator (acc, poly), the RX FIFO |
-| `docs/smallcore.svg` | around the core: host registers, program ROM and RAM, the loader, the fetch mux |
-| `docs/control.svg` | the control block: inputs, equations, counter, enables |
-| `docs/states.svg` | the same block as per-cycle states: Issue, Hold, Stall, Halt |
-| `docs/physical-results.md` | cells, area, utilization and timing per RTL milestone from the Tiny Tapeout CMOS5L flow in `asic/janestreet/` |
-| `docs/repeat-candidates.md` | the repeat comparison that chose REPEAT: four candidate words for "again" against the SWD programs, on the model only; words, encoding, state, timing, stalls, restart, what each disturbs; the spec; the outcome |
-| `docs/can-candidates.md`, "RX's evidence" and "the spec" | what the receive side said about A, Bc and C, the decision, and SKIP_RUN's spec: the word, the test, the rules, what pins it |
-| `docs/can-combined.md` | the combined CAN programs, the payoff test for the run test and the accumulator: the whole frame unopposed in 152 words at 8 clocks a bit with the CRC the core's; arbitration only with the identifier in the program, 206 to 228 words; the receiver's three streams in two places and the ACK that cannot wait for the CRC |
-| `docs/crc-candidates.md` | the CRC state candidates, the register widened, the input read without a slot, two lanes, an LFSR accumulator: CRC-15 against the oracle where it fits, the destuffing receiver handing the host bytes, words, cycles, state, encoding; on the model only |
-| `docs/crc-baselines.md` | CRC-15 on the current ISA: the census of what every word writes and reads, the five questions and which fails, the host's CRC, CRC-4 as the widest the core computes, the CRC as data; no candidate |
-| `docs/can-candidates.md` | the CAN comparison: a one-cycle branch, the sent bit exposed, a run test and a run counter, and their combinations, spliced into the arbitration and stuffing programs on the model only; words, cycles a bit, sample point, pins, REPEAT, state, encoding, what each disturbs; stuffing back from 16 cycles a bit to 8; the outcome after RX: C adopted, A, B, Bc and D rejected, REPEAT kept |
+| `isa/` | `isa.yaml`: instruction set, encoding, operand ranges |
+| `model/` | `cpu.py`: golden Python model and assembler |
+| `rtl/` | Verilog-2001: core, FIFO, top, host bus, ROM (generated), RAM, packaged chip |
+| `programs/` | assembly per protocol, `manifest.txt` maps ROM slots |
+| `tests/` | `model/` (pytest) and `rtl/` (cocotb) |
+| `tools/` | ROM generator, doc renderer, waveform helper |
+| `experiments/` | the CAN, CRC, REPEAT, accumulator and Ethernet experiments that shaped the ISA |
+| `asic/janestreet/` | Tiny Tapeout packaging and flow scripts |
+| `fpga/pynq_z2/` | Vivado project script and wrapper |
+| `docs/` | deeper material, below; `docs/diagrams/` holds Mermaid sources and rendered SVGs |
 
-Diagrams show only hardware that exists in `model/cpu.py` and passes the tests.
+## Deeper docs
+
+- [Instruction set](docs/isa.md) and [host interface](docs/host-interface.md)
+- [Design history, status log and design pressures](docs/design-history.md)
+- [Commands](docs/commands.md) and [diagrams](docs/diagrams/README.md)
+- [Original design spec for the program ROM, host bus and FPGA smoke test](docs/design/programmable-peripheral.md)
+- [CAN](docs/can-combined.md), [CAN candidates](docs/can-candidates.md), [CAN stress](docs/can-stress.md)
+- [CRC](docs/crc-baselines.md), [REPEAT](docs/repeat-candidates.md), [10BASE-T](docs/ethernet-10baset.md)
+- [Physical results](docs/physical-results.md)

@@ -1,4 +1,4 @@
-"""Render docs/*.mmd to SVG with mermaid-cli (mmdc).
+"""Render docs/diagrams/*.mmd to SVG with mermaid-cli (mmdc).
 
 Needs Node.js and `npm install -g @mermaid-js/mermaid-cli`. Uses your installed
 Chrome instead of puppeteer's own download.
@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-DOCS = Path(__file__).resolve().parent.parent / "docs"
+DOCS = Path(__file__).resolve().parent.parent / "docs" / "diagrams"
 NODE_DIRS = [r"C:\Program Files\nodejs", os.path.expandvars(r"%APPDATA%\npm")]
 BROWSERS = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
