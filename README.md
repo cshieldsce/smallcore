@@ -14,6 +14,8 @@ This started from Jane Street's [protocol emulator ASIC competition](https://blo
 
 I also wanted to see how to use AI effectively without trusting it blindly. The model is the part AI helped build, so it is never taken on faith: everything it claims has to survive programs I wrote and an RTL implementation I wrote myself.
 
+Past I2C, the instruction set grew by experiment. For each hard protocol (SWD, CAN, CRC) I came up with several candidate instructions, had AI implement them on the golden model, ran them against the existing tests and real programs, and then decided which to adopt. Several were rejected, and the losers are kept in `experiments/` with dated outcomes in `docs/*-candidates.md`. REPEAT, the run test and the CRC accumulator are the ones that survived.
+
 ## What runs on it
 
 | Protocol | ROM slots |
