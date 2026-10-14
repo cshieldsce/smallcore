@@ -26,18 +26,9 @@ I also wanted to see how to use AI effectively without trusting it blindly. The 
 
 Further CAN programs (arbitration, ACK, stuffing) are in `programs/can/` and tested at the pins but not in the ROM. 10BASE-T Ethernet is an experiment only.
 
-```mermaid
-flowchart LR
-    host["Host bus"] --> H["host.v"]
-    H --> M["rom.v (15 slots)<br/>ram.v (256 x 16)"]
-    H -- TX bytes --> TXF["TX FIFO"]
-    RXF["RX FIFO"] -- RX bytes --> H
-    M --> C["core.v"]
-    TXF --> C
-    C --> RXF
-    C <--> P["gpio[3:0]"]
-```
+![Block diagram: host registers, ROM and RAM, fetch and execute, TX and RX FIFOs with shift registers, and the GPIO pins](docs/sketches/block-diagram.png)
 
+*Hand-drawn block diagram. More sketches, from the first box to this one, are in [docs/design-sketches.md](docs/design-sketches.md).*
 ## Verification
 
 ```bash
@@ -62,4 +53,4 @@ The RTL benches step the model and the RTL cycle by cycle for the core, and chec
 
 ## Docs
 
-[Instruction set](docs/isa.md) · [Host interface](docs/host-interface.md) · [Design history](docs/design-history.md) · [Commands](docs/commands.md) · [Diagrams](docs/diagrams/README.md) · [Physical results](docs/physical-results.md) · [CAN](docs/can-combined.md)
+[Design sketches](docs/design-sketches.md) · [Instruction set](docs/isa.md) · [Host interface](docs/host-interface.md) · [Design history](docs/design-history.md) · [Commands](docs/commands.md) · [Diagrams](docs/diagrams/README.md) · [Physical results](docs/physical-results.md) · [CAN](docs/can-combined.md)
