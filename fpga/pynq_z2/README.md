@@ -12,6 +12,8 @@ ila_capture.tcl    triggers on CS falling and writes the capture to CSV
 decode_capture.py  the SPI frame in that CSV as MOSI and MISO bytes
 ```
 
+A second wrapper puts the chip on a real CAN bus through a transceiver, with a VIO over JTAG for a host: see CAN on a real bus below.
+
 The wrapper is verified in simulation before Vivado sees it: `python -m pytest tests/rtl/test_pynq.py -v` runs the button sequence below under Verilator with the jumper modelled in the bench and checks the LEDs.
 
 ## Controls
@@ -76,3 +78,64 @@ frame 0: 8 bits  MOSI 0x96  MISO 0x96
 ```
 
 Synthesis renames the probes: the pads are `ja_IBUF`, `gpio_out` is `ja_OBUF`, the LEDs are the `*_OBUF` nets. To browse the waveform, open Hardware Manager, load `smallcore_pynq_ila.bit` with `smallcore_pynq_ila.ltx` as the probes file, or `program.tcl -tclargs ila` loads both.
+
+## CAN on a real bus
+
+The second wrapper, `smallcore_pynq_can.v`, puts the chip on a physical CAN bus through an SN65HVD230 transceiver on PMOD A and runs the ROM's CAN programs, slot 13 `can_tx_crc` and slot 15 `can_rx_bytes` (slot 14 `can_rx_crc` passes in simulation), against another CAN node. The host is a VIO driven from Tcl over JTAG.
+
+```
+smallcore_pynq_can.v   the wrapper: MMCM 125 MHz -> 8 MHz / CORE_DIV core clock, the engine below, VIO, ILAs; pad 0 split into CTX/CRX
+can_host_engine.v      the FPGA-side host: 32-byte TX buffer, 256-byte RX capture, CONTROL, at 7 clocks a bus transaction
+pynq_z2_can.xdc        pins: sysclk H16, LD0..3, PMOD A pin 1 CTX, pin 2 CRX (pulled up), pins 3, 4, 7 read only
+build_can.tcl          non-project build with the VIO and ILA IP; -tclargs CORE_DIV (1, 2, 4, 8: 1000, 500, 250, 125 kbit/s)
+can_host.tcl           Tcl procs for the host: sc_open, can_tx, can_rx_start, sc_rx_read, sc_arm/sc_save for the ILAs
+can_test.tcl           the two hardware tests below, with captures
+can_ref.py             an independent Classical CAN 2.0A encoder/decoder, written from the frame format, not the repo's model
+can_decode.py          decodes the ILA captures with can_ref.py: fields, CRC, stuffing, delimiters, ACK, EOF, bit timing, loop delay
+sim/                   xsim bench: the engine and the unmodified rtl/ through the wrapper's pad model, checked against can_ref.py
+```
+
+Wiring: PMOD A pin 1 to the transceiver's CTX (TXD), pin 2 to its CRX (RXD), pin 6 3V3, pin 5 GND. CANH/CANL to the other node, 120 Ω at each end, and a ground shared with the other node. The core drives pad 0 open-drain; the wrapper sends it to CTX and reads the wired-AND of CTX and CRX back into pad 0, as an open-drain pad on the bus would read.
+
+The host is in the FPGA because the PC is far too slow for the chip. A VIO commit takes milliseconds, a CAN program takes a byte every 64 µs at 125 kbit/s (`can_rx_crc` pushes one every bit, 8 µs), and the FIFOs are 4 deep. `can_host_engine.v` holds the bytes and services TX_DATA, RX_DATA and STATUS at host.v's minimum strobe timing; the chip's FIFOs and ISA are unchanged. It is test infrastructure, not part of the chip.
+
+Build, simulate, run (Vivado with debug-core support for the build; the hardware manager of any recent Vivado for the rest):
+
+```
+vivado -mode batch -source fpga/pynq_z2/build_can.tcl -tclargs 8
+python fpga/pynq_z2/sim/run_sim.py --limits
+vivado -mode batch -source fpga/pynq_z2/can_test.tcl -tclargs tx 8
+vivado -mode batch -source fpga/pynq_z2/can_test.tcl -tclargs rx 8
+python fpga/pynq_z2/can_decode.py tx build/pynq_z2_can/tx_core.csv 123 5A --loop build/pynq_z2_can/tx_loop.csv --div 8
+```
+
+`run_sim.py` runs 40 cases, IDs 0x123, 0x5A3, 0x7FF and 0x000, TX unacked and acked and both receivers through transceiver loop delays of 0 to 3 clocks, all passing; `--limits` prints where `can_tx_crc` stops working (below).
+
+### Real CAN hardware validation
+
+Setup: SmallCore on the PYNQ-Z2, an SN65HVD230 transceiver, a two-node bus, and CANtap's Candor firmware on a Nucleo-G474RE (FDCAN1 behind a second SN65HVD230) as the other node, at 125 kbit/s (CORE_DIV 8). 2026-10-18.
+
+TX, slot 13 `can_tx_crc`:
+
+- SmallCore transmitted the Classical CAN frame ID `0x123`, DLC `1`, data `0x5A`.
+- CANtap received it with no errors (TEC and REC 0) and ACKed it.
+- SmallCore saw the ACK and halted, the program's acked exit; its post-ACK byte read `0x50`, ACK bit 0, against `0x51` with no node listening.
+- The captured CTX matched `can_ref.py` bit for bit: SOF, identifier, RTR/IDE/r0, DLC, data, CRC-15 `0x0499`, the stuff bits, the CRC and ACK delimiters, the ACK slot and EOF, every edge on a bit boundary.
+
+RX, slot 15 `can_rx_bytes`:
+
+- CANtap transmitted `0x123 [5A]`.
+- SmallCore received it through the transceiver; the engine's RX buffer read `12 30 2B 41 26 01`, the reference's destuffed stream exactly.
+- CANtap's transmission succeeded first time, so the other physical node accepted SmallCore's ACK. The bus capture decoded as `0x123`, DLC 1, `0x5A`, CRC `0x0499` correct, ACK dominant.
+- CANtap's bit time measured on the PYNQ was 8.0 µs, 125 kbit/s exactly.
+
+Findings:
+
+- The SmallCore RTL and its ROM programs needed no changes. Every failure on the way was in the harness, the wiring or the other node.
+- The Nucleo-side wiring at first held the CAN controller's receive pin low, so it never saw an idle bus: it never transmitted and never received. The signature was transmissions that time out while the error counters never rise.
+- CANtap's firmware ran the FDCAN from an 85 MHz clock while its bitrate table assumed 170 MHz, so every bitrate was half the one requested. Fixed in the CANtap repository, not here.
+- The harness needs the FPGA-side buffering: VIO from the PC cannot service the 4-byte FIFOs while a protocol runs. The first attempt left CTX dominant mid-frame, the core stalled on PULL.
+- The ROM CAN programs expect one data byte; a DLC 2 frame is outside their scope.
+- The 125 kbit/s ceiling is a current program and timing limitation, not a core bug. `can_tx_crc` computes the CRC from the pad's readback on the second or third clock of each bit and samples the ACK early in the slot, so its own recessive must read back within one core clock and the other node's ACK must arrive by the slot's second clock. The transceiver loop measured about 0.33–0.46 µs dominant and 0.16 µs recessive, and the round trip to the other node and back about 0.8 µs: at 1 Mbit/s (125 ns clocks) the CRC came out wrong (`0x4C0D`), and by the simulated limits 250 kbit/s would miss the ACK (not tried on hardware). At 125 kbit/s (1 µs clocks) both fit. A program that samples later in the bit would lift it.
+
+The full bring-up log, with every capture and the layer each finding belongs to, is `build/pynq_z2_can/bringup_log.md` on the bench machine (build/ is not committed); the findings above are its summary.
