@@ -5,6 +5,11 @@ The FPGA smoke test: `rtl/smallcore.v`, the chip-level design with its program R
 ```
 smallcore_pynq.v   the wrapper: 125 MHz / 4 core clock, debounced buttons -> bus transactions, LEDs <- host_rdata, PMOD A <- the four pads
 pynq_z2.xdc        pins: sysclk H16, SW, BTN, LD0..3, LD4/LD5 RGB, PMOD A pins 1..4
+create_project.tcl the Vivado project, and with -tclargs build the bitstream
+program.tcl        loads a bitstream over USB-JTAG, the ILA build with -tclargs ila
+build_ila.tcl      the same design with an ILA on the pads and host_rdata, non-project
+ila_capture.tcl    triggers on CS falling and writes the capture to CSV
+decode_capture.py  the SPI frame in that CSV as MOSI and MISO bytes
 ```
 
 The wrapper is verified in simulation before Vivado sees it: `python -m pytest tests/rtl/test_pynq.py -v` runs the button sequence below under Verilator with the jumper modelled in the bench and checks the LEDs.
@@ -28,13 +33,16 @@ PMOD A, top row: pin 1 `gpio[0]` MOSI, pin 2 `gpio[1]` SCLK, pin 3 `gpio[2]` CS,
 
 ## Build
 
-In Vivado, any recent version:
+From the repository root, with Vivado on the path (any recent version for the plain build):
 
-1. Create an RTL project for part `xc7z020clg400-1` (the PYNQ-Z2's Zynq-7020).
-2. Add design sources: `fpga/pynq_z2/smallcore_pynq.v` and the seven files in `rtl/`: `smallcore.v`, `host.v`, `rom.v`, `ram.v`, `top.v`, `core.v`, `fifo.v`. Set `smallcore_pynq` as top.
-3. Add `fpga/pynq_z2/pynq_z2.xdc` as a constraint. Check its pins against your board's master XDC; the switch, button, LED and PMOD pins are those of the PYNQ base overlay, the 125 MHz clock on H16 is from the TUL master file.
-4. Generate Bitstream. The XDC declares the divided clock as a generated clock, so the core's paths are timed at 32 ns; check the timing summary reports no unconstrained paths and no failing endpoints.
-5. Program the device from Hardware Manager over USB-JTAG, or copy the `.bit` to the board and load it from Python with `pynq.Overlay` (it also wants a `.hwh`; the export step in Vivado writes one).
+```
+vivado -mode batch -source fpga/pynq_z2/create_project.tcl -tclargs build
+vivado -mode batch -source fpga/pynq_z2/program.tcl
+```
+
+The first creates `build/pynq_z2` for part `xc7z020clg400-1` with `smallcore_pynq.v`, the seven files in `rtl/` (`smallcore.v`, `host.v`, `rom.v`, `ram.v`, `top.v`, `core.v`, `fifo.v`) and `pynq_z2.xdc`, and writes `build/pynq_z2/smallcore_pynq.runs/impl_1/smallcore_pynq.bit`. Without `-tclargs build` it only creates the project, for the GUI. The XDC declares the divided clock as a generated clock, so the core's paths are timed at 32 ns; `build/pynq_z2/timing_summary.rpt` should report no unconstrained paths and no failing endpoints. Check the XDC's pins against your board's master XDC: the switch, button, LED and PMOD pins are those of the PYNQ base overlay, the 125 MHz clock on H16 is from the TUL master file.
+
+The second loads it over the PROG/UART micro-USB and prints `DONE: 1`. The load is volatile: power cycling clears it, and so do the PROG and SRST buttons by the USB connector, which are not BTN3. If the green DONE LED goes out on its own the board is booting from SD or QSPI over it; set JP1 to JTAG. To load from Python instead, copy the `.bit` to the board and use `pynq.Overlay`; it also wants a `.hwh`, which the export step in Vivado writes.
 
 ## Run
 
@@ -45,6 +53,26 @@ In Vivado, any recent version:
 5. SW1 down: LEDs read `0x96`, LD1, LD2, LD4 red and LD5 red on.
 6. Press BTN2 to pop. SW1 up reads `101` again.
 
+LD3 is not a STATUS bit, so with SW1 up the four green LEDs read `0101`, `0001`, `0100`. Holding a button shows the register it writes: BTN0 lights LD3, CONTROL = 8, and BTN3 blanks the LEDs while the core is in reset. A button wants about 34 ms of steady press to count. Read data `0xFF`, every LED on with LD4 white, means MISO was high on every bit: pin 4 is floating and the jumper is not joining it to pin 1.
+
 To run again press BTN0 again: the byte you push after that goes out. Bytes pushed before a restart stay queued; only BTN3 clears the FIFOs. With SW0 up, BTN0 selects the LSB-first program; through a loopback both bit orders return the byte unchanged, which is why the RTL test with a slave model, `tests/rtl/test_smallcore.py`, is the one that proves the bit order.
 
 What it proves: the program came from the on-chip ROM, the byte went through the host register block into the real TX FIFO, out of the pads as an SPI frame, back in through the pad readback, the input shift register, PUSH and the RX FIFO, and out through the register block, on hardware, with nothing but buttons for a host.
+
+## Debug with the ILA
+
+When the LEDs disagree, look at the pads. `build_ila.tcl` builds the same design with an ILA clocked by the core clock, 4096 samples deep, on the four pads as read back, `gpio_out`, `gpio_oe`, `host_rdata`, reset and the host strobes:
+
+```
+vivado -mode batch -source fpga/pynq_z2/build_ila.tcl
+vivado -mode batch -source fpga/pynq_z2/ila_capture.tcl
+python fpga/pynq_z2/decode_capture.py
+```
+
+The ILA needs a Vivado license tier that includes debug cores: the free 2023.2 install has them, a 2026.1 BASIC license refuses `create_debug_core`. `ila_capture.tcl` loads the ILA build, arms a trigger on CS falling and prints `ARMED`; press BTN3, BTN0, BTN1 within five minutes. The capture lands in `build/pynq_z2_ila/capture.csv`, and the decoder samples MOSI and MISO on each rising SCLK while CS is low:
+
+```
+frame 0: 8 bits  MOSI 0x96  MISO 0x96
+```
+
+Synthesis renames the probes: the pads are `ja_IBUF`, `gpio_out` is `ja_OBUF`, the LEDs are the `*_OBUF` nets. To browse the waveform, open Hardware Manager, load `smallcore_pynq_ila.bit` with `smallcore_pynq_ila.ltx` as the probes file, or `program.tcl -tclargs ila` loads both.
