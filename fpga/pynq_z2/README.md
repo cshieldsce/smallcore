@@ -12,7 +12,7 @@ ila_capture.tcl    triggers on CS falling and writes the capture to CSV
 decode_capture.py  the SPI frame in that CSV as MOSI and MISO bytes
 ```
 
-A second wrapper puts the chip on a real CAN bus through a transceiver, with a VIO over JTAG for a host: see CAN on a real bus below.
+A second wrapper puts the chip on a real CAN bus through a transceiver, with a VIO over JTAG for a host: see CAN on a real bus below. A third makes the Zynq's ARM the host, over AXI: see The Zynq ARM as the host.
 
 The wrapper is verified in simulation before Vivado sees it: `python -m pytest tests/rtl/test_pynq.py -v` runs the button sequence below under Verilator with the jumper modelled in the bench and checks the LEDs.
 
@@ -139,3 +139,64 @@ Findings:
 - The 125 kbit/s ceiling is a current program and timing limitation, not a core bug. `can_tx_crc` computes the CRC from the pad's readback on the second or third clock of each bit and samples the ACK early in the slot, so its own recessive must read back within one core clock and the other node's ACK must arrive by the slot's second clock. The transceiver loop measured about 0.33–0.46 µs dominant and 0.16 µs recessive, and the round trip to the other node and back about 0.8 µs: at 1 Mbit/s (125 ns clocks) the CRC came out wrong (`0x4C0D`), and by the simulated limits 250 kbit/s would miss the ACK (not tried on hardware). At 125 kbit/s (1 µs clocks) both fit. A program that samples later in the bit would lift it.
 
 The full bring-up log, with every capture and the layer each finding belongs to, is `build/pynq_z2_can/bringup_log.md` on the bench machine (build/ is not committed); the findings above are its summary.
+
+## The Zynq ARM as the host
+
+The third wrapper, `smallcore_pynq_axi.v`, gives SmallCore a permanent host on the board itself: the Zynq's Cortex-A9. The ARM never makes a SmallCore bus transaction. It talks AXI4-Lite to a peripheral in the core's clock domain, and the same FPGA host engine as the VIO build makes every transaction at host.v's timing, so protocol timing stays in the FPGA and the core.
+
+```
+ARM (bare metal now, PYNQ Linux later) -> M_AXI_GP0 -> AXI3 to AXI4-Lite -> AXI clock converter
+  -> smallcore_axi.v -> host_engine (can_host_engine.v) -> rtl/smallcore.v, unchanged -> smallcore_pads.v
+```
+
+```
+smallcore_pynq_axi.v  the wrapper: the block design sc_ps, the MMCM core clock, the peripheral, SmallCore, the pads
+smallcore_axi.v       the AXI4-Lite peripheral and the register map, the ARM ABI v1 (its header is the reference)
+smallcore_pads.v      CTRL[2]: CAN on PMOD A (pin 1 CTX, pin 2 CRX) or the four GPIOs on PMOD B pins 1..4
+can_host_engine.v     host_engine, the engine extended (CONTROL by value, raw transactions, a TX byte stream with a
+                      completed-transaction count, an RX ring); can_host_engine wraps it with the VIO's old ports
+ps7_pynq_z2.tcl       the PS7 settings of the PYNQ v3.0.1 base overlay (DDR, UART0 MIO 14..15, 50 MHz PS clock)
+build_axi.tcl         the block design and bitstream, and the .xsa (with ps7_init.tcl and the .hwh); -tclargs CORE_DIV
+pynq_z2_axi.xdc       pins: sysclk, LD0..3, PMOD A as the CAN build, PMOD B pins 1..4 pulled up
+arm/                  bare-metal Cortex-A9: start.S, uart.c, smallcore.c/.h (the driver), test_host.c, can_bench.c,
+                      test_ram.c, diag_tx.c; build.py (Arm GNU toolchain, no BSP, OCM); run_arm.tcl (xsdb over JTAG)
+sim/                  tb_host_engine.v (run_engine_sim.py), tb_axi_host.v (run_axi_sim.py)
+```
+
+The only crossing between the PS's 100 MHz FCLK0 and the core clock is the Xilinx AXI clock converter; no AXI handshake reaches host_we or host_re. The peripheral is at `0x43C0_0000`. In outline: ID `0x53434F52`, VERSION, SCRATCH, CTRL (core reset, RX enable, pads), STATUS, COMMAND (RUN, RX clear, TX flush, TX_COMMITTED clear), SLOT (the CONTROL byte RUN writes), TX_DATA (stage a byte), TX_COUNT, RX_DATA (pop, with a valid bit), RX_COUNT, RAW (one SmallCore host transaction, read or write), CORE_STATUS (SmallCore's STATUS), TX_COMMITTED. The rules a driver relies on, all reported by the hardware rather than timed:
+
+- RUN writes CONTROL ahead of any staged bytes. STATUS[6] RUN busy stays set until CONTROL is written and SmallCore's STATUS read again, so once it clears, CORE_STATUS describes the program RUN started and not the halt of the one before.
+- TX_COMMITTED counts staged bytes whose TX_DATA transaction has completed: a TX FIFO push in a protocol program, a loader byte with CONTROL 0x20. Before RUN of a protocol program, wait for TX_COMMITTED ≥ min(n, 4) and, with n ≥ 4, CORE_STATUS tx_full: the prefill is the core's own.
+- A RAM load is CONTROL 0x20, the words low byte first through TX_DATA, then TX_COMMITTED = 2 × words with STATUS idle, then CONTROL 0x10. Load mode lasts until the next CONTROL write, so bytes meant for the program wait until after the 0x10.
+
+Build, simulate, run (Vivado 2023.2 for the build, the Arm GNU toolchain, xsdb from any recent Vivado; the board in JTAG boot mode):
+
+```
+vivado -mode batch -source fpga/pynq_z2/build_axi.tcl -tclargs 8
+python fpga/pynq_z2/sim/run_sim.py
+python fpga/pynq_z2/sim/run_engine_sim.py
+python fpga/pynq_z2/sim/run_axi_sim.py
+python fpga/pynq_z2/arm/build.py test_host smallcore.c --asm programs/spi/spi_duplex_msb.asm:spi_duplex_msb
+xsdb fpga/pynq_z2/arm/run_arm.tcl <ps7_init.tcl from the .xsa> build/pynq_z2_axi/smallcore_pynq_axi_div8.bit build/pynq_z2_axi/arm/test_host.elf <result> 40 <tests> 0x1F <exception_seen>
+```
+
+`build.py` prints the `result` and `exception_seen` addresses; the program reports on the PROG/UART micro-USB's serial port at 115200 baud, and into `result`, which `run_arm.tcl` reads back over JTAG.
+
+### ARM host validation
+
+2026-10-18, PYNQ-Z2 in JTAG boot mode, bare-metal Cortex-A9 from OCM, CORE_DIV 8, the same bus and Candor node as above.
+
+- Boundary: the ARM read ID and VERSION and wrote and read back SCRATCH, 8 patterns and a 1000-write sweep, through the protocol and clock converters.
+- SmallCore: raw reads of STATUS (`0x05` at slot 0) and CONTROL, CONTROL by RUN and by raw write, read back.
+- RAM loading: programs of 1 to 200 PUSH words loaded with CONTROL 0x20 / TX_DATA / 0x10 and run, the RX count equal to the word count every time; the 22-word `spi_duplex_msb` loaded, TX_COMMITTED 44, the TX FIFO never full.
+- CAN RX, slot 15: Candor sent `0x123 [5A]` ten times; SmallCore received all ten, `12 30 2B 41 26 01` each, and Candor saw ten ACKs.
+- CAN TX, slot 13: 60 frames, every one ACKed; Candor received `0x123 [5A]` with no CRC or other errors. Prefill before each RUN: TX_COMMITTED 4 and CORE_STATUS tx_full.
+- The VIO build, rebuilt on the extended engine, still passes `run_sim.py`'s 40 cases with output identical to before the change, and on the board sent a frame matching the reference bit for bit, ACKed.
+
+Findings:
+
+- Vivado placed the 1 KiB TX staging FIFO in a block RAM, with the read pointer as the RAM's address register, enabled only when the pointer moved. A byte written into an empty FIFO, at the address being read, never reached the engine; it passed in simulation, where the read is combinational. On the board, CAN frames went out with a wrong CRC (the polynomial bytes are the first two staged) and RAM loads stored zeros. Raw TX_DATA writes, which bypass the FIFO, worked, which isolated it. The FIFO is now distributed RAM by attribute.
+- Without the MMU, memory is strongly ordered and an unaligned access faults; GCC for the Cortex-A9 assumes it may make them. `build.py` compiles with `-mno-unaligned-access`, and `start.S` has a vector table that reports any exception on the UART instead of running into the startup code.
+- The transceiver loop delay on the rewired bus measured 192 ns dominant, 144 ns recessive.
+
+Not yet done: the SPI loopback test needs a jumper from PMOD B pin 1 to pin 4 (without it MISO reads its pull-up, `0xFF`, as seen). And when the Candor's channel came up in the middle of a TX run, it delivered about 15 copies of a frame that `can_tx_crc` retransmitted 2 ms apart before it halted on an ACK: SmallCore may have missed some of the Candor's early ACKs. An ILA capture of the ACK slot on a cold start would settle it.

@@ -109,7 +109,7 @@ module tb;
         $display("RESULT sof=%0d tx_idx=%0d tx_active=%0d status=%b rx_count=%0d overflow=%0d",
                  sof < 0 ? -1 : sof - start, tx_idx, tx_active, status, rx_count, rx_overflow);
         $write("RESULT rx");
-        for (i = 0; i < rx_count && i < 256; i = i + 1) $write(" %02x", engine.rx_buf[i]);
+        for (i = 0; i < rx_count && i < 256; i = i + 1) $write(" %02x", engine.core.rx_buf[i]);
         $write("\n");
         $fclose(f_ctx);
         $fclose(f_bus);
