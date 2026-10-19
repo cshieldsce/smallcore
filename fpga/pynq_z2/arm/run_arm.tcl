@@ -6,7 +6,9 @@
 #   With result_addr, waits up to `seconds` (default 3) for the program's 4-word `result` array
 #   to hold a verdict in word 0, and prints it. Before loading the ELF it also reads the peripheral's ID and VERSION from the
 #   A9's view of the bus (the debugger's loads go out through the core), the XSCT-level check.
-#   addr value: a word written into the loaded program before it runs (test_host.c's `tests`).
+#   addr value: a word written into the loaded program before it runs (test_host.c's `tests`);
+#   or several as one argument, addr:value+addr:value, with value "-" (cmd.exe, which runs xsdb.bat,
+#   splits arguments at "=" and ",").
 #   exc_addr: uart.c's exception_seen, which also ends the wait and is printed (build.py
 #   prints both addresses).
 lassign $argv ps7init bit elf result_addr seconds set_addr set_value exc_addr
@@ -32,7 +34,9 @@ puts "RESULT ps7_init done"
 puts "RESULT xsdb ID=[format 0x%08X [mrd -value 0x43C00000]] VERSION=[format 0x%08X [mrd -value 0x43C00004]]"
 
 dow $elf
-if {$set_addr ne ""} { mwr $set_addr $set_value }
+if {[string first : $set_addr] >= 0} {
+    foreach pair [split $set_addr +] { lassign [split $pair :] a w; mwr $a $w }
+} elseif {$set_addr ne ""} { mwr $set_addr $set_value }
 con
 # with result_addr, look once a second, up to `seconds`, for the program's verdict in result[0]
 set end [expr {[clock milliseconds] + int($seconds * 1000)}]

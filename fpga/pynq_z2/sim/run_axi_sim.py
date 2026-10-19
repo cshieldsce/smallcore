@@ -7,7 +7,8 @@ independent reference, fpga/pynq_z2/can_ref.py, as run_sim.py does.
 
 Cases: the register map and its flags; SPI from ROM slot 8 on PMOD B through the jumper;
 spi_duplex_msb loaded into RAM over TX_DATA and run; CAN TX (slot 13, acked) and CAN RX
-(slot 15) on PMOD A for IDs 0x123, 0x5A3, 0x7FF and 0x000 with data 0x5A.
+(slot 15) and CAN RX with the CRC checked by SmallCore (slot 14) on PMOD A for IDs 0x123,
+0x5A3, 0x7FF and 0x000 with data 0x5A.
 """
 
 import argparse
@@ -88,6 +89,20 @@ def can_tx(vivado, ident, data):
     return ok
 
 
+def can_rx_crc(vivado, ident, data):
+    idle = [1] * 20
+    bits = idle + ref.stuff(ref.stream(ident, data)) + [1, 1, 1] + [1] * 7 + [1] * 13
+    ok, passes, res, ctx, bus = run(vivado, 5, n=len(ref.POLY), rx_n=len(bits), limit=len(bits) * 8 + 400,
+                                    rx_bits=bits, tx=ref.POLY)
+    print(f"CAN RX slot 14 id=0x{ident:03X} data={[hex(d) for d in data]}")
+    s = ref.stream(ident, data)
+    got = [int(x, 16) for x in res["rx"][0].split()]
+    ok &= self_checked("driver flow", ok, passes)
+    ok &= check("can_rx_crc: one stream bit a byte", [b & 1 for b in got[:len(s)]] == s)
+    ok &= check("can_rx_crc: CRC residue 0, 0", got[len(s):] == [0, 0], str(got[len(s):]))
+    return ok
+
+
 def can_rx(vivado, ident, data):
     idle = [1] * 20
     bits = idle + ref.stuff(ref.stream(ident, data)) + [1, 1, 1] + [1] * 7 + [1] * 13
@@ -132,5 +147,6 @@ if __name__ == "__main__":
     for ident in (0x123, 0x5A3, 0x7FF, 0x000):
         ok &= can_tx(a.vivado, ident, [0x5A])
         ok &= can_rx(a.vivado, ident, [0x5A])
+        ok &= can_rx_crc(a.vivado, ident, [0x5A])
     print("ALL PASS" if ok else "FAILURES")
     sys.exit(0 if ok else 1)

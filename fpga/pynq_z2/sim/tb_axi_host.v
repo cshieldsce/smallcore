@@ -8,6 +8,7 @@
 //   3  CAN TX, ROM slot 13 on PMOD A: tx.mem's n host bytes; the other node ACKs from clock
 //      ack_at after the SOF edge for 8 clocks; ctx.txt and bus.txt from RUN
 //   4  CAN RX, ROM slot 15: rx.mem's rx_n bits, 8 clocks each, then the RX ring over RX_DATA
+//   5  CAN RX, ROM slot 14 (can_rx_crc): the polynomial staged first, then as 4
 // Self-checks print PASS/FAIL; RESULT lines carry what run_axi_sim.py checks.
 `timescale 1ns / 1ps
 module tb;
@@ -221,9 +222,9 @@ module tb;
         if (mode == 3 && sof < 0 && start > 0 && cyc > start && !bus) sof <= cyc;
         if (mode == 3 && ack_at > 0 && sof >= 0)
             ext <= !(cyc - sof >= ack_at && cyc - sof < ack_at + 8);
-        if (mode == 4 && start > 0 && cyc >= start)
+        if ((mode == 4 || mode == 5) && start > 0 && cyc >= start)
             ext <= ((cyc - start) / 8 < rx_n) ? rxm[(cyc - start) / 8] : 1'b1;
-        if (start > 0 && (mode == 3 || mode == 4)) begin
+        if (start > 0 && (mode == 3 || mode == 4 || mode == 5)) begin
             $fwrite(f_ctx, "%0d", can_ctx);
             $fwrite(f_bus, "%0d", bus);
         end
@@ -236,7 +237,7 @@ module tb;
         $fclose(f);
         if (mode != 0 && mode != 4) $readmemh("tx.mem", txm);
         if (mode == 2) $readmemh("prog.mem", prog);
-        if (mode == 4) $readmemb("rx.mem", rxm);
+        if (mode == 4 || mode == 5) $readmemb("rx.mem", rxm);
         f_ctx = $fopen("ctx.txt", "w");
         f_bus = $fopen("bus.txt", "w");
 
@@ -360,11 +361,15 @@ module tb;
             $write("\n");
         end
 
-        if (mode == 4) begin
+        if (mode == 4 || mode == 5) begin
             ctrl_keep = 3'b010;
             sc_reset;
             axi_write(COMMAND, 32'h2);
-            sc_run(8'd15);
+            if (mode == 5) begin
+                for (k = 0; k < n; k = k + 1) axi_write(TX_DATA, txm[k]);
+                wait_prefill(n);
+            end
+            sc_run(mode == 5 ? 8'd14 : 8'd15);
             wait_idle;
             @(negedge clk); start = cyc;
             repeat (limit) @(posedge clk);
