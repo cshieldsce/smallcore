@@ -143,6 +143,62 @@ proc can_tx {id data {timeout_ms 300}} {
     return [dict create acked $acked status [sc_status] engine [sc_engine] rx [sc_rx_read]]
 }
 
+# A raw write on smallcore.v's host bus through the VIO's manual port: host_engine lets go of the
+# bus while vo_manual is set, and the strobe here is a VIO commit long (milliseconds, far above
+# host.v's 4 clocks). sc_manual_off hands the bus back to the engine.
+proc sc_raw_write {addr value} {
+    sc_set vo_manual 1
+    sc_set vo_addr [expr {$addr}]
+    sc_set vo_wdata [expr {$value}]   ;# decimal: the probes are UNSIGNED radix
+    sc_set vo_we 0
+    sc_commit
+    sc_out vo_we 1
+    sc_out vo_we 0
+}
+proc sc_manual_off {} { sc_out vo_manual 0 }
+
+# A program into SmallCore's RAM as the README's RAM load: CONTROL 0x20, each word low byte then
+# high through TX_DATA, then CONTROL 0x00, slot 0, which ends load mode and keeps the RAM and its
+# length, so the TX FIFO can be filled before the run. A core reset (sc_reset) empties the RAM's
+# length: load after it. About three VIO commits a byte: seconds for a 152-word program.
+proc sc_load_ram {words} {
+    sc_raw_write 3 0x20
+    foreach w $words {
+        sc_raw_write 0 [expr {$w & 0xFF}]
+        sc_raw_write 0 [expr {($w >> 8) & 0xFF}]
+    }
+    sc_raw_write 3 0x00
+    sc_manual_off
+}
+
+# One base frame by a RAM-loaded transmitter that takes can_tx_crc's host bytes (gen.py's 6A, e.g.
+# experiments/can_stress/can_tx_crc_pin1.asm). The frame is staged in the VIO's TX vector, the RAM
+# run (CONTROL 0x10 by sc_raw_write: the program waits at its first PULL, before the SOF), the bus
+# handed back, then tx_go: the engine pushes every byte at its own pace, 7 clocks each, well ahead
+# of the program's PULLs. Prefilling the FIFO and running after, as arm/can_bench.c's tx_ram must,
+# does not work here: the engine cannot push while the manual port holds the bus, a VIO commit
+# (milliseconds), and the program runs dry by the third byte. `words` is the assembled program
+# (model/cpu.py's assemble); `before_run` runs just before CONTROL 0x10 (arm the ILAs there).
+# Returns as can_tx.
+proc can_tx_ram {words id data {timeout_ms 300} {before_run {}}} {
+    global CAN_POLY
+    sc_reset
+    sc_rx_clear
+    sc_rx_enable 1
+    sc_load_ram $words
+    sc_tx_load [concat $CAN_POLY [can_header $id [llength $data]] $data]
+    if {$before_run ne ""} { uplevel 1 $before_run }
+    sc_raw_write 3 0x10
+    sc_manual_off
+    sc_tx_go
+    set t [expr {[clock milliseconds] + $timeout_ms}]
+    set acked 0
+    while {[clock milliseconds] < $t} {
+        if {[dict get [sc_status] halted]} { set acked 1; break }
+    }
+    return [dict create acked $acked status [sc_status] engine [sc_engine] rx [sc_rx_read]]
+}
+
 # Start a receiver: 15 can_rx_bytes (6 destuffed bytes), 14 can_rx_crc (42 bits + residue),
 # both DLC 1 and both pulling the ACK.
 proc can_rx_start {slot} {

@@ -210,3 +210,29 @@ Finding: the RX programs hard-sync on the SOF and never resynchronise, sampling 
 Not yet done: the SPI loopback test needs a jumper from PMOD B pin 1 to pin 4 (without it MISO reads its pull-up, `0xFF`, as seen).
 
 Settled: at the Candor's channel start the host had seen about 15 copies of a frame 2 ms apart, which looked like SmallCore missing ACKs. A cold connect showed otherwise. `can_tx_crc` pushes `{the last seven samples, ACK}` after every attempt and waits for the host's next frame bytes rather than retransmitting by itself, so the ARM bench sends one frame per 500 ms tick and logs each one's ACK. With the Candor's channel stopped, 30 ticks went unACKed; from its START every frame was ACKed on its only attempt, and the Candor received one frame per tick with none in the first 30 ms. The copies were a backlog the Candor had kept from an earlier session that left its channel started, delivered on reconnect: a CANtap issue, not SmallCore.
+
+### Experiment: the TX CRC from the driven level, not the bus (2026-10-19)
+
+At 1 Mbit/s (CORE_DIV 1, a 125 ns core clock) `can_tx_crc` sends frames with a wrong CRC: its `ACC_CRC 0` on the third clock of each bit reads the pad, the bus as the transceiver returns it, and the loop (192 ns dominant, 152 ns recessive) is longer than a clock. The question: does separating the bit as intended from the bit as observed remove that limit?
+
+Setup, no change to the core, the ISA, the ROM or the wrappers:
+
+- A jumper on the board from PMOD A pin 1 (CTX) to PMOD A pin 3, which CAN mode already reads as gpio_in 1.
+- `experiments/can_stress/gen.py` takes `crc_pin`: `tx(crc_pin=0)`, the default, is `can_tx_crc.asm` word for word; `tx(crc_pin=1)` is `experiments/can_stress/can_tx_crc_pin1.asm`, the same 152 words but for the 10 `ACC_CRC` words. Every `SHIFT_IN`, the stuffing's run test and the ACK, still reads the bus on pin 0.
+- The program runs from RAM: `arm/can_bench.c`'s `tx_ram` (built with `--asm experiments/can_stress/can_tx_crc_pin1.asm:can_tx_ram`) loads it before each frame, parks on slot 0, prefills the frame and runs CONTROL 0x10; `can_host.tcl`'s `can_tx_ram` does the same over the VIO's manual port for the ILA captures.
+- Model: `Bus(jumper=, delay=)` in `tests/model/test_can.py`; xsim: `tb_axi_host.v`'s transceiver `delay` and the jumper as a wire, mode 6 (CAN TX from RAM), `run_axi_sim.py --limits`.
+
+Hardware, 8 (ID, data) pairs chosen for stuffing × 10 frames, ARM-hosted, each cell Candor received exact · Candor bus errors · SmallCore's ACK exits:
+
+| rate | slot 13 from ROM | slot 13 from RAM (control) | `crc_pin` 1 from RAM |
+|---|---|---|---|
+| 125 kbit/s | 80/80 · none · 80/80 | 80/80 · none · 80/80 | 80/80 · none · 80/80 |
+| 250 kbit/s | 80/80 · none · 80/80 | 80/80 · none · 80/80 | 80/80 · none · 80/80 |
+| 500 kbit/s | 80/80 · none · 80/80 | 80/80 · none · 80/80 | 80/80 · none · 80/80 |
+| 1 Mbit/s | 0 · CRC errors · 0/80 | 0 · CRC errors · 0/80 | **80/80 · none · 0/80** |
+
+At 1 Mbit/s, with the CRC accumulated from the locally driven TX level, the Candor receives 80/80 frames exactly with no CAN bus errors. ILA capture of one frame (0x123, 0x5A; `can_decode.py`): CTX matches `can_ref.py` bit for bit, CRC-15 `0x0499`, stuffing correct, every edge on a bit boundary; the bus (CRX) carries the same correct frame and the Candor's ACK. SmallCore still misses the ACK: it becomes visible on the synchronized input (`crx_s`) on clock 5 of the ACK slot, and the program samples clock 4 (`NOP [2]`, `SHIFT_IN 0`). So the CRC limitation is eliminated; successful 1 Mbit/s transmission by SmallCore is not yet shown.
+
+Simulation agrees. Model: 6A tolerates a readback delay of 1 clock (from 2 the identifier and data arrive right and the CRC wrong); `crc_pin` 1 tolerates 2, and at 3 the run test's bus sample (clock 4) breaks the stuffing. RTL (`run_axi_sim.py --limits`, one more flop on CRX): `crc_pin` 1 keeps the frame exact through a 1-clock loop where slot 13's CRC already fails, both break at 2, and both miss an ACK that arrives a clock or more late.
+
+A pitfall found on the way: running the RAM program first and staging the frame after (as the RAM load's own order invites) lets the program PULL mid-frame before its byte is in; from 500 kbit/s that stretched a bit and broke every frame, for slot 13's program in RAM too. Park on slot 0 and prefill, as `can_bench.c` now does.

@@ -92,11 +92,13 @@ class Rival:
         return None
 
 
-def run_tx(program, host_bytes, nodes, cycles=3000):
+def run_tx(program, host_bytes, nodes, cycles=3000, jumper=None, delay=0):
     """The program on the bus with `nodes` for `cycles`, the bus going on
-    after the core halts, the pad let go, so a frame the core lost to ends."""
+    after the core halts, the pad let go, so a frame the core lost to ends.
+    `jumper` and `delay` as Bus takes them: a pin wired back to the pad, a
+    transceiver loop on the pad's readback."""
     cpu = CPU(program if isinstance(program, list) else load_program(program), gpio_in=1)
-    bus = Bus(None, [], nodes, host=frame_host(host_bytes), cpu=cpu).go(cycles)
+    bus = Bus(None, [], nodes, host=frame_host(host_bytes), cpu=cpu, jumper=jumper, delay=delay).go(cycles)
     while len(bus.lines) < cycles:
         assert cpu.gpio_oe[0] == 0, "halted with the bus driven"
         drives = [node.update(bus.line) for node in bus.nodes]

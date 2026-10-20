@@ -9,11 +9,18 @@
  *           itself (a residue of 0, 0); the frame's bits are rebuilt into ID, DLC and data
  *   mode 4  transmit sweep: mode 2 for each (ID, data) in `sweep`, tx_count frames each (default 10),
  *           chosen for bit stuffing: all-dominant, all-recessive and alternating fields
+ *   tx_ram  modes 2 and 4 transmit with the program build.py assembled as can_tx_ram (--asm
+ *           <file>:can_tx_ram), loaded into RAM before each frame (a core reset empties it), instead of
+ *           slot 13: experiments/can_stress/can_tx_crc_pin1.asm, the CRC from PMOD A pin 3 jumpered to CTX
  * The volatile parameters can be set by run_arm.tcl before the run. result: [0] 0x600DC0DE when
  * there was at least one frame and none bad, 0xBAD0BAD0 otherwise; [1] good; [2] bad; [3] mode. */
 #include <stdint.h>
 #include "uart.h"
 #include "smallcore.h"
+#if __has_include("can_tx_ram.h")
+#include "can_tx_ram.h"
+#define HAVE_TX_RAM 1
+#endif
 
 /* in .data, not .bss: start.S zeroes .bss after run_arm.tcl has written them */
 #define PARAM __attribute__((section(".data")))
@@ -25,6 +32,7 @@ PARAM volatile uint32_t tx_count = 0;           /* 0: until `seconds` (mode 4: 1
 PARAM volatile uint32_t tx_period_ms = 500;
 PARAM volatile uint32_t rx_check = 1;           /* mode 1: compare with 0x123 [5A]'s stream */
 PARAM volatile uint32_t quiet = 0;              /* 1: print only bad frames and the totals */
+PARAM volatile uint32_t tx_ram = 0;             /* 1: transmit with the RAM program, not slot 13 */
 volatile uint32_t result[4];
 
 static const uint16_t sweep[][2] = {
@@ -70,15 +78,31 @@ static uint32_t transmit(uint32_t id, uint32_t d, uint32_t count, uint64_t end)
     uint32_t acked_n = 0;
     can_header(id, frame + 2);
     frame[5] = (uint8_t)d;
-    uart_puts("\nCAN TX: slot 13, ID 0x"); hex12(id);
+    uart_puts(tx_ram ? "\nCAN TX: RAM can_tx_ram, ID 0x" : "\nCAN TX: slot 13, ID 0x"); hex12(id);
     uart_puts(" data 0x"); hex8(d); uart_puts(", every "); dec(tx_period_ms); uart_puts(" ms\n");
     for (uint32_t k = 0; (count == 0 || k < count) && sc_now_us() < end; k++) {
         uint64_t t0 = sc_now_us();
         sc_reset(SC_CTRL_RX_EN);
         SC_REG(SC_COMMAND) = SC_CMD_RX_CLEAR;
-        sc_tx(frame, sizeof frame);
-        int ok = sc_wait_prefill(sizeof frame) == SC_OK && sc_run_slot(13) == SC_OK
+        int ok;
+        if (tx_ram) {
+#ifdef HAVE_TX_RAM
+            /* load; park on slot 0 (load mode ends, the RAM and its length stay); stage and
+             * prefill the frame as for slot 13; then run the RAM (a restart keeps queued bytes).
+             * Running first and staging after made the program PULL mid-frame before its byte was
+             * in: a stretched bit, the frame broken from 500 kbit/s. */
+            ok = sc_load_ram(can_tx_ram, can_tx_ram_words) == SC_OK && sc_run_slot(0) == SC_OK;
+            if (ok) sc_tx(frame, sizeof frame);
+            ok = ok && sc_wait_prefill(sizeof frame) == SC_OK && sc_run_ram() == SC_OK
                  && !(sc_core_status() & SC_CORE_HALTED);
+#else
+            ok = 0;
+#endif
+        } else {
+            sc_tx(frame, sizeof frame);
+            ok = sc_wait_prefill(sizeof frame) == SC_OK && sc_run_slot(13) == SC_OK
+                 && !(sc_core_status() & SC_CORE_HALTED);
+        }
         uint32_t saved = sc_timeout_ms;
         sc_timeout_ms = 20;                          /* a frame is under 0.5 ms; acked = halted */
         int acked = ok && sc_wait_halted() == SC_OK;

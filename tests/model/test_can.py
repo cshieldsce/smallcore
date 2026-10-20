@@ -257,12 +257,17 @@ class Bus:
     behind a transceiver: pin 0 is TXD, gpio_in 0 its pad readback, the bit
     as sent, and the bus is on gpio_in[rxd], which pin the program must have
     let go. With `cpu` a CPU already built, on any model, it runs in the
-    model's place: the candidates' bench."""
+    model's place: the candidates' bench. With the pad on the bus, `delay`
+    is a transceiver's loop: gpio_in 0 is the bus `delay` cycles late AND
+    the pad's own level, as smallcore_pads.v reads CRX AND CTX; and
+    `jumper` a pin wired back to the pad (PMOD A pin 3 to CTX on the PYNQ):
+    gpio_in[jumper] is the level the core drives, with no loop at all."""
 
-    def __init__(self, program, tx_data, nodes=(), drain=True, host=None, rxd=None, cpu=None):
+    def __init__(self, program, tx_data, nodes=(), drain=True, host=None, rxd=None, cpu=None, jumper=None, delay=0):
         self.cpu = cpu or CPU(load_program(program), gpio_in=1, tx_data=list(tx_data))
         self.nodes = list(nodes)
         self.drain, self.host, self.rxd = drain, host, rxd
+        self.jumper, self.late = jumper, [1] * delay
         self.line = 1
         self.lines, self.owned, self.txds, self.driven, self.received, self.stalls = [], [], [], [], [], []
         self.issues = []
@@ -286,7 +291,13 @@ class Bus:
                 assert not (pad == 1 and 0 in drives), f"cycle {cpu.cycle}: the pad drives a 1 against a node's dominant 0"
                 txd = 0 if pad == 0 else 1
                 self.line = 0 if txd == 0 or 0 in drives else 1
-                cpu.gpio_in[CAN_TX] = self.line
+                if self.late:
+                    self.late.append(self.line)
+                    cpu.gpio_in[CAN_TX] = self.late.pop(0) & txd
+                else:
+                    cpu.gpio_in[CAN_TX] = self.line
+                if self.jumper is not None:
+                    cpu.gpio_in[self.jumper] = txd
             else:
                 assert cpu.gpio_oe[self.rxd] == 0, f"cycle {cpu.cycle}: pin {self.rxd} drives against RXD"
                 txd = 1 if pad is None else pad

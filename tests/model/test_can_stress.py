@@ -56,12 +56,12 @@ def stuff_count(ident, data):
     return len(stuffed(frame_bits(ident, data))) - len(frame_bits(ident, data))
 
 
-def tx_ok(src, ident, data, n=BIT, cycles=None):
+def tx_ok(src, ident, data, n=BIT, cycles=None, jumper=None, delay=0):
     """The transmitter from `src` alone on the bus with a receiver that acks: the frame bit for bit, each bit
-    held its n clocks, the receiver's CRC right and acked."""
+    held its n clocks, the receiver's CRC right and acked. `jumper` and `delay` as run_tx takes them."""
     rx = rx_frame(sample=max(1, round(0.75 * n)), bit=n)
     words = program(src) if isinstance(src, str) else src
-    r = run_tx(words, unopposed_bytes(ident, data), [rx], cycles=cycles or 400 + 160 * n)
+    r = run_tx(words, unopposed_bytes(ident, data), [rx], cycles=cycles or 400 + 160 * n, jumper=jumper, delay=delay)
     bits = stuffed(frame_bits(ident, data))
     exact = cells(r.line, r.line.index(0), len(bits), n) == bits
     got = rx.received[0] if rx.received else None
@@ -793,3 +793,60 @@ def test_the_stress_programs_by_the_numbers():
     }
     assert sizes == {"tx dlc 0..8": 152, "tx loop": 151, "tx ackflag": 170, "rx dlc 1": 35, "rx dlc 8": 55,
                      "rx loop idle": 48, "rx any dlc": 237, "rx check": 76, "arb retry 5a3": 229}
+
+
+# --- the CRC from the intended bit: ACC_CRC on a pin jumpered to CTX ------------------------------
+
+
+def test_crc_pin_0_is_the_rom_program():
+    """gen.tx's default crc_pin 0 is programs/can/can_tx_crc.asm, ROM slot 13, word for word."""
+    assert assemble(gen.tx(1)) == assemble((ROOT / "programs" / "can" / "can_tx_crc.asm").read_text())
+    assert assemble(gen.tx(1, crc_pin=0)) == assemble(gen.tx(1))
+
+
+def test_crc_pin_changes_only_the_acc_crc_words():
+    """crc_pin moves ACC_CRC's pin and nothing else: every SHIFT_IN (the run test, the ACK) stays on pin 0."""
+    a, b = assemble(gen.tx(1)), assemble(gen.tx(1, crc_pin=1))
+    assert len(a) == len(b)
+    isa = load_isa()
+    changed = [(decode(x, isa), decode(y, isa)) for x, y in zip(a, b) if x != y]
+    assert changed and all(x.op == y.op == "ACC_CRC" for x, y in changed)
+
+
+def tx_received(src, ident, data, jumper=None, delay=0):
+    """The one frame the receiver took from `src`, as tx_ok runs it, or None."""
+    rx = rx_frame(sample=max(1, round(0.75 * BIT)), bit=BIT)
+    run_tx(program(src), unopposed_bytes(ident, data), [rx], cycles=400 + 160 * BIT, jumper=jumper, delay=delay)
+    return rx.received[0] if rx.received else None
+
+
+@pytest.mark.parametrize("delay", [0, 1, 2, 3])
+def test_a_readback_delay_breaks_6a_through_its_crc(delay):
+    """6A reads the CRC from the pad (ACC_CRC 0 on b3): it takes a loop of one clock, and from two the
+    receiver gets the identifier and data right and the CRC wrong (bringup_log item 9, the reason for
+    125 kbit/s). Recorded as measured."""
+    assert tx_ok(gen.tx(1), 0x123, [0x5A], delay=delay) == (delay <= 1)
+    if delay == 2:
+        got = tx_received(gen.tx(1), 0x123, [0x5A], delay=delay)
+        assert (got.ident, got.data, got.crc_ok) == (0x123, (0x5A,), False)
+
+
+@pytest.mark.parametrize("delay", [0, 1, 2])
+@pytest.mark.parametrize("ident,data", [(0x123, [0x5A]), (0x7FF, [0xFF]), (0x000, [0x00]), (0x5A3, [0xA5])])
+def test_the_crc_from_the_jumper_survives_a_two_clock_loop(ident, data, delay):
+    """With ACC_CRC on gpio_in 1 and the jumper there, the CRC comes from the bit as driven: the frame goes
+    out bit for bit, CRC right and acked, through a loop of two clocks where 6A fails."""
+    assert tx_ok(gen.tx(1, crc_pin=1), ident, data, jumper=1, delay=delay)
+
+
+def test_at_three_clocks_the_run_test_is_the_limit():
+    """The next limit, recorded: at a three-clock loop the run test (SHIFT_IN 0 on b4, the bus) reads stale
+    levels and the stuffing goes wrong, the identifier with it. The CRC pin cannot help there: stuffing
+    must follow the bus as sent, and its sample is clock 4 of 8."""
+    got = tx_received(gen.tx(1, crc_pin=1), 0x123, [0x5A], jumper=1, delay=3)
+    assert got is None or got.ident != 0x123 or not got.crc_ok
+
+
+def test_without_the_jumper_the_crc_pin_reads_nothing():
+    """The variant needs the wire: with gpio_in 1 left recessive the CRC is wrong and the frame fails."""
+    assert not tx_ok(gen.tx(1, crc_pin=1), 0x123, [0x5A])

@@ -97,6 +97,13 @@ PULLED = ["SHIFT_OUT", "PULL", "ACC_CRC 0"]  # the same with the next byte's PUL
 CRC = ["ACC_OUT 0 [2]"]  # a CRC bit from acc[15]
 
 
+def crc_from(cell, crc_pin):
+    """`cell` with its ACC_CRC reading gpio_in[crc_pin]: 0 is the pad, the bus as read back, 6A's; another
+    pin carries the level the core drives when the board wires it there (a jumper from CTX), so the CRC
+    takes the bit as intended, not as it comes back through the transceiver's loop delay."""
+    return [f"ACC_CRC {crc_pin}" if word == "ACC_CRC 0" else word for word in cell]
+
+
 def tx_cell(p, before, nxt, last, n):
     """6A's checked bit at n clocks: `before` on b1..b3, the sample on clock s, the run test,
     the stuff bit on b(n + 1). The next cell follows the stuff code; `last` means the next word is a REPEAT."""
@@ -115,20 +122,22 @@ def tx_cell(p, before, nxt, last, n):
     return lines
 
 
-def tx(dlc=1, n=8, loop=False, ackflag=False):
+def tx(dlc=1, n=8, loop=False, ackflag=False, crc_pin=0):
     """6A for `dlc` data bytes at n clocks a bit. The host writes 0x32, 0x8B once, then 3 + dlc bytes a
     frame (test_can_combined.unopposed_bytes). Acked, it halts; with `loop` it always goes round. With
     `ackflag` (n = 8), a missing ACK is answered as CAN asks: an error flag, six dominant bits from the ACK
     delimiter, then eleven recessive bits waited out, 0xFF to the host (bit 0: not acked) and the frame
-    again from the host's next bytes."""
+    again from the host's next bytes. `crc_pin` is the gpio_in pin ACC_CRC reads (crc_from); every
+    SHIFT_IN, the stuffing's run test and the ACK, reads the bus on pin 0 whatever it is."""
     s = tx_sample(n)
+    data, pulled = crc_from(DATA, crc_pin), crc_from(PULLED, crc_pin)
     lines = ["CONFIG open_drain01, 1", "CONFIG shift_dir, 1", "PULL", "ACC_LOAD", "PULL", "ACC_LOAD",
              "frame: SHIFT_IN 0", "PULL",
-             "lead: SHIFT_OUT [1]", "ACC_CRC 0"] + hold("SHIFT_IN 0", n - 4) + ["REPEAT 2, lead"]
+             "lead: SHIFT_OUT [1]", f"ACC_CRC {crc_pin}"] + hold("SHIFT_IN 0", n - 4) + ["REPEAT 2, lead"]
     for k in range(8):
-        lines += tx_cell(f"b{k}", PULLED if k == 0 else DATA, "end" if k == 7 else f"b{k + 1}", k == 7, n)
+        lines += tx_cell(f"b{k}", pulled if k == 0 else data, "end" if k == 7 else f"b{k + 1}", k == 7, n)
     lines += [f"end: REPEAT {2 + dlc}, b0"]
-    lines += tx_cell("tail", DATA, "crc", False, n)
+    lines += tx_cell("tail", data, "crc", False, n)
     lines += tx_cell("crc", CRC, "crc_end", True, n)
     lines += ["crc_end: REPEAT 15, crc"]
     lines += hold("SET 0, 1", n)  # the CRC delimiter
@@ -386,3 +395,7 @@ if __name__ == "__main__":
           "below 16 and the clear loop no longer clears acc.")
     write("can_rx_dlc_rtr", rx_dlc_rtr(), "can_rx_dlc with remote frames (a tree cell on RTR, a 21-bit path to\n"
           "the fixed form): 272 lines, past 256 words. The failed attempt, kept.")
+    write("can_tx_crc_pin1", tx(1, crc_pin=1), "6A with ACC_CRC on gpio_in 1: the CRC from the level the core drives,\n"
+          "carried back by a jumper from CTX (PMOD A pin 1) to PMOD A pin 3, instead of the bus through the\n"
+          "transceiver's loop delay; the run test and the ACK still read the bus on pin 0. An experiment, loaded\n"
+          "into RAM (not a ROM slot): does separating the intended bit from the observed one lift 1 Mbit/s?")

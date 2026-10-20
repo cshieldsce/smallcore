@@ -1,7 +1,7 @@
 // xsim bench for the ARM host path below the AXI clock converter: AXI4-Lite master tasks ->
 // smallcore_axi.v (its host_engine) -> rtl/smallcore.v -> smallcore_pads.v -> the pins, on the
 // core clock. The tasks use the registers the way the ARM driver does (arm/smallcore.c).
-// Run by run_axi_sim.py, which writes params.txt (mode n rx_n ack_at limit) and the inputs:
+// Run by run_axi_sim.py, which writes params.txt (mode n rx_n ack_at limit [delay]) and the inputs:
 //   0  registers: ID, VERSION, SCRATCH, CTRL, SLOT, RAW, staging full/flush, TX_COMMITTED, flags
 //   1  SPI from ROM slot 8 on PMOD B with the jumper: tx.mem's n bytes, each run and read back
 //   2  RAM load of prog.mem (n words, spi_duplex_msb), then rx_n bytes from tx.mem through it
@@ -9,6 +9,11 @@
 //      ack_at after the SOF edge for 8 clocks; ctx.txt and bus.txt from RUN
 //   4  CAN RX, ROM slot 15: rx.mem's rx_n bits, 8 clocks each, then the RX ring over RX_DATA
 //   5  CAN RX, ROM slot 14 (can_rx_crc): the polynomial staged first, then as 4
+//   6  CAN TX from RAM: prog.mem's n words loaded over TX_DATA and run (CONTROL 0x10), then
+//      tx.mem's rx_n host bytes staged for it; the other node and the traces as 3
+// delay: the transceiver's loop, CRX the bus that many clocks late (then smallcore_pads.v's flop);
+// 0, the default, is CRX straight off the bus. PMOD A pin 3 (ja_gpio[0], gpio_in 1) is jumpered
+// to pin 1 (CTX), as on the bench: it reads the level the core drives, with no loop.
 // Self-checks print PASS/FAIL; RESULT lines carry what run_axi_sim.py checks.
 `timescale 1ns / 1ps
 module tb;
@@ -54,6 +59,11 @@ module tb;
     wire can_ctx;
     reg  ext = 1'b1;
     wire bus = can_ctx & ext;
+    // the transceiver loop: CRX is the bus `delay` clocks late
+    integer delay = 0;
+    reg  [15:0] hist = 16'hFFFF;
+    always @(posedge clk) hist <= {hist[14:0], bus};
+    wire crx = (delay <= 0) ? bus : hist[delay-1];
     wire [3:0] jb;
     // the jumper: pad 3 follows pad 0 (the SPI programs release pad 3 before reading it; a weak
     // drive would lose to the pull-up, which is the stronger of the two)
@@ -62,7 +72,7 @@ module tb;
 
     smallcore_pads pads (
         .clk(clk), .pad_sel(pad_sel), .gpio_out(gpio_out), .gpio_oe(gpio_oe), .gpio_in(gpio_in),
-        .can_ctx(can_ctx), .can_crx(bus), .ja_gpio(3'b111), .jb(jb));
+        .can_ctx(can_ctx), .can_crx(crx), .ja_gpio({2'b11, can_ctx}), .jb(jb));
 
     integer errors = 0;
 
@@ -219,12 +229,12 @@ module tb;
     always @(posedge clk) cyc <= cyc + 1;
 
     always @(posedge clk) begin
-        if (mode == 3 && sof < 0 && start > 0 && cyc > start && !bus) sof <= cyc;
-        if (mode == 3 && ack_at > 0 && sof >= 0)
+        if ((mode == 3 || mode == 6) && sof < 0 && start > 0 && cyc > start && !bus) sof <= cyc;
+        if ((mode == 3 || mode == 6) && ack_at > 0 && sof >= 0)
             ext <= !(cyc - sof >= ack_at && cyc - sof < ack_at + 8);
         if ((mode == 4 || mode == 5) && start > 0 && cyc >= start)
             ext <= ((cyc - start) / 8 < rx_n) ? rxm[(cyc - start) / 8] : 1'b1;
-        if (start > 0 && (mode == 3 || mode == 4 || mode == 5)) begin
+        if (start > 0 && (mode == 3 || mode == 4 || mode == 5 || mode == 6)) begin
             $fwrite(f_ctx, "%0d", can_ctx);
             $fwrite(f_bus, "%0d", bus);
         end
@@ -234,9 +244,10 @@ module tb;
         cyc = 0; sof = -1; start = 0;
         f = $fopen("params.txt", "r");
         i = $fscanf(f, "%d %d %d %d %d", mode, n, rx_n, ack_at, limit);
+        if ($fscanf(f, "%d", delay) != 1) delay = 0;
         $fclose(f);
         if (mode != 0 && mode != 4) $readmemh("tx.mem", txm);
-        if (mode == 2) $readmemh("prog.mem", prog);
+        if (mode == 2 || mode == 6) $readmemh("prog.mem", prog);
         if (mode == 4 || mode == 5) $readmemb("rx.mem", rxm);
         f_ctx = $fopen("ctx.txt", "w");
         f_bus = $fopen("bus.txt", "w");
@@ -352,6 +363,33 @@ module tb;
             wait_reg(STATUS, 32'h40, 32'h0, 1000);
             axi_read(CORE_STATUS, v);
             check(!v[2], "RUN busy clear: CORE_STATUS shows slot 13 running, not slot 0's halt");
+            repeat (limit) @(posedge clk);
+            axi_read(TX_COMMITTED, v); $display("RESULT committed after %0d", v);
+            axi_read(CORE_STATUS, v);  $display("RESULT halted %0d", v[2]);
+            axi_read(RX_COUNT, v); count = v;
+            $write("RESULT rx");
+            for (k = 0; k < count; k = k + 1) begin axi_read(RX_DATA, v); $write(" %02x", v[7:0]); end
+            $write("\n");
+        end
+
+        if (mode == 6) begin
+            ctrl_keep = 3'b010;             // PMOD A, RX drain on
+            sc_reset;
+            axi_write(COMMAND, 32'h2);
+            sc_run(8'h20);
+            wait_idle;
+            for (k = 0; k < n; k = k + 1) begin
+                axi_write(TX_DATA, prog[k][7:0]);
+                axi_write(TX_DATA, prog[k][15:8]);
+            end
+            wait_reg(TX_COMMITTED, 32'hFFFF, 2 * n, 20000);
+            wait_idle;
+            check(dut.host_i.prog_words == n, "load: host.v holds every word");
+            // run first (load mode ends at this CONTROL write), then stage the frame for the PULLs
+            @(negedge clk); start = cyc;
+            sc_run(8'h10);
+            axi_write(COMMAND, 32'h8);      // TX_COMMITTED from 0 for the frame's bytes
+            for (k = 0; k < rx_n; k = k + 1) axi_write(TX_DATA, txm[k]);
             repeat (limit) @(posedge clk);
             axi_read(TX_COMMITTED, v); $display("RESULT committed after %0d", v);
             axi_read(CORE_STATUS, v);  $display("RESULT halted %0d", v[2]);

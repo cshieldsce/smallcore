@@ -8,7 +8,10 @@ independent reference, fpga/pynq_z2/can_ref.py, as run_sim.py does.
 Cases: the register map and its flags; SPI from ROM slot 8 on PMOD B through the jumper;
 spi_duplex_msb loaded into RAM over TX_DATA and run; CAN TX (slot 13, acked) and CAN RX
 (slot 15) and CAN RX with the CRC checked by SmallCore (slot 14) on PMOD A for IDs 0x123,
-0x5A3, 0x7FF and 0x000 with data 0x5A.
+0x5A3, 0x7FF and 0x000 with data 0x5A; and experiments/can_stress/can_tx_crc_pin1.asm (6A with
+the CRC from gpio_in 1, PMOD A pin 3 jumpered to CTX) loaded into RAM and run, through a
+transceiver loop of 0 to 2 clocks. --limits also prints how slot 13 and the RAM variant do
+through loops of 0 to 3 clocks.
 """
 
 import argparse
@@ -38,8 +41,8 @@ def build(vivado):
                    check=True, capture_output=True)
 
 
-def run(vivado, mode, n=0, rx_n=0, ack_at=0, limit=0, tx=(), rx_bits=(), prog=()):
-    (WORK / "params.txt").write_text(f"{mode} {n} {rx_n} {ack_at} {limit}\n")
+def run(vivado, mode, n=0, rx_n=0, ack_at=0, limit=0, tx=(), rx_bits=(), prog=(), delay=0):
+    (WORK / "params.txt").write_text(f"{mode} {n} {rx_n} {ack_at} {limit} {delay}\n")
     (WORK / "tx.mem").write_text("\n".join(f"{b:02x}" for b in tx) + "\n")
     (WORK / "rx.mem").write_text("\n".join(map(str, rx_bits)) + "\n")
     (WORK / "prog.mem").write_text("\n".join(f"{w:04x}" for w in prog) + "\n")
@@ -58,8 +61,8 @@ def run(vivado, mode, n=0, rx_n=0, ack_at=0, limit=0, tx=(), rx_bits=(), prog=()
             results.setdefault(key, []).append(rest)
     passes = sum(l.startswith("PASS") for l in lines)
     ok = lines[-1] == "RESULT PASS"
-    ctx = [int(c) for c in (WORK / "ctx.txt").read_text().strip()] if mode in (3, 4) else []
-    bus = [int(c) for c in (WORK / "bus.txt").read_text().strip()] if mode in (3, 4) else []
+    ctx = [int(c) for c in (WORK / "ctx.txt").read_text().strip()] if mode in (3, 4, 6) else []
+    bus = [int(c) for c in (WORK / "bus.txt").read_text().strip()] if mode in (3, 4, 6) else []
     return ok, passes, results, ctx, bus
 
 
@@ -87,6 +90,53 @@ def can_tx(vivado, ident, data):
     ok &= check(f"TX_COMMITTED = {len(seq)} after", res["committed"][1] == f"after {len(seq)}", res["committed"][1])
     print(f"     post-ACK byte over RX_DATA:{res['rx'][0]}")
     return ok
+
+
+def can_tx_frame_checks(ident, data, ok, res, ctx, bus, acked=True):
+    """The checks can_tx makes on a transmitted frame, for any way of running the transmitter; `acked`
+    is the exit expected, the ACK taken (halted) or missed."""
+    want = ref.frame(ident, data, True)
+    got_bus, sof = ref.sample(bus, len(want))
+    got_ctx, _ = ref.sample(ctx, len(want), sof=sof)
+    f, errors = ref.destuff(got_bus)
+    ok &= check("bus matches the reference frame bit for bit", got_bus == want,
+                "" if got_bus == want else f"\n      want {''.join(map(str, want))}\n      got  {''.join(map(str, got_bus))}")
+    ok &= check("CTX matches the reference up to the ACK slot", got_ctx[:len(want) - 9] == want[:len(want) - 9])
+    ok &= check("decoded fields, CRC-15 and stuffing", f["id"] == ident and f["data"] == list(data) and not errors,
+                f"id=0x{f['id']:03X} dlc={f['dlc']} crc=0x{f['crc'] or 0:04X} {errors}")
+    ok &= check("smallcore leaves the ACK slot recessive", got_ctx[len(want) - 9] == 1)
+    ok &= check("acked: halted" if acked else "ACK missed: not halted", res["halted"][0] == ("1" if acked else "0"))
+    return ok
+
+
+def variant_words():
+    """experiments/can_stress/can_tx_crc_pin1.asm, assembled: 6A with ACC_CRC on gpio_in 1."""
+    return assemble((ROOT / "experiments" / "can_stress" / "can_tx_crc_pin1.asm").read_text())
+
+
+def can_tx_ram(vivado, ident, data, delay, words=None, quiet=False, ack_lag=0, acked=True):
+    """The RAM-loaded variant transmitting through a loop of `delay` clocks, the other node ACKing
+    `ack_lag` clocks into the slot (its own lag behind the bus; smallcore sees the ACK `delay` later)."""
+    words = words or variant_words()
+    seq = ref.POLY + ref.tx_host_bytes(ident, data)
+    slot = len(ref.frame(ident, data, True)) - 9
+    ok, passes, res, ctx, bus = run(vivado, 6, n=len(words), rx_n=len(seq), ack_at=8 * slot + ack_lag, limit=2500,
+                                    tx=seq, prog=words, delay=delay)
+    if not quiet:
+        print(f"CAN TX from RAM, crc_pin 1 + jumper, id=0x{ident:03X} data={[hex(d) for d in data]}, "
+              f"loop {delay} clocks, ACK {ack_lag} late")
+    ok &= self_checked("driver flow", ok, passes)
+    ok &= check(f"TX_COMMITTED = {len(seq)} after", res["committed"][0] == f"after {len(seq)}", res["committed"][0])
+    return can_tx_frame_checks(ident, data, ok, res, ctx, bus, acked)
+
+
+def can_tx_rom(vivado, ident, data, delay, ack_lag=0):
+    """Slot 13 as can_tx runs it, through a loop of `delay` clocks: for --limits."""
+    seq = ref.POLY + ref.tx_host_bytes(ident, data)
+    slot = len(ref.frame(ident, data, True)) - 9
+    ok, passes, res, ctx, bus = run(vivado, 3, n=len(seq), ack_at=8 * slot + ack_lag, limit=2500, tx=seq, delay=delay)
+    return can_tx_frame_checks(ident, data, ok, res, ctx, bus)
+
 
 
 def can_rx_crc(vivado, ident, data):
@@ -126,6 +176,7 @@ def can_rx(vivado, ident, data):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--vivado", default=default_vivado())
+    ap.add_argument("--limits", action="store_true")
     a = ap.parse_args()
     build(a.vivado)
     ok = True
@@ -148,5 +199,29 @@ if __name__ == "__main__":
         ok &= can_tx(a.vivado, ident, [0x5A])
         ok &= can_rx(a.vivado, ident, [0x5A])
         ok &= can_rx_crc(a.vivado, ident, [0x5A])
+    for ident, data in ((0x123, [0x5A]), (0x7FF, [0xFF]), (0x000, [0x00]), (0x5A3, [0xA5])):
+        # the frame exact through a one-clock loop, where slot 13's CRC already fails; the ACK
+        # sampled as 6A samples it is missed there (bringup_log item 10), recorded as found
+        ok &= can_tx_ram(a.vivado, ident, data, 0)
+        ok &= can_tx_ram(a.vivado, ident, data, 1, acked=False)
+    if a.limits:
+        import contextlib
+        import io
+        for delay in range(4):
+            for lag in range(4):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rom = can_tx_rom(a.vivado, 0x123, [0x5A], delay, ack_lag=lag)
+                    rom_log = out.getvalue()
+                    out.truncate(0); out.seek(0)
+                    ram = can_tx_ram(a.vivado, 0x123, [0x5A], delay, quiet=True, ack_lag=lag)
+                    ram_log = out.getvalue()
+                def verdict(passed, log):
+                    if passed:
+                        return "frame ok, acked"
+                    frame_bad = "FAIL  bus matches" in log or "FAIL  decoded" in log
+                    return "FRAME BAD" if frame_bad else "frame ok, ACK missed"
+                print(f"LIMIT loop {delay}, ACK lag {lag}: slot 13: {verdict(rom, rom_log)}; "
+                      f"RAM crc_pin 1: {verdict(ram, ram_log)}")
     print("ALL PASS" if ok else "FAILURES")
     sys.exit(0 if ok else 1)
