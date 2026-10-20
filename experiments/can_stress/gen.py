@@ -122,14 +122,21 @@ def tx_cell(p, before, nxt, last, n):
     return lines
 
 
-def tx(dlc=1, n=8, loop=False, ackflag=False, crc_pin=0):
+def tx(dlc=1, n=8, loop=False, ackflag=False, crc_pin=0, ack_sample=None):
     """6A for `dlc` data bytes at n clocks a bit. The host writes 0x32, 0x8B once, then 3 + dlc bytes a
     frame (test_can_combined.unopposed_bytes). Acked, it halts; with `loop` it always goes round. With
     `ackflag` (n = 8), a missing ACK is answered as CAN asks: an error flag, six dominant bits from the ACK
     delimiter, then eleven recessive bits waited out, 0xFF to the host (bit 0: not acked) and the frame
     again from the host's next bytes. `crc_pin` is the gpio_in pin ACC_CRC reads (crc_from); every
-    SHIFT_IN, the stuffing's run test and the ACK, reads the bus on pin 0 whatever it is."""
+    SHIFT_IN, the stuffing's run test and the ACK, reads the bus on pin 0 whatever it is.
+    `ack_sample` is the clock of the ACK slot whose SHIFT_IN takes the ACK, by default the data bits'
+    sample (tx_sample: the 4th at n = 8). Nothing follows the ACK sample but the PUSH, so it can sit
+    later than the data bits' without the four clocks their stuffing decision needs: an ACK coming
+    back through two transceivers arrives late at a short bit time. Only the slot's two words
+    change; the data bits, stuffing and CRC keep their schedule."""
     s = tx_sample(n)
+    ack = s if ack_sample is None else ack_sample
+    assert 1 <= ack <= n, ack_sample
     data, pulled = crc_from(DATA, crc_pin), crc_from(PULLED, crc_pin)
     lines = ["CONFIG open_drain01, 1", "CONFIG shift_dir, 1", "PULL", "ACC_LOAD", "PULL", "ACC_LOAD",
              "frame: SHIFT_IN 0", "PULL",
@@ -142,10 +149,10 @@ def tx(dlc=1, n=8, loop=False, ackflag=False, crc_pin=0):
     lines += ["crc_end: REPEAT 15, crc"]
     lines += hold("SET 0, 1", n)  # the CRC delimiter
     if ackflag:
-        assert n == 8
+        assert n == 8 and ack == 4, "the ACK flag's slot is written for the 4th clock"
         lines += ["NOP [2]", "SHIFT_IN 0", "SKIP 0, 0 [3]", "JMP aerr"]  # the slot on clock 4; acked: the PUSH on clock 9
     else:
-        lines += hold("NOP", s - 1) + hold("SHIFT_IN 0", n - s + 1)  # the ACK slot, sampled on clock s
+        lines += (hold("NOP", ack - 1) if ack > 1 else []) + hold("SHIFT_IN 0", n - ack + 1)  # the ACK slot, sampled on clock ack
     lines += hold("PUSH", n)  # the ACK delimiter: {the last seven samples, ACK} to the host
     lines += hold("NOP", n - 1, "gap") + ["REPEAT 10, gap"]  # EOF and the intermission
     if loop:
@@ -399,3 +406,8 @@ if __name__ == "__main__":
           "carried back by a jumper from CTX (PMOD A pin 1) to PMOD A pin 3, instead of the bus through the\n"
           "transceiver's loop delay; the run test and the ACK still read the bus on pin 0. An experiment, loaded\n"
           "into RAM (not a ROM slot): does separating the intended bit from the observed one lift 1 Mbit/s?")
+    for ack in (5, 6):
+        write(f"can_tx_crc_pin1_ack{ack}", tx(1, crc_pin=1, ack_sample=ack),
+              f"can_tx_crc_pin1 with the ACK sampled on clock {ack} of the slot instead of 4: at 1 Mbit/s the\n"
+              "Candor's ACK reaches crx_s on clock 5 (README, the CRC experiment). Only the slot's two words\n"
+              "differ; loaded into RAM like can_tx_crc_pin1.")

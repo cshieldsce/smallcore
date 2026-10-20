@@ -11,7 +11,8 @@ spi_duplex_msb loaded into RAM over TX_DATA and run; CAN TX (slot 13, acked) and
 0x5A3, 0x7FF and 0x000 with data 0x5A; and experiments/can_stress/can_tx_crc_pin1.asm (6A with
 the CRC from gpio_in 1, PMOD A pin 3 jumpered to CTX) loaded into RAM and run, through a
 transceiver loop of 0 to 2 clocks. --limits also prints how slot 13 and the RAM variant do
-through loops of 0 to 3 clocks.
+through loops of 0 to 3 clocks, and for the ACK sampled on clocks 4, 5 and 6 of the slot
+(can_tx_crc_pin1{,_ack5,_ack6}.asm) the latest ACK still taken.
 """
 
 import argparse
@@ -109,9 +110,11 @@ def can_tx_frame_checks(ident, data, ok, res, ctx, bus, acked=True):
     return ok
 
 
-def variant_words():
-    """experiments/can_stress/can_tx_crc_pin1.asm, assembled: 6A with ACC_CRC on gpio_in 1."""
-    return assemble((ROOT / "experiments" / "can_stress" / "can_tx_crc_pin1.asm").read_text())
+def variant_words(ack=4):
+    """experiments/can_stress/can_tx_crc_pin1.asm, assembled: 6A with ACC_CRC on gpio_in 1; with `ack`
+    5 or 6 the _ack5/_ack6 variant, the ACK sampled on that clock of the slot."""
+    name = "can_tx_crc_pin1" + ("" if ack == 4 else f"_ack{ack}")
+    return assemble((ROOT / "experiments" / "can_stress" / f"{name}.asm").read_text())
 
 
 def can_tx_ram(vivado, ident, data, delay, words=None, quiet=False, ack_lag=0, acked=True):
@@ -223,5 +226,18 @@ if __name__ == "__main__":
                     return "FRAME BAD" if frame_bad else "frame ok, ACK missed"
                 print(f"LIMIT loop {delay}, ACK lag {lag}: slot 13: {verdict(rom, rom_log)}; "
                       f"RAM crc_pin 1: {verdict(ram, ram_log)}")
+    if a.limits:
+        # the latest ACK each sample clock takes: the other node's lag into the slot, 0..8 clocks
+        for ack in (4, 5, 6):
+            words = variant_words(ack)
+            for delay in (0, 1):
+                taken = []
+                for lag in range(9):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        if can_tx_ram(a.vivado, 0x123, [0x5A], delay, words=words, quiet=True, ack_lag=lag):
+                            taken.append(lag)
+                late = max(taken) if taken else None
+                print(f"ACK-LIMIT sample clock {ack}, loop {delay}: ACK taken at lags {taken}; latest "
+                      f"{late}" + ("" if late is None else f" (lag + loop = {late + delay} clocks late)"))
     print("ALL PASS" if ok else "FAILURES")
     sys.exit(0 if ok else 1)

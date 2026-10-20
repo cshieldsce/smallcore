@@ -850,3 +850,33 @@ def test_at_three_clocks_the_run_test_is_the_limit():
 def test_without_the_jumper_the_crc_pin_reads_nothing():
     """The variant needs the wire: with gpio_in 1 left recessive the CRC is wrong and the frame fails."""
     assert not tx_ok(gen.tx(1, crc_pin=1), 0x123, [0x5A])
+
+
+# --- the ACK sample's clock ------------------------------------------------------------------------
+
+
+def test_ack_sample_4_is_the_rom_program():
+    """ack_sample defaults to the data bits' sample, clock 4 at n = 8: the program is unchanged."""
+    assert assemble(gen.tx(1, ack_sample=4)) == assemble(gen.tx(1))
+    assert assemble(gen.tx(1, crc_pin=1, ack_sample=4)) == assemble(gen.tx(1, crc_pin=1))
+
+
+@pytest.mark.parametrize("ack", [5, 6])
+def test_ack_sample_moves_only_the_ack_slot(ack):
+    """A later ACK sample changes the slot's NOP and SHIFT_IN delays and nothing else: same length, every
+    other word the same, the data bits, stuffing and CRC on their schedule."""
+    a, b = assemble(gen.tx(1, crc_pin=1)), assemble(gen.tx(1, crc_pin=1, ack_sample=ack))
+    isa = load_isa()
+    diff = [(decode(x, isa), decode(y, isa)) for x, y in zip(a, b) if x != y]
+    assert len(a) == len(b) and [(x.op, y.op) for x, y in diff] == [("NOP", "NOP"), ("SHIFT_IN", "SHIFT_IN")]
+
+
+@pytest.mark.parametrize("ack", [4, 5, 6])
+@pytest.mark.parametrize("ident,data", [(0x123, [0x5A]), (0x7FF, [0xFF]), (0x000, [0x00]), (0x5A3, [0xA5])])
+def test_a_later_ack_sample_still_sends_and_takes_the_ack(ident, data, ack):
+    """With the receiver's ACK on time, every sample clock in the slot sends the frame bit for bit, the
+    receiver acks, and SmallCore takes the ACK exit (halts)."""
+    src = gen.tx(1, crc_pin=1, ack_sample=ack)
+    assert tx_ok(src, ident, data, jumper=1)
+    r = run_tx(program(src), unopposed_bytes(ident, data), [rx_frame(sample=6, bit=BIT)], cycles=400 + 160 * BIT, jumper=1)
+    assert r.cpu.halted

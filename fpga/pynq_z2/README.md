@@ -236,3 +236,22 @@ At 1 Mbit/s, with the CRC accumulated from the locally driven TX level, the Cand
 Simulation agrees. Model: 6A tolerates a readback delay of 1 clock (from 2 the identifier and data arrive right and the CRC wrong); `crc_pin` 1 tolerates 2, and at 3 the run test's bus sample (clock 4) breaks the stuffing. RTL (`run_axi_sim.py --limits`, one more flop on CRX): `crc_pin` 1 keeps the frame exact through a 1-clock loop where slot 13's CRC already fails, both break at 2, and both miss an ACK that arrives a clock or more late.
 
 A pitfall found on the way: running the RAM program first and staging the frame after (as the RAM load's own order invites) lets the program PULL mid-frame before its byte is in; from 500 kbit/s that stretched a bit and broke every frame, for slot 13's program in RAM too. Park on slot 0 and prefill, as `can_bench.c` now does.
+
+#### The ACK sample clock (2026-10-19)
+
+`gen.py`'s `ack_sample` moves the ACK slot's `SHIFT_IN` to a later clock and changes nothing else: `ack_sample=4`, the default, is the existing program word for word; 5 and 6 (`can_tx_crc_pin1_ack5.asm`, `_ack6.asm`, both with `crc_pin` 1) differ only in the slot's `NOP` and `SHIFT_IN` delays, so the data bits, stuffing and CRC keep their schedule. ACK sensing stays on pin 0.
+
+Hardware, same matrix and bench (ARM `tx_ram`), Candor received exact · Candor bus errors · SmallCore's ACK exits:
+
+| rate | ACK on clock 4 (above) | ACK on clock 5 | ACK on clock 6 |
+|---|---|---|---|
+| 125 kbit/s | 80/80 · none · 80/80 | 80/80 · none · 80/80 | 80/80 · none · 80/80 |
+| 250 kbit/s | 80/80 · none · 80/80 | 80/80 · none · 80/80 | 80/80 · none · 80/80 |
+| 500 kbit/s | 80/80 · none · 80/80 | 80/80 · none · 80/80 | 80/80 · none · 80/80 |
+| 1 Mbit/s | 80/80 · none · 0/80 | 80/80 · none · 0/80 | **80/80 · none · 80/80** |
+
+1 Mbit/s ILA (0x123, 0x5A, VIO `can_tx_ram`, one frame each program): CTX matches `can_ref.py` for all three, CRC-15 `0x0499`; the Candor's ACK is on `crx_s` from clock 5 of the ACK slot to clock 3 of the delimiter; clock 4 and clock 5 miss it (post-ACK byte 0x33), clock 6 takes it (0x32). So clock 6 is one clock after the ACK first shows on `crx_s`, and the program's sample clock 5 already reads a clock too early: the ACK arrives at the SHIFT_IN later than the ILA's view of `crx_s` by about a clock.
+
+xsim (`run_axi_sim.py --limits`, the other node's ACK lag into the slot 0 to 8 clocks): sample clock 4 takes the ACK only on time (lag 0) through a 0-clock loop and never through a 1-clock loop; clock 5 tolerates lag + loop of 1 clock; clock 6, 2 clocks. Each later sample clock buys one clock of ACK delay.
+
+So with the CRC from the driven level and the ACK sampled on clock 6, SmallCore sends 1 Mbit/s frames that the Candor receives exactly and acknowledges, and SmallCore takes the ACK exit, on this bench (one transceiver loop of 192/152 ns, one receiver, a jumper). Margin at 1 Mbit/s is one clock, and the jumper and RAM program are an experiment, not a change to the core, ISA, ROM or wrappers.
