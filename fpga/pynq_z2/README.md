@@ -255,3 +255,13 @@ Hardware, same matrix and bench (ARM `tx_ram`), Candor received exact · Candor 
 xsim (`run_axi_sim.py --limits`, the other node's ACK lag into the slot 0 to 8 clocks): sample clock 4 takes the ACK only on time (lag 0) through a 0-clock loop and never through a 1-clock loop; clock 5 tolerates lag + loop of 1 clock; clock 6, 2 clocks. Each later sample clock buys one clock of ACK delay.
 
 So with the CRC from the driven level and the ACK sampled on clock 6, SmallCore sends 1 Mbit/s frames that the Candor receives exactly and acknowledges, and SmallCore takes the ACK exit, on this bench (one transceiver loop of 192/152 ns, one receiver, a jumper). Margin at 1 Mbit/s is one clock, and the jumper and RAM program are an experiment, not a change to the core, ISA, ROM or wrappers.
+
+#### 1 Mbit/s soak, ACK on clock 6 (2026-10-19)
+
+The experimental CAN TX program (`can_tx_crc_pin1_ack6.asm`) loaded through RAM by `arm/can_bench.c`'s `tx_ram`; the SmallCore core and ISA unchanged. `crc_pin=1`, the CRC from the physical CTX-to-PMOD A pin 3 jumper (the intended TX level); the ACK sampled on clock 6 of the slot, on pin 0. 1 Mbit/s, 1000 frames: the 8 (ID, data) pairs above × 125 frames each, 20 ms apart.
+
+| Candor exact receives | Candor bus errors | SmallCore ACK exits | post-ACK result bytes |
+|---|---|---|---|
+| 1000/1000 | none | 1000/1000 | all 1000 the acked path's |
+
+This validates the current two-node bench and measured timing. It does not yet characterize longer cable lengths, more nodes, other transceivers/receivers, voltage/temperature variation, or worst-case propagation delay.
